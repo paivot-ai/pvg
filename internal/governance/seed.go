@@ -97,7 +97,7 @@ func Seed(force bool, pluginDir string) error {
 	// 2. Seed skill content
 	fmt.Println()
 	fmt.Println("Seeding skill content...")
-	seedSkill(vaultDir, pluginDir, today, force, counters)
+	seedSkill(vaultDir, agentSrc, today, force, counters)
 
 	// 3. Seed behavioral notes
 	fmt.Println()
@@ -307,8 +307,9 @@ created: %s
 	writeNote(vaultDir, filepath.Join("methodology", vaultName+".md"), content, force, counters)
 }
 
-func seedSkill(vaultDir, pluginDir, today string, force bool, counters *Counters) {
-	skillSrc := filepath.Join(pluginDir, "skills", "vault-knowledge", "SKILL.md")
+func seedSkill(vaultDir, agentSrc, today string, force bool, counters *Counters) {
+	// agentSrc points to <plugin>/agents/; skills/ is a sibling directory.
+	skillSrc := filepath.Join(filepath.Dir(agentSrc), "skills", "vault-knowledge", "SKILL.md")
 	if _, err := os.Stat(skillSrc); err != nil {
 		fmt.Printf("  WARN: %s not found\n", skillSrc)
 		counters.Skipped++
