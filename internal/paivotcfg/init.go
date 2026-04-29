@@ -24,10 +24,10 @@ type InitOptions struct {
 
 // InitResult reports what Init created or skipped.
 type InitResult struct {
-	Dir            string
-	ConfigPath     string
-	ConfigCreated  bool
-	GitignorePath  string
+	Dir              string
+	ConfigPath       string
+	ConfigCreated    bool
+	GitignorePath    string
 	GitignoreCreated bool
 }
 

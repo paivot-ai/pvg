@@ -401,8 +401,8 @@ func (p *panickingBacklog) Capabilities() CapabilitySet { return NewCapabilitySe
 func (p *panickingBacklog) Create(context.Context, CreateIssueInput) (Issue, error) {
 	panic("boom")
 }
-func (p *panickingBacklog) Show(context.Context, string) (Issue, error)               { panic("nope") }
-func (p *panickingBacklog) List(context.Context, ListFilter) ([]Issue, error)         { panic("nope") }
+func (p *panickingBacklog) Show(context.Context, string) (Issue, error)       { panic("nope") }
+func (p *panickingBacklog) List(context.Context, ListFilter) ([]Issue, error) { panic("nope") }
 func (p *panickingBacklog) Update(context.Context, string, UpdateIssueInput) (Issue, error) {
 	panic("nope")
 }
@@ -431,18 +431,22 @@ func (s *slowBacklog) Create(_ context.Context, _ CreateIssueInput) (Issue, erro
 	time.Sleep(s.delay)
 	return Issue{}, nil
 }
-func (s *slowBacklog) Show(context.Context, string) (Issue, error)                       { return Issue{}, nil }
-func (s *slowBacklog) List(context.Context, ListFilter) ([]Issue, error)                 { return nil, nil }
-func (s *slowBacklog) Update(context.Context, string, UpdateIssueInput) (Issue, error)   { return Issue{}, nil }
-func (s *slowBacklog) Close(context.Context, string) error                               { return nil }
-func (s *slowBacklog) Reopen(context.Context, string) error                              { return nil }
-func (s *slowBacklog) AddComment(context.Context, string, string) (Comment, error)       { return Comment{}, nil }
-func (s *slowBacklog) ListComments(context.Context, string) ([]Comment, error)           { return nil, nil }
-func (s *slowBacklog) Link(context.Context, string, string, LinkKind) error              { return nil }
-func (s *slowBacklog) Unlink(context.Context, string, string, LinkKind) error            { return nil }
-func (s *slowBacklog) Ready(context.Context, ReadyFilter) ([]Issue, error)               { return nil, nil }
-func (s *slowBacklog) Blocked(context.Context) ([]Issue, error)                          { return nil, nil }
-func (s *slowBacklog) Prime(context.Context, PrimeOptions) (string, error)               { return "", nil }
+func (s *slowBacklog) Show(context.Context, string) (Issue, error)       { return Issue{}, nil }
+func (s *slowBacklog) List(context.Context, ListFilter) ([]Issue, error) { return nil, nil }
+func (s *slowBacklog) Update(context.Context, string, UpdateIssueInput) (Issue, error) {
+	return Issue{}, nil
+}
+func (s *slowBacklog) Close(context.Context, string) error  { return nil }
+func (s *slowBacklog) Reopen(context.Context, string) error { return nil }
+func (s *slowBacklog) AddComment(context.Context, string, string) (Comment, error) {
+	return Comment{}, nil
+}
+func (s *slowBacklog) ListComments(context.Context, string) ([]Comment, error) { return nil, nil }
+func (s *slowBacklog) Link(context.Context, string, string, LinkKind) error    { return nil }
+func (s *slowBacklog) Unlink(context.Context, string, string, LinkKind) error  { return nil }
+func (s *slowBacklog) Ready(context.Context, ReadyFilter) ([]Issue, error)     { return nil, nil }
+func (s *slowBacklog) Blocked(context.Context) ([]Issue, error)                { return nil, nil }
+func (s *slowBacklog) Prime(context.Context, PrimeOptions) (string, error)     { return "", nil }
 
 func equalStrings(a, b []string) bool {
 	if len(a) != len(b) {

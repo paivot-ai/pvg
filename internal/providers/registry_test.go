@@ -12,36 +12,38 @@ type fakeBacklog struct {
 	name string
 }
 
-func (f *fakeBacklog) Name() string                                                  { return f.name }
-func (f *fakeBacklog) Capabilities() CapabilitySet                                   { return NewCapabilitySet() }
-func (f *fakeBacklog) Create(context.Context, CreateIssueInput) (Issue, error)      { return Issue{}, nil }
-func (f *fakeBacklog) Show(context.Context, string) (Issue, error)                  { return Issue{}, nil }
-func (f *fakeBacklog) List(context.Context, ListFilter) ([]Issue, error)            { return nil, nil }
+func (f *fakeBacklog) Name() string                                            { return f.name }
+func (f *fakeBacklog) Capabilities() CapabilitySet                             { return NewCapabilitySet() }
+func (f *fakeBacklog) Create(context.Context, CreateIssueInput) (Issue, error) { return Issue{}, nil }
+func (f *fakeBacklog) Show(context.Context, string) (Issue, error)             { return Issue{}, nil }
+func (f *fakeBacklog) List(context.Context, ListFilter) ([]Issue, error)       { return nil, nil }
 func (f *fakeBacklog) Update(context.Context, string, UpdateIssueInput) (Issue, error) {
 	return Issue{}, nil
 }
-func (f *fakeBacklog) Close(context.Context, string) error                          { return nil }
-func (f *fakeBacklog) Reopen(context.Context, string) error                         { return nil }
-func (f *fakeBacklog) AddComment(context.Context, string, string) (Comment, error)  { return Comment{}, nil }
-func (f *fakeBacklog) ListComments(context.Context, string) ([]Comment, error)      { return nil, nil }
-func (f *fakeBacklog) Link(context.Context, string, string, LinkKind) error         { return nil }
-func (f *fakeBacklog) Unlink(context.Context, string, string, LinkKind) error       { return nil }
-func (f *fakeBacklog) Ready(context.Context, ReadyFilter) ([]Issue, error)          { return nil, nil }
-func (f *fakeBacklog) Blocked(context.Context) ([]Issue, error)                     { return nil, nil }
-func (f *fakeBacklog) Prime(context.Context, PrimeOptions) (string, error)          { return "", nil }
+func (f *fakeBacklog) Close(context.Context, string) error  { return nil }
+func (f *fakeBacklog) Reopen(context.Context, string) error { return nil }
+func (f *fakeBacklog) AddComment(context.Context, string, string) (Comment, error) {
+	return Comment{}, nil
+}
+func (f *fakeBacklog) ListComments(context.Context, string) ([]Comment, error) { return nil, nil }
+func (f *fakeBacklog) Link(context.Context, string, string, LinkKind) error    { return nil }
+func (f *fakeBacklog) Unlink(context.Context, string, string, LinkKind) error  { return nil }
+func (f *fakeBacklog) Ready(context.Context, ReadyFilter) ([]Issue, error)     { return nil, nil }
+func (f *fakeBacklog) Blocked(context.Context) ([]Issue, error)                { return nil, nil }
+func (f *fakeBacklog) Prime(context.Context, PrimeOptions) (string, error)     { return "", nil }
 
 // fakeNotes is a minimal NotesAdapter used only for registry-shape testing.
 type fakeNotes struct {
 	name string
 }
 
-func (f *fakeNotes) Name() string                                                    { return f.name }
-func (f *fakeNotes) Capabilities() CapabilitySet                                     { return NewCapabilitySet() }
-func (f *fakeNotes) Search(context.Context, string, int) ([]SearchHit, error)        { return nil, nil }
-func (f *fakeNotes) Create(context.Context, CreateNoteInput) (Note, error)           { return Note{}, nil }
-func (f *fakeNotes) Read(context.Context, NoteRef) (Note, error)                     { return Note{}, nil }
-func (f *fakeNotes) Append(context.Context, NoteRef, string) (Note, error)           { return Note{}, nil }
-func (f *fakeNotes) List(context.Context, string) ([]NoteRef, error)                 { return nil, nil }
+func (f *fakeNotes) Name() string                                             { return f.name }
+func (f *fakeNotes) Capabilities() CapabilitySet                              { return NewCapabilitySet() }
+func (f *fakeNotes) Search(context.Context, string, int) ([]SearchHit, error) { return nil, nil }
+func (f *fakeNotes) Create(context.Context, CreateNoteInput) (Note, error)    { return Note{}, nil }
+func (f *fakeNotes) Read(context.Context, NoteRef) (Note, error)              { return Note{}, nil }
+func (f *fakeNotes) Append(context.Context, NoteRef, string) (Note, error)    { return Note{}, nil }
+func (f *fakeNotes) List(context.Context, string) ([]NoteRef, error)          { return nil, nil }
 func (f *fakeNotes) GetProperty(context.Context, NoteRef, string) (interface{}, error) {
 	return nil, nil
 }

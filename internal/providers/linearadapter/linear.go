@@ -170,9 +170,9 @@ func (a *Adapter) Create(ctx context.Context, in providers.CreateIssueInput) (pr
 
 	var resp struct {
 		IssueCreate struct {
-			Success bool         `json:"success"`
-			Issue   linearIssue  `json:"issue"`
-			Errors  []apiError   `json:"errors,omitempty"`
+			Success bool        `json:"success"`
+			Issue   linearIssue `json:"issue"`
+			Errors  []apiError  `json:"errors,omitempty"`
 		} `json:"issueCreate"`
 	}
 	if err := a.gql(ctx, mutationIssueCreate, map[string]interface{}{"input": input}, &resp); err != nil {
@@ -302,8 +302,8 @@ func (a *Adapter) Update(ctx context.Context, id string, in providers.UpdateIssu
 
 	var resp struct {
 		IssueUpdate struct {
-			Success bool         `json:"success"`
-			Issue   linearIssue  `json:"issue"`
+			Success bool        `json:"success"`
+			Issue   linearIssue `json:"issue"`
 		} `json:"issueUpdate"`
 	}
 	if err := a.gql(ctx, mutationIssueUpdate, map[string]interface{}{

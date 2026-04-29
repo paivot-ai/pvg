@@ -18,8 +18,8 @@ type MirrorLogger interface {
 
 // MirrorRecord describes one mirror invocation attempt.
 type MirrorRecord struct {
-	Adapter   string        // e.g., "linear"
-	Operation string        // e.g., "Create"
+	Adapter   string // e.g., "linear"
+	Operation string // e.g., "Create"
 	Duration  time.Duration
 	Err       error // nil on success
 }
@@ -52,10 +52,12 @@ func NewBacklogRouter(primary BacklogAdapter, mirrors []BacklogAdapter, logger M
 func (r *BacklogRouter) Primary() BacklogAdapter { return r.primary }
 
 // Mirrors returns the underlying mirror adapters in declaration order.
-func (r *BacklogRouter) Mirrors() []BacklogAdapter { return append([]BacklogAdapter(nil), r.mirrors...) }
+func (r *BacklogRouter) Mirrors() []BacklogAdapter {
+	return append([]BacklogAdapter(nil), r.mirrors...)
+}
 
-func (r *BacklogRouter) Name() string                 { return r.primary.Name() }
-func (r *BacklogRouter) Capabilities() CapabilitySet  { return r.primary.Capabilities() }
+func (r *BacklogRouter) Name() string                { return r.primary.Name() }
+func (r *BacklogRouter) Capabilities() CapabilitySet { return r.primary.Capabilities() }
 
 // --- Reads pass straight through to the primary. ---
 
@@ -189,8 +191,8 @@ func NewNotesRouter(primary NotesAdapter, mirrors []NotesAdapter, logger MirrorL
 	return &NotesRouter{primary: primary, mirrors: mirrors, log: logger}
 }
 
-func (r *NotesRouter) Primary() NotesAdapter      { return r.primary }
-func (r *NotesRouter) Mirrors() []NotesAdapter    { return append([]NotesAdapter(nil), r.mirrors...) }
+func (r *NotesRouter) Primary() NotesAdapter       { return r.primary }
+func (r *NotesRouter) Mirrors() []NotesAdapter     { return append([]NotesAdapter(nil), r.mirrors...) }
 func (r *NotesRouter) Name() string                { return r.primary.Name() }
 func (r *NotesRouter) Capabilities() CapabilitySet { return r.primary.Capabilities() }
 
