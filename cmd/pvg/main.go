@@ -49,6 +49,7 @@ import (
 	plint "github.com/paivot-ai/pvg/internal/lint"
 	"github.com/paivot-ai/pvg/internal/loop"
 	"github.com/paivot-ai/pvg/internal/ndvault"
+	_ "github.com/paivot-ai/pvg/internal/providers/linearadapter"
 	_ "github.com/paivot-ai/pvg/internal/providers/ndadapter"
 	_ "github.com/paivot-ai/pvg/internal/providers/vltadapter"
 	"github.com/paivot-ai/pvg/internal/providercli"
