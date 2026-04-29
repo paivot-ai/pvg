@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 
 	"github.com/paivot-ai/pvg/internal/dispatcher"
@@ -59,9 +58,10 @@ func SubagentStart() error {
 }
 
 // SubagentStop untracks a dispatcher-relevant subagent when it completes.
-// For developer agents, proactively removes their worktree to prevent the
-// session-fatal CWD corruption that occurs when a worktree is removed while
-// the dispatcher's CWD points into it.
+// It intentionally does NOT remove developer worktrees here: Claude Code may
+// return control to the parent session with the subagent's CWD still active,
+// and deleting that worktree inside the hook would strand the parent session in
+// a non-existent directory before its next Bash command can run.
 func SubagentStop() error {
 	var input subagentInput
 	if err := json.NewDecoder(os.Stdin).Decode(&input); err != nil {
@@ -79,65 +79,16 @@ func SubagentStop() error {
 
 	_ = dispatcher.UntrackAgent(cwd, input.AgentID)
 
-	if input.AgentType == "paivot-graph:developer" {
-		cleanupDevWorktrees(cwd)
-	}
-
 	if worktreeAgentTypes[input.AgentType] {
 		emitCWDResetWarning(cwd, input.AgentType)
 	}
 	return nil
 }
 
-// cleanupDevWorktrees removes developer worktrees (dev-*) that have no active
-// agent. Uses git -C to operate from the project root, making it immune to
-// CWD corruption. This runs in SubagentStop so the worktree is removed before
-// Claude Code can propagate the subagent's CWD to the parent session.
-func cleanupDevWorktrees(cwd string) {
-	root := resolveGitRootQuiet()
-	if root == "" {
-		return
-	}
-
-	// Only act when dispatcher mode is active.
-	state, _, err := dispatcher.ReadStateRoot(root)
-	if err != nil || !state.Enabled {
-		return
-	}
-
-	worktreeDir := filepath.Join(root, ".claude", "worktrees")
-	entries, err := os.ReadDir(worktreeDir)
-	if err != nil {
-		return
-	}
-
-	// Check if any other developer agent is still active. If so, we cannot
-	// safely determine which worktree belongs to which agent, so skip cleanup.
-	for _, activeType := range state.ActiveAgents {
-		if activeType == "paivot-graph:developer" {
-			return // another developer is running -- do not disturb
-		}
-	}
-
-	for _, entry := range entries {
-		if !entry.IsDir() || !strings.HasPrefix(entry.Name(), "dev-") {
-			continue
-		}
-		wtPath := filepath.Join(worktreeDir, entry.Name())
-		// Use -C to run from project root, bypassing any CWD issues.
-		cmd := exec.Command("git", "-C", root, "worktree", "remove", "--force", wtPath)
-		_ = cmd.Run()
-	}
-
-	// Prune stale worktree metadata.
-	cmd := exec.Command("git", "-C", root, "worktree", "prune")
-	_ = cmd.Run()
-}
-
 // emitCWDResetWarning checks if dispatcher mode is active and outputs a
 // mandatory CWD reset instruction. This is the last line of defense against
 // session-fatal CWD corruption caused by Claude Code leaking the subagent's
-// CWD to the parent session.
+// CWD to the parent session before the dispatcher removes the worktree.
 func emitCWDResetWarning(cwd, agentType string) {
 	// Only emit when Paivot dispatcher is active.
 	state, _, err := dispatcher.ReadStateRoot(cwd)
@@ -153,7 +104,8 @@ func emitCWDResetWarning(cwd, agentType string) {
 	fmt.Printf("[CWD-RESET MANDATORY] %s agent completed.\n", agentType)
 	fmt.Printf("Your VERY FIRST Bash command MUST be:\n")
 	fmt.Printf("  cd %s && pwd\n", root)
-	fmt.Printf("If you skip this, your session WILL die. This is not optional.\n")
+	fmt.Printf("Only after that reset should the dispatcher remove the dev worktree.\n")
+	fmt.Printf("If you skip this, your session may die. This is not optional.\n")
 }
 
 // resolveGitRootQuiet returns the git repo root or empty string on failure.

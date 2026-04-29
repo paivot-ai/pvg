@@ -1311,7 +1311,7 @@ Subcommands:
   remove <path> [--json]   Remove a worktree safely (resolves project root from path, not CWD)
 
 The remove command uses the worktree path to find the project root, so it works
-even when the shell CWD has drifted into a deleted worktree. It always prunes
+without relying on the caller's current shell location once the command starts. It always prunes
 stale worktree metadata after removal.`)
 		return cliExit{code: 1}
 	}
@@ -1342,11 +1342,13 @@ func worktreeRemove(args []string) error {
 			fmt.Fprintln(os.Stderr, `pvg worktree remove <path> [--json]
 
 Safely remove a git worktree. Resolves the project root from the worktree path
-itself (not from CWD), making it immune to CWD corruption.
+itself (not from CWD), so the removal logic does not depend on the caller's shell location.
 
 After removal, runs git worktree prune to clean up stale metadata.
 
-If the worktree directory is already gone, prunes stale metadata instead.`)
+If the worktree directory is already gone, prunes stale metadata instead.
+Reset to the project root before invoking this command; a host shell whose CWD
+already points at a deleted directory may fail before pvg can start.`)
 			return nil
 		case strings.HasPrefix(arg, "-"):
 			return fmt.Errorf("unknown flag %q", arg)

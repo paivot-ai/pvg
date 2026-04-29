@@ -106,7 +106,7 @@ Called by Claude Code via `hooks.json`. Each reads JSON from stdin and writes st
 | `pvg hook session-end` | SessionEnd | Log session end, clean up dispatcher state |
 | `pvg hook user-prompt` | UserPromptSubmit | Auto-detect and manage dispatcher mode |
 | `pvg hook subagent-start` | SubagentStart | Track dispatcher-relevant agent activation (BA, Designer, Architect, Sr PM, Developer, PM) |
-| `pvg hook subagent-stop` | SubagentStop | Track dispatcher-relevant agent deactivation |
+| `pvg hook subagent-stop` | SubagentStop | Track dispatcher-relevant agent deactivation and emit mandatory CWD reset guidance for worktree agents |
 
 ### nd workflow
 
@@ -201,12 +201,22 @@ pvg worktree remove .claude/worktrees/dev-PROJ-a1b --json   # JSON output
 ```
 
 `pvg worktree remove` resolves the project root from the worktree path itself (by parsing
-the `.claude/worktrees/` convention), not from the current working directory. This makes it
-immune to the CWD-corruption failure where the shell CWD drifts into a worktree that is then
-removed, making the entire session unrecoverable.
+the `.claude/worktrees/` convention), not from the current working directory. That means the
+removal logic itself does not depend on the caller's shell location once `pvg` is running.
+It still should be invoked from a healthy shell, typically after `cd $PROJECT_ROOT && pwd`.
 
 After removal, it always runs `git worktree prune` to clean stale metadata. If the worktree
 directory is already gone, it prunes instead of erroring.
+
+During dispatcher flows, `pvg hook subagent-stop` intentionally does not delete developer
+worktrees anymore. Claude Code may hand control back to the parent session with the just-finished
+subagent CWD still active; deleting that worktree inside the hook can strand the parent shell in a
+non-existent directory before its next Bash command even starts. The safe sequence is:
+
+```bash
+cd $PROJECT_ROOT && pwd
+pvg worktree remove .claude/worktrees/dev-PROJ-a1b
+```
 
 ### Diagnostics
 
