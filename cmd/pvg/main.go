@@ -49,6 +49,9 @@ import (
 	plint "github.com/paivot-ai/pvg/internal/lint"
 	"github.com/paivot-ai/pvg/internal/loop"
 	"github.com/paivot-ai/pvg/internal/ndvault"
+	_ "github.com/paivot-ai/pvg/internal/providers/ndadapter"
+	_ "github.com/paivot-ai/pvg/internal/providers/vltadapter"
+	"github.com/paivot-ai/pvg/internal/providercli"
 	"github.com/paivot-ai/pvg/internal/rtm"
 	"github.com/paivot-ai/pvg/internal/settings"
 	"github.com/paivot-ai/pvg/internal/story"
@@ -122,6 +125,10 @@ func main() {
 		err = runDispatcher(args)
 	case "nd":
 		err = runND(args)
+	case "issues":
+		err = providercli.RunIssues(args)
+	case "notes":
+		err = providercli.RunNotes(args)
 	case "settings":
 		err = settings.Run(args)
 	case "story":
@@ -182,6 +189,8 @@ Commands:
   dispatcher on|off|status  Manage dispatcher mode
   nd root [--ensure]       Print (and optionally initialize) the shared live nd vault
   nd <args...>             Run nd against the shared live vault
+  issues <subcommand>      Backlog operations via configured adapter (nd, linear, ...)
+  notes <subcommand>       Notes operations via configured adapter (vlt, confluence, ...)
   seed [--force]         Seed vault with agent prompts and conventions
   settings [key|key=value]  View, read, or set project settings
   story <subcommand>        Shared story workflow helpers
