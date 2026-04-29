@@ -97,7 +97,8 @@ func notesSearch(ctx context.Context, r *providers.NotesRouter, args []string) e
 	fs := flag.NewFlagSet("search", flag.ContinueOnError)
 	limit := fs.Int("limit", 0, "max hits")
 	jsonOut := fs.Bool("json", false, "emit JSON")
-	if err := fs.Parse(args); err != nil {
+	known := map[string]bool{"limit": true}
+	if err := fs.Parse(reorderArgs(known, args)); err != nil {
 		return err
 	}
 	if fs.NArg() < 1 {
@@ -124,7 +125,8 @@ func notesCreate(ctx context.Context, r *providers.NotesRouter, args []string) e
 	props := newPropFlag()
 	fs.Var(props, "prop", "property as key=value (repeatable)")
 	jsonOut := fs.Bool("json", false, "emit JSON")
-	if err := fs.Parse(args); err != nil {
+	known := map[string]bool{"title": true, "body": true, "prop": true}
+	if err := fs.Parse(reorderArgs(known, args)); err != nil {
 		return err
 	}
 	if fs.NArg() < 1 {
@@ -146,7 +148,7 @@ func notesCreate(ctx context.Context, r *providers.NotesRouter, args []string) e
 func notesRead(ctx context.Context, r *providers.NotesRouter, args []string) error {
 	fs := flag.NewFlagSet("read", flag.ContinueOnError)
 	jsonOut := fs.Bool("json", false, "emit JSON")
-	if err := fs.Parse(args); err != nil {
+	if err := fs.Parse(reorderArgs(nil, args)); err != nil {
 		return err
 	}
 	if fs.NArg() < 1 {
@@ -162,7 +164,8 @@ func notesRead(ctx context.Context, r *providers.NotesRouter, args []string) err
 func notesAppend(ctx context.Context, r *providers.NotesRouter, args []string) error {
 	fs := flag.NewFlagSet("append", flag.ContinueOnError)
 	body := fs.String("body", "", "text to append")
-	if err := fs.Parse(args); err != nil {
+	known := map[string]bool{"body": true}
+	if err := fs.Parse(reorderArgs(known, args)); err != nil {
 		return err
 	}
 	if fs.NArg() < 1 || *body == "" {
@@ -176,7 +179,8 @@ func notesList(ctx context.Context, r *providers.NotesRouter, args []string) err
 	fs := flag.NewFlagSet("list", flag.ContinueOnError)
 	folder := fs.String("folder", "", "folder to scope to")
 	jsonOut := fs.Bool("json", false, "emit JSON")
-	if err := fs.Parse(args); err != nil {
+	known := map[string]bool{"folder": true}
+	if err := fs.Parse(reorderArgs(known, args)); err != nil {
 		return err
 	}
 	refs, err := r.List(ctx, *folder)

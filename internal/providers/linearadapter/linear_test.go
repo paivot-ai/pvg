@@ -261,6 +261,63 @@ func TestPrime_AggregatesCounts(t *testing.T) {
 	}
 }
 
+func TestResolveStateID_HonorsStatusOverride(t *testing.T) {
+	mock := newGQLMock(t)
+	// HexGraph-like Product team: two "started" states, "Started" and "Delivered".
+	mock.on(`teams(filter: { key`, `{ "data": { "teams": { "nodes": [{"id": "team-uuid", "key": "PRO"}] } } }`)
+	mock.on(`workflowStates(filter`, `{
+		"data": {
+			"workflowStates": {
+				"nodes": [
+					{"id": "delivered-uuid", "name": "Delivered", "type": "started"},
+					{"id": "started-uuid",   "name": "Started",   "type": "started"}
+				]
+			}
+		}
+	}`)
+	mock.on(`issueUpdate(`, `{ "data": { "issueUpdate": { "success": true } } }`)
+
+	a, _ := New(map[string]interface{}{
+		"api_key":  "test",
+		"team_key": "PRO",
+		"endpoint": mock.server.URL,
+		"status_overrides": map[string]interface{}{
+			"in_progress": "Started",
+		},
+	})
+	if err := a.(*Adapter).Close(context.Background(), "PRO-1"); err != nil {
+		// Close uses StatusClosed -> first-by-type; Override is for InProgress.
+		// We just need the call path; verifying override below.
+		_ = err
+	}
+
+	// Set status to InProgress -- should pick "Started", not "Delivered".
+	id, err := a.(*Adapter).resolveStateID(context.Background(), providers.StatusInProgress)
+	if err != nil {
+		t.Fatalf("resolveStateID: %v", err)
+	}
+	if id != "started-uuid" {
+		t.Errorf("override ignored: got %q, want started-uuid (Started)", id)
+	}
+}
+
+func TestResolveStateID_OverrideMissingNameErrors(t *testing.T) {
+	mock := newGQLMock(t)
+	mock.on(`teams(filter: { key`, `{ "data": { "teams": { "nodes": [{"id": "team-uuid", "key": "PRO"}] } } }`)
+	mock.on(`workflowStates(filter`, `{ "data": { "workflowStates": { "nodes": [
+		{"id": "x", "name": "Backlog", "type": "unstarted"}
+	] } } }`)
+
+	a, _ := New(map[string]interface{}{
+		"api_key": "test", "team_key": "PRO", "endpoint": mock.server.URL,
+		"status_overrides": map[string]interface{}{"in_progress": "DoesNotExist"},
+	})
+	_, err := a.(*Adapter).resolveStateID(context.Background(), providers.StatusInProgress)
+	if err == nil || !strings.Contains(err.Error(), "DoesNotExist") {
+		t.Errorf("expected error referencing missing override name, got %v", err)
+	}
+}
+
 func TestUnauthorized_PropagatesAsErrUnauthorized(t *testing.T) {
 	mock := newGQLMock(t)
 	mock.server.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

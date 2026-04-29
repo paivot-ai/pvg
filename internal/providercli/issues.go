@@ -125,7 +125,8 @@ func issuesCreate(ctx context.Context, r *providers.BacklogRouter, args []string
 	assignee := fs.String("assignee", "", "assignee")
 	blockedByCSV := fs.String("blocked-by", "", "comma-separated blocker IDs")
 	jsonOut := fs.Bool("json", false, "emit JSON")
-	if err := fs.Parse(args); err != nil {
+	known := map[string]bool{"body": true, "labels": true, "parent": true, "assignee": true, "blocked-by": true}
+	if err := fs.Parse(reorderArgs(known, args)); err != nil {
 		return err
 	}
 	title := strings.Join(fs.Args(), " ")
@@ -150,7 +151,7 @@ func issuesCreate(ctx context.Context, r *providers.BacklogRouter, args []string
 func issuesShow(ctx context.Context, r *providers.BacklogRouter, args []string) error {
 	fs := flag.NewFlagSet("show", flag.ContinueOnError)
 	jsonOut := fs.Bool("json", false, "emit JSON")
-	if err := fs.Parse(args); err != nil {
+	if err := fs.Parse(reorderArgs(nil, args)); err != nil {
 		return err
 	}
 	if fs.NArg() < 1 {
@@ -170,7 +171,8 @@ func issuesList(ctx context.Context, r *providers.BacklogRouter, args []string) 
 	parent := fs.String("parent", "", "filter by parent ID")
 	limit := fs.Int("limit", 0, "max results (0 = unlimited)")
 	jsonOut := fs.Bool("json", false, "emit JSON")
-	if err := fs.Parse(args); err != nil {
+	known := map[string]bool{"status": true, "label": true, "parent": true, "limit": true}
+	if err := fs.Parse(reorderArgs(known, args)); err != nil {
 		return err
 	}
 	f := providers.ListFilter{Parent: *parent, Limit: *limit}
@@ -195,7 +197,8 @@ func issuesUpdate(ctx context.Context, r *providers.BacklogRouter, args []string
 	addLabel := fs.String("add-label", "", "label to add")
 	removeLabel := fs.String("remove-label", "", "label to remove")
 	jsonOut := fs.Bool("json", false, "emit JSON")
-	if err := fs.Parse(args); err != nil {
+	known := map[string]bool{"title": true, "body": true, "status": true, "add-label": true, "remove-label": true}
+	if err := fs.Parse(reorderArgs(known, args)); err != nil {
 		return err
 	}
 	if fs.NArg() < 1 {
@@ -242,7 +245,8 @@ func issuesReopen(ctx context.Context, r *providers.BacklogRouter, args []string
 func issuesComment(ctx context.Context, r *providers.BacklogRouter, args []string) error {
 	fs := flag.NewFlagSet("comment", flag.ContinueOnError)
 	body := fs.String("body", "", "comment body")
-	if err := fs.Parse(args); err != nil {
+	known := map[string]bool{"body": true}
+	if err := fs.Parse(reorderArgs(known, args)); err != nil {
 		return err
 	}
 	if fs.NArg() < 1 || *body == "" {
@@ -259,7 +263,7 @@ func issuesComment(ctx context.Context, r *providers.BacklogRouter, args []strin
 func issuesComments(ctx context.Context, r *providers.BacklogRouter, args []string) error {
 	fs := flag.NewFlagSet("comments", flag.ContinueOnError)
 	jsonOut := fs.Bool("json", false, "emit JSON")
-	if err := fs.Parse(args); err != nil {
+	if err := fs.Parse(reorderArgs(nil, args)); err != nil {
 		return err
 	}
 	if fs.NArg() < 1 {
@@ -282,7 +286,8 @@ func issuesLink(ctx context.Context, r *providers.BacklogRouter, args []string, 
 	fs := flag.NewFlagSet("link", flag.ContinueOnError)
 	blocks := fs.String("blocks", "", "issue ID that the source blocks")
 	childOf := fs.String("child-of", "", "parent issue ID")
-	if err := fs.Parse(args); err != nil {
+	known := map[string]bool{"blocks": true, "child-of": true}
+	if err := fs.Parse(reorderArgs(known, args)); err != nil {
 		return err
 	}
 	if fs.NArg() < 1 {
@@ -310,7 +315,8 @@ func issuesReady(ctx context.Context, r *providers.BacklogRouter, args []string)
 	label := fs.String("label", "", "filter by label")
 	limit := fs.Int("limit", 0, "max results")
 	jsonOut := fs.Bool("json", false, "emit JSON")
-	if err := fs.Parse(args); err != nil {
+	known := map[string]bool{"label": true, "limit": true}
+	if err := fs.Parse(reorderArgs(known, args)); err != nil {
 		return err
 	}
 	f := providers.ReadyFilter{Limit: *limit}
@@ -374,6 +380,40 @@ func printIssues(is []providers.Issue, jsonOut bool) error {
 		fmt.Printf("%s [%s] %s\n", i.ID, i.Status, i.Title)
 	}
 	return nil
+}
+
+// reorderArgs moves all flag-looking tokens to the front of args, preserving
+// their relative order, so that Go's flag package (which stops parsing at the
+// first non-flag token) can pick up flags that appeared after positionals.
+//
+// A "flag token" is anything beginning with "-". For "-x value" or "--x value"
+// without `=`, the following token is treated as the flag's value when its
+// name is in the known set. Unknown flags are still hoisted; their following
+// token is kept attached defensively.
+func reorderArgs(knownWithValue map[string]bool, args []string) []string {
+	flags := make([]string, 0, len(args))
+	positional := make([]string, 0, len(args))
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if a == "--" {
+			positional = append(positional, args[i+1:]...)
+			break
+		}
+		if strings.HasPrefix(a, "-") {
+			flags = append(flags, a)
+			name := strings.TrimLeft(a, "-")
+			if eq := strings.Index(name, "="); eq >= 0 {
+				continue // value glued with =
+			}
+			if knownWithValue[name] && i+1 < len(args) {
+				i++
+				flags = append(flags, args[i])
+			}
+			continue
+		}
+		positional = append(positional, a)
+	}
+	return append(flags, positional...)
 }
 
 func splitCSV(s string) []string {

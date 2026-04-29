@@ -41,6 +41,17 @@ func init() {
 }
 
 // New builds a Linear adapter from the given config map.
+//
+// Optional config: status_overrides maps a provider.Status string to a Linear
+// workflow state NAME (not type). This is the right way to disambiguate teams
+// that have multiple states sharing the same Linear type -- e.g. HexGraph's
+// "Product" team has both "Started" (type=started) and "Delivered" (type=
+// started). Without an override the adapter would pick whichever the API
+// returns first, which is non-deterministic.
+//
+//	status_overrides:
+//	  in_progress: Started
+//	  closed: Accepted
 func New(cfg map[string]interface{}) (providers.BacklogAdapter, error) {
 	teamKey, _ := cfg["team_key"].(string)
 	endpoint, _ := cfg["endpoint"].(string)
@@ -58,18 +69,29 @@ func New(cfg map[string]interface{}) (providers.BacklogAdapter, error) {
 		return nil, fmt.Errorf("linear: api_key or api_key_env required")
 	}
 
+	overrides := map[string]string{}
+	if raw, ok := cfg["status_overrides"].(map[string]interface{}); ok {
+		for k, v := range raw {
+			if s, ok := v.(string); ok {
+				overrides[k] = s
+			}
+		}
+	}
+
 	return &Adapter{
-		endpoint: endpoint,
-		apiKey:   apiKey,
-		teamKey:  teamKey,
+		endpoint:        endpoint,
+		apiKey:          apiKey,
+		teamKey:         teamKey,
+		statusOverrides: overrides,
 	}, nil
 }
 
 // Adapter implements providers.BacklogAdapter.
 type Adapter struct {
-	endpoint string
-	apiKey   string
-	teamKey  string
+	endpoint        string
+	apiKey          string
+	teamKey         string
+	statusOverrides map[string]string // provider.Status -> Linear state NAME
 
 	// teamID is resolved lazily on first Create.
 	teamID string
@@ -544,11 +566,11 @@ func (a *Adapter) resolveStateID(ctx context.Context, s providers.Status) (strin
 	if err != nil {
 		return "", err
 	}
-	wantTypes := statusToLinearTypes(s)
 	var resp struct {
 		WorkflowStates struct {
 			Nodes []struct {
 				ID   string `json:"id"`
+				Name string `json:"name"`
 				Type string `json:"type"`
 			} `json:"nodes"`
 		} `json:"workflowStates"`
@@ -558,6 +580,21 @@ func (a *Adapter) resolveStateID(ctx context.Context, s providers.Status) (strin
 	}, &resp); err != nil {
 		return "", err
 	}
+
+	// 1. Honor a configured name-override if present.
+	if wantName, ok := a.statusOverrides[string(s)]; ok && wantName != "" {
+		for _, n := range resp.WorkflowStates.Nodes {
+			if n.Name == wantName {
+				return n.ID, nil
+			}
+		}
+		return "", fmt.Errorf("linear: status_override for %q references unknown state name %q on team %s", s, wantName, teamID)
+	}
+
+	// 2. Fall back to first-by-type. Ambiguous when a team has multiple
+	// states sharing the same Linear type -- callers should set
+	// status_overrides for those teams.
+	wantTypes := statusToLinearTypes(s)
 	for _, n := range resp.WorkflowStates.Nodes {
 		for _, w := range wantTypes {
 			if n.Type == w {
@@ -786,7 +823,7 @@ var (
 
 	queryTeamByKey = `query($key: String!) { teams(filter: { key: { eq: $key } }) { nodes { id key } } }`
 
-	queryWorkflowStates = `query($teamId: ID!) { workflowStates(filter: { team: { id: { eq: $teamId } } }) { nodes { id type } } }`
+	queryWorkflowStates = `query($teamId: ID!) { workflowStates(filter: { team: { id: { eq: $teamId } } }) { nodes { id name type } } }`
 
 	queryIssueLabels = `query { issueLabels(first: 200) { nodes { id name team { id } } } }`
 

@@ -10,6 +10,40 @@ import (
 	_ "github.com/paivot-ai/pvg/internal/providers/vltadapter"
 )
 
+func TestReorderArgs_HoistsFlagsPastPositionals(t *testing.T) {
+	known := map[string]bool{"body": true, "labels": true}
+	got := reorderArgs(known, []string{"my title", "--body", "the body", "--labels", "x,y"})
+	want := []string{"--body", "the body", "--labels", "x,y", "my title"}
+	if len(got) != len(want) {
+		t.Fatalf("len mismatch: got %v want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+func TestReorderArgs_HandlesEqualsForm(t *testing.T) {
+	got := reorderArgs(nil, []string{"PS-001", "--json", "--status=open"})
+	want := []string{"--json", "--status=open", "PS-001"}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+func TestReorderArgs_StopsAtDoubleDash(t *testing.T) {
+	got := reorderArgs(nil, []string{"--json", "--", "--literal", "stays"})
+	want := []string{"--json", "--literal", "stays"}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
 func TestSplitCSV(t *testing.T) {
 	cases := []struct {
 		in   string

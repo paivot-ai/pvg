@@ -95,7 +95,9 @@ func (a *Adapter) Create(ctx context.Context, in providers.CreateIssueInput) (pr
 			return created, fmt.Errorf("link blocker %s -> %s: %w", blocker, created.ID, err)
 		}
 	}
-	if len(in.BlockedBy) > 0 {
+	// nd create --json emits a thin record (ID-focused), so re-fetch the full
+	// issue so callers get a uniformly-populated providers.Issue.
+	if created.ID != "" {
 		return a.Show(ctx, created.ID)
 	}
 	return created, nil
@@ -160,7 +162,8 @@ func (a *Adapter) Reopen(ctx context.Context, id string) error {
 // --- Comments ---
 
 func (a *Adapter) AddComment(ctx context.Context, id, body string) (providers.Comment, error) {
-	if _, err := a.run(ctx, "comments", "add", id, "--body", body); err != nil {
+	// nd takes the comment text as a positional argument, not a flag.
+	if _, err := a.run(ctx, "comments", "add", id, body); err != nil {
 		return providers.Comment{}, err
 	}
 	return providers.Comment{
