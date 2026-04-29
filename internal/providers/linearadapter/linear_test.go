@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 
@@ -479,6 +480,69 @@ func TestCreate_PassesProjectAndMilestoneToInput(t *testing.T) {
 	if input["projectMilestoneId"] != "milestone-uuid" {
 		t.Errorf("projectMilestoneId = %v, want milestone-uuid", input["projectMilestoneId"])
 	}
+}
+
+// TestIntegration_LiveLinearReadOnly exercises the adapter against the real
+// Linear GraphQL endpoint. Skipped unless LINEAR_API_KEY is set in the env.
+// LINEAR_TEAM_KEY (default "PRO") and LINEAR_TEST_ISSUE_ID (e.g. "PRO-142")
+// scope what is read. The test is intentionally read-only -- no writes against
+// the user's real workspace.
+func TestIntegration_LiveLinearReadOnly(t *testing.T) {
+	apiKey := os.Getenv("LINEAR_API_KEY")
+	if apiKey == "" {
+		t.Skip("LINEAR_API_KEY not set; skipping live Linear verification")
+	}
+	teamKey := os.Getenv("LINEAR_TEAM_KEY")
+	if teamKey == "" {
+		teamKey = "PRO"
+	}
+	issueID := os.Getenv("LINEAR_TEST_ISSUE_ID")
+
+	a, err := New(map[string]interface{}{
+		"api_key":  apiKey,
+		"team_key": teamKey,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	t.Run("List", func(t *testing.T) {
+		issues, err := a.List(context.Background(), providers.ListFilter{Limit: 5})
+		if err != nil {
+			t.Fatalf("List: %v", err)
+		}
+		t.Logf("List returned %d issues from team %s", len(issues), teamKey)
+		for _, i := range issues {
+			if i.ID == "" || i.Title == "" {
+				t.Errorf("issue missing required field: %+v", i)
+			}
+		}
+	})
+
+	if issueID != "" {
+		t.Run("Show", func(t *testing.T) {
+			got, err := a.Show(context.Background(), issueID)
+			if err != nil {
+				t.Fatalf("Show(%s): %v", issueID, err)
+			}
+			t.Logf("Show(%s) -> %s [%s] project=%q milestone=%q",
+				got.ID, got.Title, got.Status, got.Project, got.Milestone)
+			if got.ID != issueID {
+				t.Errorf("ID = %q, want %q", got.ID, issueID)
+			}
+		})
+	}
+
+	t.Run("Prime", func(t *testing.T) {
+		out, err := a.Prime(context.Background(), providers.PrimeOptions{})
+		if err != nil {
+			t.Fatalf("Prime: %v", err)
+		}
+		if !strings.Contains(out, "Project Status") {
+			t.Errorf("Prime output missing header:\n%s", out)
+		}
+		t.Logf("Prime output:\n%s", out)
+	})
 }
 
 func TestUnauthorized_PropagatesAsErrUnauthorized(t *testing.T) {
