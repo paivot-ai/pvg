@@ -78,20 +78,27 @@ func New(cfg map[string]interface{}) (providers.BacklogAdapter, error) {
 		}
 	}
 
+	defaultProjectID, _ := cfg["default_project_id"].(string)
+	defaultMilestoneID, _ := cfg["default_milestone_id"].(string)
+
 	return &Adapter{
-		endpoint:        endpoint,
-		apiKey:          apiKey,
-		teamKey:         teamKey,
-		statusOverrides: overrides,
+		endpoint:           endpoint,
+		apiKey:             apiKey,
+		teamKey:            teamKey,
+		statusOverrides:    overrides,
+		defaultProjectID:   defaultProjectID,
+		defaultMilestoneID: defaultMilestoneID,
 	}, nil
 }
 
 // Adapter implements providers.BacklogAdapter.
 type Adapter struct {
-	endpoint        string
-	apiKey          string
-	teamKey         string
-	statusOverrides map[string]string // provider.Status -> Linear state NAME
+	endpoint           string
+	apiKey             string
+	teamKey            string
+	statusOverrides    map[string]string // provider.Status -> Linear state NAME
+	defaultProjectID   string            // optional: stamped onto Create when input.Project unset
+	defaultMilestoneID string            // optional: stamped onto Create when input.Milestone unset
 
 	// teamID is resolved lazily on first Create.
 	teamID string
@@ -136,6 +143,29 @@ func (a *Adapter) Create(ctx context.Context, in providers.CreateIssueInput) (pr
 	}
 	if len(labelIDs) > 0 {
 		input["labelIds"] = labelIDs
+	}
+
+	// Project + milestone: prefer per-create input, fall back to adapter default.
+	projectID, err := a.resolveProjectID(ctx, in.Project)
+	if err != nil {
+		return providers.Issue{}, err
+	}
+	if projectID == "" {
+		projectID = a.defaultProjectID
+	}
+	if projectID != "" {
+		input["projectId"] = projectID
+	}
+
+	milestoneID, err := a.resolveMilestoneID(ctx, projectID, in.Milestone)
+	if err != nil {
+		return providers.Issue{}, err
+	}
+	if milestoneID == "" {
+		milestoneID = a.defaultMilestoneID
+	}
+	if milestoneID != "" {
+		input["projectMilestoneId"] = milestoneID
 	}
 
 	var resp struct {
@@ -195,6 +225,30 @@ func (a *Adapter) List(ctx context.Context, f providers.ListFilter) ([]providers
 	}
 	if len(f.Labels) > 0 {
 		filter["labels"] = map[string]interface{}{"name": map[string]interface{}{"in": f.Labels}}
+	}
+	if f.Project != "" {
+		// Accept either a UUID or a project name; resolve to UUID when not.
+		projectID, err := a.resolveProjectID(ctx, f.Project)
+		if err != nil {
+			return nil, err
+		}
+		if projectID != "" {
+			filter["project"] = map[string]interface{}{"id": map[string]interface{}{"eq": projectID}}
+		}
+	}
+	if f.Milestone != "" {
+		// Resolve milestone within the filter's project (if any) or workspace-wide.
+		var scopedProjectID string
+		if f.Project != "" {
+			scopedProjectID, _ = a.resolveProjectID(ctx, f.Project)
+		}
+		milestoneID, err := a.resolveMilestoneID(ctx, scopedProjectID, f.Milestone)
+		if err != nil {
+			return nil, err
+		}
+		if milestoneID != "" {
+			filter["projectMilestone"] = map[string]interface{}{"id": map[string]interface{}{"eq": milestoneID}}
+		}
 	}
 
 	first := f.Limit
@@ -605,6 +659,107 @@ func (a *Adapter) resolveStateID(ctx context.Context, s providers.Status) (strin
 	return "", fmt.Errorf("linear: no workflow state for status %q on team %s", s, teamID)
 }
 
+// resolveProjectID accepts either a Linear project UUID or a project name and
+// returns the UUID. Empty input -> empty output (means "no project filter" /
+// "no project on create").
+func (a *Adapter) resolveProjectID(ctx context.Context, projectRef string) (string, error) {
+	if projectRef == "" {
+		return "", nil
+	}
+	if looksLikeUUID(projectRef) {
+		return projectRef, nil
+	}
+	var resp struct {
+		Projects struct {
+			Nodes []struct {
+				ID   string `json:"id"`
+				Name string `json:"name"`
+			} `json:"nodes"`
+		} `json:"projects"`
+	}
+	if err := a.gql(ctx, queryProjectsByName, map[string]interface{}{"name": projectRef}, &resp); err != nil {
+		return "", err
+	}
+	for _, n := range resp.Projects.Nodes {
+		if n.Name == projectRef {
+			return n.ID, nil
+		}
+	}
+	return "", fmt.Errorf("linear: project %q not found", projectRef)
+}
+
+// resolveMilestoneID accepts a UUID or a milestone name and returns the UUID.
+// When projectID is non-empty, the search is scoped to that project (so two
+// projects with same-named milestones are disambiguated).
+func (a *Adapter) resolveMilestoneID(ctx context.Context, projectID, milestoneRef string) (string, error) {
+	if milestoneRef == "" {
+		return "", nil
+	}
+	if looksLikeUUID(milestoneRef) {
+		return milestoneRef, nil
+	}
+	if projectID != "" {
+		var resp struct {
+			Project struct {
+				ProjectMilestones struct {
+					Nodes []struct {
+						ID   string `json:"id"`
+						Name string `json:"name"`
+					} `json:"nodes"`
+				} `json:"projectMilestones"`
+			} `json:"project"`
+		}
+		if err := a.gql(ctx, queryProjectMilestones, map[string]interface{}{"projectId": projectID}, &resp); err != nil {
+			return "", err
+		}
+		for _, n := range resp.Project.ProjectMilestones.Nodes {
+			if n.Name == milestoneRef {
+				return n.ID, nil
+			}
+		}
+		return "", fmt.Errorf("linear: milestone %q not found in project %s", milestoneRef, projectID)
+	}
+	// No project scope -- search workspace-wide milestones.
+	var resp struct {
+		ProjectMilestones struct {
+			Nodes []struct {
+				ID   string `json:"id"`
+				Name string `json:"name"`
+			} `json:"nodes"`
+		} `json:"projectMilestones"`
+	}
+	if err := a.gql(ctx, queryProjectMilestonesByName, map[string]interface{}{"name": milestoneRef}, &resp); err != nil {
+		return "", err
+	}
+	for _, n := range resp.ProjectMilestones.Nodes {
+		if n.Name == milestoneRef {
+			return n.ID, nil
+		}
+	}
+	return "", fmt.Errorf("linear: milestone %q not found", milestoneRef)
+}
+
+// looksLikeUUID returns true when s is shaped like a Linear UUID
+// (8-4-4-4-12 lowercase hex). Cheap structural check, not validation.
+func looksLikeUUID(s string) bool {
+	if len(s) != 36 {
+		return false
+	}
+	for i, ch := range s {
+		switch i {
+		case 8, 13, 18, 23:
+			if ch != '-' {
+				return false
+			}
+		default:
+			if !((ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f')) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 func (a *Adapter) resolveLabelIDs(ctx context.Context, teamID string, names []string) ([]string, error) {
 	if len(names) == 0 {
 		return nil, nil
@@ -656,11 +811,15 @@ func linearToProvider(l linearIssue) providers.Issue {
 		Assignee:  l.Assignee.Name,
 		CreatedAt: l.CreatedAt,
 		UpdatedAt: l.UpdatedAt,
+		Project:   l.Project.Name,
+		Milestone: l.ProjectMilestone.Name,
 		Extras: map[string]interface{}{
-			"uuid":      l.ID,
-			"priority":  l.Priority,
-			"state":     l.State.Name,
-			"team_key":  l.Team.Key,
+			"uuid":         l.ID,
+			"priority":     l.Priority,
+			"state":        l.State.Name,
+			"team_key":     l.Team.Key,
+			"project_id":   l.Project.ID,
+			"milestone_id": l.ProjectMilestone.ID,
 		},
 	}
 	if l.Parent.Identifier != "" {
@@ -756,6 +915,14 @@ type linearIssue struct {
 	Team struct {
 		Key string `json:"key"`
 	} `json:"team"`
+	Project struct {
+		ID   string `json:"id"`
+		Name string `json:"name"`
+	} `json:"project"`
+	ProjectMilestone struct {
+		ID   string `json:"id"`
+		Name string `json:"name"`
+	} `json:"projectMilestone"`
 	Parent struct {
 		Identifier string `json:"identifier"`
 	} `json:"parent"`
@@ -805,6 +972,8 @@ id identifier title description priority createdAt updatedAt
 state { name type }
 assignee { name }
 team { key }
+project { id name }
+projectMilestone { id name }
 parent { identifier }
 children { nodes { identifier } }
 labels { nodes { name } }
@@ -826,6 +995,12 @@ var (
 	queryWorkflowStates = `query($teamId: ID!) { workflowStates(filter: { team: { id: { eq: $teamId } } }) { nodes { id name type } } }`
 
 	queryIssueLabels = `query { issueLabels(first: 200) { nodes { id name team { id } } } }`
+
+	queryProjectsByName = `query($name: String!) { projects(filter: { name: { eq: $name } }, first: 25) { nodes { id name } } }`
+
+	queryProjectMilestones = `query($projectId: String!) { project(id: $projectId) { projectMilestones(first: 100) { nodes { id name } } } }`
+
+	queryProjectMilestonesByName = `query($name: String!) { projectMilestones(filter: { name: { eq: $name } }, first: 25) { nodes { id name } } }`
 
 	mutationIssueCreate = `mutation($input: IssueCreateInput!) { issueCreate(input: $input) { success issue { ` + issueFields + ` } errors { message } } }`
 

@@ -70,9 +70,9 @@ func issuesUsage(w io.Writer) {
 	fmt.Fprintln(w, `pvg issues -- normalized issue tracker CLI
 
 Subcommands:
-  create [title] [--body B] [--labels x,y] [--parent ID] [--assignee A] [--blocked-by IDs]
+  create [title] [--body B] [--labels x,y] [--parent ID] [--assignee A] [--blocked-by IDs] [--project P] [--milestone M]
   show <id> [--json]
-  list [--status S] [--label L] [--parent ID] [--limit N] [--json]
+  list [--status S] [--label L] [--parent ID] [--project P] [--milestone M] [--limit N] [--json]
   update <id> [--title T] [--body B] [--status S] [--add-label x] [--remove-label x]
   close <id>
   reopen <id>
@@ -124,8 +124,10 @@ func issuesCreate(ctx context.Context, r *providers.BacklogRouter, args []string
 	parent := fs.String("parent", "", "parent epic ID")
 	assignee := fs.String("assignee", "", "assignee")
 	blockedByCSV := fs.String("blocked-by", "", "comma-separated blocker IDs")
+	project := fs.String("project", "", "project name or ID (Linear/Jira/Asana)")
+	milestone := fs.String("milestone", "", "milestone or sprint name within the project")
 	jsonOut := fs.Bool("json", false, "emit JSON")
-	known := map[string]bool{"body": true, "labels": true, "parent": true, "assignee": true, "blocked-by": true}
+	known := map[string]bool{"body": true, "labels": true, "parent": true, "assignee": true, "blocked-by": true, "project": true, "milestone": true}
 	if err := fs.Parse(reorderArgs(known, args)); err != nil {
 		return err
 	}
@@ -140,6 +142,8 @@ func issuesCreate(ctx context.Context, r *providers.BacklogRouter, args []string
 		Parent:    *parent,
 		Assignee:  *assignee,
 		BlockedBy: splitCSV(*blockedByCSV),
+		Project:   *project,
+		Milestone: *milestone,
 	}
 	out, err := r.Create(ctx, in)
 	if err != nil {
@@ -169,13 +173,15 @@ func issuesList(ctx context.Context, r *providers.BacklogRouter, args []string) 
 	status := fs.String("status", "", "filter by status (open|in_progress|blocked|deferred|closed)")
 	label := fs.String("label", "", "filter by label")
 	parent := fs.String("parent", "", "filter by parent ID")
+	project := fs.String("project", "", "filter by project name or ID")
+	milestone := fs.String("milestone", "", "filter by milestone name or ID")
 	limit := fs.Int("limit", 0, "max results (0 = unlimited)")
 	jsonOut := fs.Bool("json", false, "emit JSON")
-	known := map[string]bool{"status": true, "label": true, "parent": true, "limit": true}
+	known := map[string]bool{"status": true, "label": true, "parent": true, "project": true, "milestone": true, "limit": true}
 	if err := fs.Parse(reorderArgs(known, args)); err != nil {
 		return err
 	}
-	f := providers.ListFilter{Parent: *parent, Limit: *limit}
+	f := providers.ListFilter{Parent: *parent, Project: *project, Milestone: *milestone, Limit: *limit}
 	if *status != "" {
 		f.Status = []providers.Status{providers.Status(*status)}
 	}
@@ -362,6 +368,12 @@ func printIssue(i providers.Issue, jsonOut bool) error {
 	}
 	if i.Parent != "" {
 		fmt.Printf("  parent: %s\n", i.Parent)
+	}
+	if i.Project != "" {
+		fmt.Printf("  project: %s\n", i.Project)
+	}
+	if i.Milestone != "" {
+		fmt.Printf("  milestone: %s\n", i.Milestone)
 	}
 	if len(i.BlockedBy) > 0 {
 		fmt.Printf("  blocked-by: %s\n", strings.Join(i.BlockedBy, ", "))

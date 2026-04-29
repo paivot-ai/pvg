@@ -84,6 +84,8 @@ type Issue struct {
 	Blocks    []string // IDs that this issue blocks
 	BlockedBy []string // IDs that block this issue
 	Assignee  string
+	Project   string // project name or key (Linear/Jira/Asana have first-class projects)
+	Milestone string // milestone or sprint name within the project
 	CreatedAt time.Time
 	UpdatedAt time.Time
 	Extras    map[string]interface{} // adapter-native fields, opaque to callers
@@ -105,6 +107,8 @@ type CreateIssueInput struct {
 	Parent    string
 	BlockedBy []string
 	Assignee  string
+	Project   string // project name or ID; adapters that have no project concept ignore it
+	Milestone string // milestone or sprint name; adapters that have no milestone concept ignore it
 	Extras    map[string]interface{}
 }
 
@@ -122,10 +126,12 @@ type UpdateIssueInput struct {
 
 // ListFilter narrows BacklogAdapter.List results.
 type ListFilter struct {
-	Status []Status
-	Labels []string
-	Parent string // "" means no filter; "-" can mean "no parent" if adapter supports it
-	Limit  int
+	Status    []Status
+	Labels    []string
+	Parent    string // "" means no filter; "-" can mean "no parent" if adapter supports it
+	Project   string // project name or ID; adapters without projects ignore it
+	Milestone string // milestone name or ID; adapters without milestones ignore it
+	Limit     int
 }
 
 // ReadyFilter narrows BacklogAdapter.Ready results.

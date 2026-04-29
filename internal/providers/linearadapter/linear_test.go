@@ -318,6 +318,169 @@ func TestResolveStateID_OverrideMissingNameErrors(t *testing.T) {
 	}
 }
 
+func TestLooksLikeUUID(t *testing.T) {
+	cases := map[string]bool{
+		"c6ff6228-3217-4b3a-830d-e19b0aebe37c": true,
+		"9c16c0c6-8618-41f3-b202-465b4c1b4a5d": true,
+		"":                                     false,
+		"PRO-142":                              false,
+		"Hextropian Platform for Oil & Gas":    false,
+		"c6ff6228-3217-4b3a-830d-e19b0aebe37C": false, // upper-case hex
+		"c6ff6228-3217-4b3a-830d-e19b0aebe37":  false, // too short
+	}
+	for in, want := range cases {
+		if got := looksLikeUUID(in); got != want {
+			t.Errorf("looksLikeUUID(%q) = %v, want %v", in, got, want)
+		}
+	}
+}
+
+func TestResolveProjectID_PassesThroughUUID(t *testing.T) {
+	mock := newGQLMock(t)
+	a, _ := New(map[string]interface{}{"api_key": "test", "endpoint": mock.server.URL})
+	got, err := a.(*Adapter).resolveProjectID(context.Background(), "c6ff6228-3217-4b3a-830d-e19b0aebe37c")
+	if err != nil {
+		t.Fatalf("resolveProjectID: %v", err)
+	}
+	if got != "c6ff6228-3217-4b3a-830d-e19b0aebe37c" {
+		t.Errorf("UUID should pass through unchanged, got %q", got)
+	}
+	if len(mock.requests) != 0 {
+		t.Errorf("UUID input should not hit the API, got %d requests", len(mock.requests))
+	}
+}
+
+func TestResolveProjectID_LooksUpByName(t *testing.T) {
+	mock := newGQLMock(t)
+	mock.on(`projects(filter: { name`, `{
+		"data": { "projects": { "nodes": [
+			{"id": "c6ff6228-3217-4b3a-830d-e19b0aebe37c", "name": "Hextropian Platform for Oil & Gas"}
+		] } }
+	}`)
+	a, _ := New(map[string]interface{}{"api_key": "test", "endpoint": mock.server.URL})
+	got, err := a.(*Adapter).resolveProjectID(context.Background(), "Hextropian Platform for Oil & Gas")
+	if err != nil {
+		t.Fatalf("resolveProjectID: %v", err)
+	}
+	if got != "c6ff6228-3217-4b3a-830d-e19b0aebe37c" {
+		t.Errorf("expected resolved UUID, got %q", got)
+	}
+}
+
+func TestResolveProjectID_NameMissErrors(t *testing.T) {
+	mock := newGQLMock(t)
+	mock.on(`projects(filter: { name`, `{ "data": { "projects": { "nodes": [] } } }`)
+	a, _ := New(map[string]interface{}{"api_key": "test", "endpoint": mock.server.URL})
+	_, err := a.(*Adapter).resolveProjectID(context.Background(), "Nope")
+	if err == nil || !strings.Contains(err.Error(), "Nope") {
+		t.Errorf("expected not-found error, got %v", err)
+	}
+}
+
+func TestResolveMilestoneID_ScopedToProject(t *testing.T) {
+	mock := newGQLMock(t)
+	mock.on(`project(id:`, `{
+		"data": { "project": { "projectMilestones": { "nodes": [
+			{"id": "9c16c0c6-8618-41f3-b202-465b4c1b4a5d", "name": "POC"},
+			{"id": "11111111-1111-1111-1111-111111111111", "name": "GA"}
+		] } } }
+	}`)
+	a, _ := New(map[string]interface{}{"api_key": "test", "endpoint": mock.server.URL})
+	got, err := a.(*Adapter).resolveMilestoneID(context.Background(), "c6ff6228-3217-4b3a-830d-e19b0aebe37c", "POC")
+	if err != nil {
+		t.Fatalf("resolveMilestoneID: %v", err)
+	}
+	if got != "9c16c0c6-8618-41f3-b202-465b4c1b4a5d" {
+		t.Errorf("got %q, want POC's UUID", got)
+	}
+}
+
+func TestLinearToProvider_SurfacesProjectAndMilestone(t *testing.T) {
+	// Real shape from HexGraph PRO-142.
+	raw := `{
+		"id": "uuid-pro-142",
+		"identifier": "PRO-142",
+		"title": "Bug",
+		"state": {"name": "Accepted", "type": "completed"},
+		"team": {"key": "PRO"},
+		"project": {"id": "c6ff6228-3217-4b3a-830d-e19b0aebe37c", "name": "Hextropian Platform for Oil & Gas"},
+		"projectMilestone": {"id": "9c16c0c6-8618-41f3-b202-465b4c1b4a5d", "name": "POC"},
+		"labels": {"nodes": [{"name": "wickland-poc"}, {"name": "bug"}]},
+		"relations": {"nodes": []},
+		"inverseRelations": {"nodes": []},
+		"children": {"nodes": []}
+	}`
+	var l linearIssue
+	if err := json.Unmarshal([]byte(raw), &l); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	got := linearToProvider(l)
+	if got.Project != "Hextropian Platform for Oil & Gas" {
+		t.Errorf("Project = %q", got.Project)
+	}
+	if got.Milestone != "POC" {
+		t.Errorf("Milestone = %q", got.Milestone)
+	}
+	if got.Extras["project_id"] != "c6ff6228-3217-4b3a-830d-e19b0aebe37c" {
+		t.Errorf("Extras.project_id = %v", got.Extras["project_id"])
+	}
+}
+
+func TestCreate_PassesProjectAndMilestoneToInput(t *testing.T) {
+	mock := newGQLMock(t)
+	// Resolution lookups (project name -> id, milestone name within project -> id)
+	mock.on(`projects(filter: { name`, `{ "data": { "projects": { "nodes": [
+		{"id": "proj-uuid", "name": "Hextropian Platform for Oil & Gas"}
+	] } } }`)
+	mock.on(`project(id:`, `{ "data": { "project": { "projectMilestones": { "nodes": [
+		{"id": "milestone-uuid", "name": "POC"}
+	] } } } }`)
+	mock.on(`teams(filter: { key`, `{ "data": { "teams": { "nodes": [{"id": "team-uuid", "key": "PRO"}] } } }`)
+	mock.on(`issueLabels(first`, `{ "data": { "issueLabels": { "nodes": [] } } }`)
+	mock.on(`issueCreate(`, `{
+		"data": { "issueCreate": { "success": true, "issue": {
+			"id": "u", "identifier": "PRO-200", "title": "x",
+			"state": {"name":"Backlog","type":"unstarted"}, "team": {"key":"PRO"},
+			"project": {"id":"proj-uuid","name":"Hextropian Platform for Oil & Gas"},
+			"projectMilestone": {"id":"milestone-uuid","name":"POC"},
+			"labels": {"nodes": []}, "relations": {"nodes": []}, "inverseRelations": {"nodes": []}, "children": {"nodes": []}
+		} } }
+	}`)
+
+	a, _ := New(map[string]interface{}{"api_key": "test", "team_key": "PRO", "endpoint": mock.server.URL})
+	out, err := a.Create(context.Background(), providers.CreateIssueInput{
+		Title:     "x",
+		Project:   "Hextropian Platform for Oil & Gas",
+		Milestone: "POC",
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if out.Project != "Hextropian Platform for Oil & Gas" || out.Milestone != "POC" {
+		t.Errorf("returned issue missing project/milestone: %+v", out)
+	}
+
+	// Find the issueCreate request and verify project/milestone in the input.
+	var createReq map[string]interface{}
+	for _, r := range mock.requests {
+		if q, _ := r["query"].(string); strings.Contains(q, "issueCreate(") {
+			createReq = r
+			break
+		}
+	}
+	if createReq == nil {
+		t.Fatal("no issueCreate call recorded")
+	}
+	vars := createReq["variables"].(map[string]interface{})
+	input := vars["input"].(map[string]interface{})
+	if input["projectId"] != "proj-uuid" {
+		t.Errorf("projectId = %v, want proj-uuid", input["projectId"])
+	}
+	if input["projectMilestoneId"] != "milestone-uuid" {
+		t.Errorf("projectMilestoneId = %v, want milestone-uuid", input["projectMilestoneId"])
+	}
+}
+
 func TestUnauthorized_PropagatesAsErrUnauthorized(t *testing.T) {
 	mock := newGQLMock(t)
 	mock.server.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
