@@ -18,3 +18,4 @@ Thumbs.db
 .vault/.vlt.lock
 .vault/.guard/
 .vault/knowledge
+.env.local
