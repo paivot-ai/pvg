@@ -545,6 +545,212 @@ func TestIntegration_LiveLinearReadOnly(t *testing.T) {
 	})
 }
 
+// TestIntegration_LiveLinearFullCycle exercises the WRITE paths against a
+// real Linear workspace. Skipped without LINEAR_API_KEY. Auto-cleans every
+// issue it creates via t.Cleanup -> issueDelete, even on partial failure, so
+// the user's workspace is left exactly as it started.
+//
+// Set LINEAR_VERIFY_PROJECT (UUID or name) and LINEAR_VERIFY_MILESTONE if you
+// want create/update to exercise the project + milestone resolution paths.
+// Otherwise the test issues land in the team's default backlog.
+func TestIntegration_LiveLinearFullCycle(t *testing.T) {
+	apiKey := os.Getenv("LINEAR_API_KEY")
+	if apiKey == "" {
+		t.Skip("LINEAR_API_KEY not set; skipping live full-cycle verification")
+	}
+	teamKey := os.Getenv("LINEAR_TEAM_KEY")
+	if teamKey == "" {
+		teamKey = "PRO"
+	}
+	verifyProject := os.Getenv("LINEAR_VERIFY_PROJECT")
+	verifyMilestone := os.Getenv("LINEAR_VERIFY_MILESTONE")
+
+	a, err := New(map[string]interface{}{
+		"api_key":  apiKey,
+		"team_key": teamKey,
+		// HexGraph's Product team has two `started` states (Started, Delivered);
+		// override so set-status -> InProgress lands in "Started" deterministically.
+		"status_overrides": map[string]interface{}{
+			"in_progress": "Started",
+		},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	la := a.(*Adapter)
+	ctx := context.Background()
+
+	// --- Create primary test issue ---
+	primary, err := a.Create(ctx, providers.CreateIssueInput{
+		Title:     "pvg-adapter-verification — safe to delete",
+		Body:      "## Description\n\nAuto-created by pvg's TestIntegration_LiveLinearFullCycle. Will be deleted on test completion.\n",
+		Labels:    nil, // skip labels to avoid creating new ones in the workspace
+		Project:   verifyProject,
+		Milestone: verifyMilestone,
+	})
+	if err != nil {
+		t.Fatalf("Create primary: %v", err)
+	}
+	t.Cleanup(func() { mustDeleteLinearIssue(t, la, primary.ID, primary.Extras["uuid"]) })
+	t.Logf("Created primary: %s [%s] %q (project=%q milestone=%q)",
+		primary.ID, primary.Status, primary.Title, primary.Project, primary.Milestone)
+
+	if primary.ID == "" {
+		t.Fatal("primary issue missing ID")
+	}
+	if primary.Title == "" {
+		t.Fatal("primary issue missing Title")
+	}
+	if verifyProject != "" && primary.Project == "" {
+		t.Errorf("LINEAR_VERIFY_PROJECT set but Issue.Project came back empty")
+	}
+	if verifyMilestone != "" && primary.Milestone == "" {
+		t.Errorf("LINEAR_VERIFY_MILESTONE set but Issue.Milestone came back empty")
+	}
+
+	// --- Show: verify the issue is fully populated when re-fetched ---
+	got, err := a.Show(ctx, primary.ID)
+	if err != nil {
+		t.Fatalf("Show after Create: %v", err)
+	}
+	if got.Title != primary.Title {
+		t.Errorf("Show Title = %q, want %q", got.Title, primary.Title)
+	}
+
+	// --- Update title + body ---
+	newTitle := primary.Title + " (renamed)"
+	newBody := got.Body + "\n\nUpdated by pvg verification.\n"
+	updated, err := a.Update(ctx, primary.ID, providers.UpdateIssueInput{
+		Title: &newTitle,
+		Body:  &newBody,
+	})
+	if err != nil {
+		t.Fatalf("Update title+body: %v", err)
+	}
+	if updated.Title != newTitle {
+		t.Errorf("after Update Title = %q, want %q", updated.Title, newTitle)
+	}
+
+	// --- Update status to InProgress (verifies status_overrides path) ---
+	inProg := providers.StatusInProgress
+	stateUpdated, err := a.Update(ctx, primary.ID, providers.UpdateIssueInput{Status: &inProg})
+	if err != nil {
+		t.Fatalf("Update status -> in_progress: %v", err)
+	}
+	t.Logf("After in_progress Update: Status=%v, native_state=%v", stateUpdated.Status, stateUpdated.Extras["state"])
+	if stateUpdated.Status != providers.StatusInProgress {
+		t.Errorf("Status not in_progress after update: %v", stateUpdated.Status)
+	}
+	if stateUpdated.Extras["state"] != "Started" {
+		t.Errorf("status_overrides did not pick 'Started' (got %q)", stateUpdated.Extras["state"])
+	}
+
+	// --- Add a comment, then list it back ---
+	commentBody := "verification comment from pvg"
+	if _, err := a.AddComment(ctx, primary.ID, commentBody); err != nil {
+		t.Fatalf("AddComment: %v", err)
+	}
+	comments, err := a.ListComments(ctx, primary.ID)
+	if err != nil {
+		t.Fatalf("ListComments: %v", err)
+	}
+	found := false
+	for _, c := range comments {
+		if strings.Contains(c.Body, commentBody) {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("appended comment not found in ListComments; got %d comments", len(comments))
+	}
+
+	// --- Create a second issue and Link it as a blocker ---
+	blocker, err := a.Create(ctx, providers.CreateIssueInput{
+		Title:   "pvg-adapter-verification BLOCKER — safe to delete",
+		Body:    "Auto-created blocker. Deleted with primary.\n",
+		Project: verifyProject,
+	})
+	if err != nil {
+		t.Fatalf("Create blocker: %v", err)
+	}
+	t.Cleanup(func() { mustDeleteLinearIssue(t, la, blocker.ID, blocker.Extras["uuid"]) })
+
+	if err := a.Link(ctx, blocker.ID, primary.ID, providers.LinkBlocks); err != nil {
+		t.Fatalf("Link blocker -> primary: %v", err)
+	}
+	primaryAfterLink, err := a.Show(ctx, primary.ID)
+	if err != nil {
+		t.Fatalf("Show after Link: %v", err)
+	}
+	if !contains(primaryAfterLink.BlockedBy, blocker.ID) {
+		t.Errorf("primary.BlockedBy %v missing %s", primaryAfterLink.BlockedBy, blocker.ID)
+	}
+	blockerAfterLink, err := a.Show(ctx, blocker.ID)
+	if err != nil {
+		t.Fatalf("Show blocker after Link: %v", err)
+	}
+	if !contains(blockerAfterLink.Blocks, primary.ID) {
+		t.Errorf("blocker.Blocks %v missing %s", blockerAfterLink.Blocks, primary.ID)
+	}
+
+	// --- Close primary, then Reopen ---
+	if err := a.Close(ctx, primary.ID); err != nil {
+		t.Fatalf("Close primary: %v", err)
+	}
+	closedPrim, _ := a.Show(ctx, primary.ID)
+	if closedPrim.Status != providers.StatusClosed {
+		t.Errorf("after Close Status = %v, want closed", closedPrim.Status)
+	}
+
+	if err := a.Reopen(ctx, primary.ID); err != nil {
+		t.Fatalf("Reopen primary: %v", err)
+	}
+	reopened, _ := a.Show(ctx, primary.ID)
+	if reopened.Status == providers.StatusClosed {
+		t.Errorf("after Reopen Status still closed")
+	}
+
+	t.Log("Full cycle PASS — primary + blocker will be deleted by t.Cleanup")
+}
+
+// mustDeleteLinearIssue archives + permanently deletes a Linear issue via
+// direct GraphQL. The provider abstraction has no Delete op (issues are
+// closed, not deleted, in the canonical model), but for cleanup of test data
+// we go straight to issueDelete.
+func mustDeleteLinearIssue(t *testing.T, a *Adapter, identifier string, uuidExtra interface{}) {
+	t.Helper()
+	uuid, _ := uuidExtra.(string)
+	if uuid == "" {
+		t.Logf("WARN: no UUID for %s in Extras; cannot delete", identifier)
+		return
+	}
+	var resp struct {
+		IssueDelete struct {
+			Success bool `json:"success"`
+		} `json:"issueDelete"`
+	}
+	const mut = `mutation($id: String!) { issueDelete(id: $id) { success } }`
+	if err := a.gql(context.Background(), mut, map[string]interface{}{"id": uuid}, &resp); err != nil {
+		t.Logf("WARN: issueDelete(%s) failed: %v -- delete manually", identifier, err)
+		return
+	}
+	if !resp.IssueDelete.Success {
+		t.Logf("WARN: issueDelete(%s) returned success=false -- delete manually", identifier)
+		return
+	}
+	t.Logf("Deleted %s (uuid=%s)", identifier, uuid)
+}
+
+func contains(haystack []string, needle string) bool {
+	for _, s := range haystack {
+		if s == needle {
+			return true
+		}
+	}
+	return false
+}
+
 func TestUnauthorized_PropagatesAsErrUnauthorized(t *testing.T) {
 	mock := newGQLMock(t)
 	mock.server.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

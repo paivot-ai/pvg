@@ -172,14 +172,13 @@ func (a *Adapter) Create(ctx context.Context, in providers.CreateIssueInput) (pr
 		IssueCreate struct {
 			Success bool        `json:"success"`
 			Issue   linearIssue `json:"issue"`
-			Errors  []apiError  `json:"errors,omitempty"`
 		} `json:"issueCreate"`
 	}
 	if err := a.gql(ctx, mutationIssueCreate, map[string]interface{}{"input": input}, &resp); err != nil {
 		return providers.Issue{}, err
 	}
 	if !resp.IssueCreate.Success {
-		return providers.Issue{}, fmt.Errorf("linear: issueCreate failed: %v", resp.IssueCreate.Errors)
+		return providers.Issue{}, fmt.Errorf("linear: issueCreate returned success=false")
 	}
 
 	created := linearToProvider(resp.IssueCreate.Issue)
@@ -1002,7 +1001,7 @@ var (
 
 	queryProjectMilestonesByName = `query($name: String!) { projectMilestones(filter: { name: { eq: $name } }, first: 25) { nodes { id name } } }`
 
-	mutationIssueCreate = `mutation($input: IssueCreateInput!) { issueCreate(input: $input) { success issue { ` + issueFields + ` } errors { message } } }`
+	mutationIssueCreate = `mutation($input: IssueCreateInput!) { issueCreate(input: $input) { success issue { ` + issueFields + ` } } }`
 
 	mutationIssueUpdate = `mutation($id: String!, $input: IssueUpdateInput!) { issueUpdate(id: $id, input: $input) { success issue { ` + issueFields + ` } } }`
 
