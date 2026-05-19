@@ -108,15 +108,106 @@ Called by Claude Code via `hooks.json`. Each reads JSON from stdin and writes st
 | `pvg hook subagent-start` | SubagentStart | Track dispatcher-relevant agent activation (BA, Designer, Architect, Sr PM, Developer, PM) |
 | `pvg hook subagent-stop` | SubagentStop | Track dispatcher-relevant agent deactivation and emit mandatory CWD reset guidance for worktree agents |
 
-### nd workflow
+### Project scaffolding
+
+```bash
+pvg init                          # Seed .paivot/config.yaml + .gitignore (idempotent)
+pvg init --force                  # Overwrite an existing config
+pvg init --with-linear-mirror     # Pre-seed an active Linear backlog mirror
+pvg init --with-confluence-mirror # Pre-seed an active Confluence notes mirror
+```
+
+`pvg init` creates a `.paivot/` directory in the repo with a heavily-commented
+`config.yaml` (provider abstraction config) and a `.gitignore` that hides any
+local secrets file. Existing files are preserved unless `--force` is passed.
+
+### Provider configuration
+
+`.paivot/config.yaml` selects the adapters pvg routes through for backlog and
+notes operations. With the file absent, pvg behaves identically to the
+pre-abstraction CLI (nd backlog + vlt notes, no mirrors).
+
+```yaml
+backlog:
+  primary:
+    adapter: nd
+    config:
+      vault: .vault
+  # mirrors: (visibility-only fan-out; failures logged but never returned)
+  #   - adapter: linear
+  #     config:
+  #       team_key: ENG
+  #       api_key_env: LINEAR_API_KEY  # env-var interpolation: ${NAME} or $NAME
+
+notes:
+  primary:
+    adapter: vlt
+    config:
+      vault: Claude
+```
+
+Reads always go to the primary. Writes go to the primary first; on success
+they fan out best-effort to mirrors. Available adapters in this build:
+`nd`, `linear` (backlog); `vlt` (notes). Placeholders for `confluence`,
+`jira`, `notion` document the planned shape.
+
+### Issues abstraction
+
+```bash
+pvg issues create "Title" --body "..." --labels x,y --parent EPIC-1
+pvg issues show <id> [--json]
+pvg issues list [--status S] [--label L] [--parent ID] [--limit N] [--json]
+pvg issues update <id> [--title T] [--body B] [--status S] [--add-label x] [--remove-label x]
+pvg issues close <id>
+pvg issues reopen <id>
+pvg issues comment <id> --body "..."
+pvg issues comments <id> [--json]
+pvg issues link <from> --blocks <to>           # <from> blocks <to>
+pvg issues link <from> --child-of <to>         # <from> is a child of <to>
+pvg issues unlink <from> --blocks <to>
+pvg issues unlink <from> --child-of <to>
+pvg issues ready [--label L] [--limit N] [--json]
+pvg issues blocked [--json]
+pvg issues prime                                # warm adapter caches / preflight auth
+```
+
+Backlog adapter is selected from `.paivot/config.yaml`; defaults to `nd` if
+absent. Backend-specific operations (nd cycles, nd stale, nd graph) remain
+under `pvg nd` -- see below.
+
+### Notes abstraction
+
+```bash
+pvg notes search "<query>" [--limit N] [--json]
+pvg notes create <path> [--title T] [--body B] [--prop key=val ...]
+pvg notes read <path> [--json]
+pvg notes append <path> --body "..."
+pvg notes list [--folder F] [--json]
+pvg notes property:get <path> <key>
+pvg notes property:set <path> <key> <value>
+```
+
+Notes adapter is selected from `.paivot/config.yaml`; defaults to `vlt` if
+absent. Graph operations on the global vault (`vlt read --follow`, `vlt
+orphans`, `vlt unresolved`, `vlt move`, heading-anchored `vlt patch`) are
+intentionally vlt-specific and continue to be invoked directly -- they have no
+clean cross-backend abstraction.
+
+### nd workflow (backend-specific passthrough)
 
 ```bash
 pvg nd root --ensure                     # Print/init the nd vault path
 pvg nd ready --json                      # Pass through to nd with --vault injected
 pvg nd update PROJ-a1b --status=open     # Any nd command works without remembering --vault
+pvg nd dep add <issue> <depends-on>      # <issue> depends on <depends-on>
+pvg nd dep cycles                        # Detect circular dependencies
+pvg nd stale --days=14                   # Surface stale issues
 ```
 
-`pvg nd` resolves the correct vault path and injects `--vault` automatically.
+`pvg nd` is a thin passthrough: it resolves the correct vault path and injects
+`--vault` automatically, then runs `nd <args...>` verbatim. Argument order and
+flags match `nd` exactly. Use it for nd-only operations that have no
+provider-abstracted equivalent.
 
 #### Vault resolution order
 
