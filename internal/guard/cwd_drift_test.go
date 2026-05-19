@@ -230,6 +230,77 @@ func TestCheckCWDDrift_TrackedWorktreeStillBlocks(t *testing.T) {
 	}
 }
 
+// TestCheckCWDDrift_HarnessWorktreeBypassesTrackingRace is the regression
+// for the Wave B incident: when SubagentStart's os.Getwd() fires from inside
+// the harness-assigned worktree, TrackAgent stores the harness worktree path
+// in AgentWorktrees. The subsequent Bash hook from the agent's own session
+// would otherwise match its own tracked worktree and be misclassified as
+// dispatcher drift, blocking every git/mix/test command. The harness
+// convention check must take precedence over AgentWorktrees lookup.
+func TestCheckCWDDrift_HarnessWorktreeBypassesTrackingRace(t *testing.T) {
+	root := t.TempDir()
+	harnessWorktree := filepath.Join(root, ".claude", "worktrees", "agent-a513315f422bca98e")
+	if err := os.MkdirAll(harnessWorktree, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	resolvedWT := harnessWorktree
+	if resolved, err := filepath.EvalSymlinks(harnessWorktree); err == nil {
+		resolvedWT = resolved
+	}
+
+	stateDir := filepath.Join(root, ".vault")
+	if err := os.MkdirAll(stateDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// SubagentStart race: the harness worktree path is registered in
+	// AgentWorktrees because os.Getwd() returned it.
+	state := map[string]interface{}{
+		"enabled":         true,
+		"since":           "2026-05-18T00:00:00Z",
+		"active_agents":   map[string]string{"agent-1": "paivot-graph:developer"},
+		"agent_worktrees": map[string]string{"agent-1": resolvedWT},
+	}
+	data, _ := json.Marshal(state)
+	if err := os.WriteFile(filepath.Join(stateDir, ".dispatcher-state.json"), data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	origDir, _ := os.Getwd()
+	if err := os.Chdir(harnessWorktree); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Chdir(origDir) }()
+
+	result := CheckCWDDrift(root)
+	if !result.Allowed {
+		t.Fatalf("expected ALLOWED for harness worktree CWD even when self-tracked, got blocked: %s", result.Reason)
+	}
+}
+
+func TestIsHarnessWorktreeCWD(t *testing.T) {
+	cases := []struct {
+		name string
+		cwd  string
+		want bool
+	}{
+		{"harness worktree root", "/repo/.claude/worktrees/agent-deadbeef", true},
+		{"harness worktree subdir", "/repo/.claude/worktrees/agent-deadbeef/lib/foo", true},
+		{"paivot dev worktree", "/repo/.claude/worktrees/dev-PROJ-a1b", false},
+		{"paivot pm worktree", "/repo/.claude/worktrees/pm-PROJ-a1b/sub", false},
+		{"project root", "/repo", false},
+		{"not a worktree", "/repo/lib/foo", false},
+		{"agent-prefix outside worktrees", "/repo/agent-foo", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isHarnessWorktreeCWD(tc.cwd); got != tc.want {
+				t.Fatalf("isHarnessWorktreeCWD(%q) = %v, want %v", tc.cwd, got, tc.want)
+			}
+		})
+	}
+}
+
 // TestCheckCWDDrift_HarnessWorktreeAllowsVaultBash exercises the user's
 // reported scenario end-to-end: a Bash command is invoked from the harness
 // worktree and references the project's .vault/ path (e.g., reading a story

@@ -27,12 +27,13 @@ import (
 // subagent whose CWD persisted in the dispatcher shell.
 //
 // Harness-managed worktrees (created by Claude Code's Agent tool with
-// isolation: "worktree") are NOT tracked in dispatcher state -- the harness
-// spawns them outside Paivot's knowledge. When a subagent runs Bash from
-// inside its harness-assigned worktree, the PreToolUse hook fires in the
-// agent's own session with CWD inside .claude/worktrees/agent-<id>/. Blocking
-// these would prevent the harness's parallel execution model from working at
-// all. We detect them by their absence from AgentWorktrees and allow them.
+// isolation: "worktree") follow the naming convention
+// .claude/worktrees/agent-<hash>/. The PreToolUse hook always fires inside
+// the subagent's own session, never the dispatcher's, so blocking would
+// strand legitimate agent Bash (git commit, mix test, npm run, etc.).
+// We unconditionally allow these regardless of dispatcher tracking state,
+// because SubagentStart can race-register a harness worktree into
+// AgentWorktrees when the hook fires from the subagent's CWD.
 func CheckCWDDrift(projectRoot string) Result {
 	cwd, err := os.Getwd()
 	if err != nil {
@@ -41,6 +42,14 @@ func CheckCWDDrift(projectRoot string) Result {
 
 	// Quick negative: not inside any worktree directory.
 	if !strings.Contains(cwd, string(filepath.Separator)+".claude"+string(filepath.Separator)+"worktrees"+string(filepath.Separator)) {
+		return Result{Allowed: true}
+	}
+
+	// Harness-managed worktree exemption: Claude Code's Agent tool isolates
+	// subagents in .claude/worktrees/agent-<hash>/. Hooks fired from such a
+	// path run in the subagent's own session -- never the dispatcher's --
+	// so the drift hazard does not apply. Allow unconditionally.
+	if isHarnessWorktreeCWD(cwd) {
 		return Result{Allowed: true}
 	}
 
@@ -78,6 +87,29 @@ func CheckCWDDrift(projectRoot string) Result {
 				"Then verify with: pwd",
 			cwd, mainRoot),
 	}
+}
+
+// harnessWorktreePrefix is the name prefix the Claude Code Agent tool uses
+// for worktrees it creates with isolation: "worktree". A subagent's CWD
+// inside such a worktree is always the subagent's own session.
+const harnessWorktreePrefix = "agent-"
+
+// isHarnessWorktreeCWD reports whether cwd lies inside a worktree the Claude
+// Code harness created for an isolated subagent. The harness names these
+// .claude/worktrees/agent-<hash>/. Returns true for any path at or under
+// such a worktree.
+func isHarnessWorktreeCWD(cwd string) bool {
+	sep := string(filepath.Separator)
+	marker := sep + ".claude" + sep + "worktrees" + sep
+	idx := strings.Index(cwd, marker)
+	if idx < 0 {
+		return false
+	}
+	rest := cwd[idx+len(marker):]
+	if i := strings.Index(rest, sep); i >= 0 {
+		rest = rest[:i]
+	}
+	return strings.HasPrefix(rest, harnessWorktreePrefix)
 }
 
 // isTrackedWorktreeCWD reports whether cwd is inside any worktree path that
