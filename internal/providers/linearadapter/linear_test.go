@@ -325,7 +325,7 @@ func TestLooksLikeUUID(t *testing.T) {
 		"9c16c0c6-8618-41f3-b202-465b4c1b4a5d": true,
 		"":                                     false,
 		"EXM-100":                              false,
-		"Acme Platform":    false,
+		"Acme Platform":                        false,
 		"00000000-0000-4000-8000-00000000ABCD": false, // upper-case hex
 		"00000000-0000-4000-8000-00000000abc":  false, // too short
 	}
