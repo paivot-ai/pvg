@@ -49,6 +49,11 @@ import (
 	plint "github.com/paivot-ai/pvg/internal/lint"
 	"github.com/paivot-ai/pvg/internal/loop"
 	"github.com/paivot-ai/pvg/internal/ndvault"
+	"github.com/paivot-ai/pvg/internal/paivotcfg"
+	"github.com/paivot-ai/pvg/internal/providercli"
+	_ "github.com/paivot-ai/pvg/internal/providers/linearadapter"
+	_ "github.com/paivot-ai/pvg/internal/providers/ndadapter"
+	_ "github.com/paivot-ai/pvg/internal/providers/vltadapter"
 	"github.com/paivot-ai/pvg/internal/rtm"
 	"github.com/paivot-ai/pvg/internal/settings"
 	"github.com/paivot-ai/pvg/internal/story"
@@ -116,12 +121,18 @@ func main() {
 	case "seed":
 		force := len(args) > 0 && args[0] == "--force"
 		err = runSeed(force)
+	case "init":
+		err = runInit(args)
 	case "loop":
 		err = runLoop(args)
 	case "dispatcher":
 		err = runDispatcher(args)
 	case "nd":
 		err = runND(args)
+	case "issues":
+		err = providercli.RunIssues(args)
+	case "notes":
+		err = providercli.RunNotes(args)
 	case "settings":
 		err = settings.Run(args)
 	case "story":
@@ -182,6 +193,9 @@ Commands:
   dispatcher on|off|status  Manage dispatcher mode
   nd root [--ensure]       Print (and optionally initialize) the shared live nd vault
   nd <args...>             Run nd against the shared live vault
+  issues <subcommand>      Backlog operations via configured adapter (nd, linear, ...)
+  notes <subcommand>       Notes operations via configured adapter (vlt, confluence, ...)
+  init [flags]           Bootstrap .paivot/config.yaml + .gitignore in this repo
   seed [--force]         Seed vault with agent prompts and conventions
   settings [key|key=value]  View, read, or set project settings
   story <subcommand>        Shared story workflow helpers
@@ -1437,6 +1451,45 @@ Flags:
 	if !report.Passed {
 		return cliExit{code: 1}
 	}
+	return nil
+}
+
+func runInit(args []string) error {
+	opts := paivotcfg.InitOptions{}
+	for _, a := range args {
+		switch a {
+		case "--force", "-f":
+			opts.Force = true
+		case "--with-linear-mirror":
+			opts.WithLinearMirror = true
+		case "--with-confluence-mirror":
+			opts.WithConfluenceMirror = true
+		case "--help", "-h":
+			fmt.Fprintln(os.Stdout, `pvg init [flags]
+
+Bootstrap the .paivot/ directory in this repo with a documented config.yaml
+plus a .gitignore that hides any secrets file. Idempotent: existing files
+are left alone unless --force is passed.
+
+Flags:
+  --force, -f                  overwrite an existing config.yaml
+  --with-linear-mirror         seed an active Linear backlog mirror
+  --with-confluence-mirror     seed an active Confluence notes mirror`)
+			return nil
+		default:
+			return fmt.Errorf("init: unknown flag %q (try --help)", a)
+		}
+	}
+
+	root, err := os.Getwd()
+	if err != nil {
+		return err
+	}
+	res, err := paivotcfg.Init(root, opts)
+	if err != nil {
+		return err
+	}
+	paivotcfg.PrintInitResult(os.Stdout, res)
 	return nil
 }
 
