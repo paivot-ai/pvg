@@ -44,8 +44,8 @@ func init() {
 //
 // Optional config: status_overrides maps a provider.Status string to a Linear
 // workflow state NAME (not type). This is the right way to disambiguate teams
-// that have multiple states sharing the same Linear type -- e.g. HexGraph's
-// "Product" team has both "Started" (type=started) and "Delivered" (type=
+// that have multiple states sharing the same Linear type -- e.g. a team
+// may have both "Started" (type=started) and "Delivered" (type=
 // started). Without an override the adapter would pick whichever the API
 // returns first, which is non-deterministic.
 //

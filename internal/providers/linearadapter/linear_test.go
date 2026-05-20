@@ -264,7 +264,7 @@ func TestPrime_AggregatesCounts(t *testing.T) {
 
 func TestResolveStateID_HonorsStatusOverride(t *testing.T) {
 	mock := newGQLMock(t)
-	// HexGraph-like Product team: two "started" states, "Started" and "Delivered".
+	// a generic Linear org-like Product team: two "started" states, "Started" and "Delivered".
 	mock.on(`teams(filter: { key`, `{ "data": { "teams": { "nodes": [{"id": "team-uuid", "key": "PRO"}] } } }`)
 	mock.on(`workflowStates(filter`, `{
 		"data": {
@@ -321,13 +321,13 @@ func TestResolveStateID_OverrideMissingNameErrors(t *testing.T) {
 
 func TestLooksLikeUUID(t *testing.T) {
 	cases := map[string]bool{
-		"c6ff6228-3217-4b3a-830d-e19b0aebe37c": true,
+		"00000000-0000-4000-8000-00000000abcd": true,
 		"9c16c0c6-8618-41f3-b202-465b4c1b4a5d": true,
 		"":                                     false,
-		"PRO-142":                              false,
-		"Hextropian Platform for Oil & Gas":    false,
-		"c6ff6228-3217-4b3a-830d-e19b0aebe37C": false, // upper-case hex
-		"c6ff6228-3217-4b3a-830d-e19b0aebe37":  false, // too short
+		"EXM-100":                              false,
+		"Acme Platform":    false,
+		"00000000-0000-4000-8000-00000000ABCD": false, // upper-case hex
+		"00000000-0000-4000-8000-00000000abc":  false, // too short
 	}
 	for in, want := range cases {
 		if got := looksLikeUUID(in); got != want {
@@ -339,11 +339,11 @@ func TestLooksLikeUUID(t *testing.T) {
 func TestResolveProjectID_PassesThroughUUID(t *testing.T) {
 	mock := newGQLMock(t)
 	a, _ := New(map[string]interface{}{"api_key": "test", "endpoint": mock.server.URL})
-	got, err := a.(*Adapter).resolveProjectID(context.Background(), "c6ff6228-3217-4b3a-830d-e19b0aebe37c")
+	got, err := a.(*Adapter).resolveProjectID(context.Background(), "00000000-0000-4000-8000-00000000abcd")
 	if err != nil {
 		t.Fatalf("resolveProjectID: %v", err)
 	}
-	if got != "c6ff6228-3217-4b3a-830d-e19b0aebe37c" {
+	if got != "00000000-0000-4000-8000-00000000abcd" {
 		t.Errorf("UUID should pass through unchanged, got %q", got)
 	}
 	if len(mock.requests) != 0 {
@@ -355,15 +355,15 @@ func TestResolveProjectID_LooksUpByName(t *testing.T) {
 	mock := newGQLMock(t)
 	mock.on(`projects(filter: { name`, `{
 		"data": { "projects": { "nodes": [
-			{"id": "c6ff6228-3217-4b3a-830d-e19b0aebe37c", "name": "Hextropian Platform for Oil & Gas"}
+			{"id": "00000000-0000-4000-8000-00000000abcd", "name": "Acme Platform"}
 		] } }
 	}`)
 	a, _ := New(map[string]interface{}{"api_key": "test", "endpoint": mock.server.URL})
-	got, err := a.(*Adapter).resolveProjectID(context.Background(), "Hextropian Platform for Oil & Gas")
+	got, err := a.(*Adapter).resolveProjectID(context.Background(), "Acme Platform")
 	if err != nil {
 		t.Fatalf("resolveProjectID: %v", err)
 	}
-	if got != "c6ff6228-3217-4b3a-830d-e19b0aebe37c" {
+	if got != "00000000-0000-4000-8000-00000000abcd" {
 		t.Errorf("expected resolved UUID, got %q", got)
 	}
 }
@@ -387,7 +387,7 @@ func TestResolveMilestoneID_ScopedToProject(t *testing.T) {
 		] } } }
 	}`)
 	a, _ := New(map[string]interface{}{"api_key": "test", "endpoint": mock.server.URL})
-	got, err := a.(*Adapter).resolveMilestoneID(context.Background(), "c6ff6228-3217-4b3a-830d-e19b0aebe37c", "POC")
+	got, err := a.(*Adapter).resolveMilestoneID(context.Background(), "00000000-0000-4000-8000-00000000abcd", "POC")
 	if err != nil {
 		t.Fatalf("resolveMilestoneID: %v", err)
 	}
@@ -397,16 +397,16 @@ func TestResolveMilestoneID_ScopedToProject(t *testing.T) {
 }
 
 func TestLinearToProvider_SurfacesProjectAndMilestone(t *testing.T) {
-	// Real shape from HexGraph PRO-142.
+	// Real shape from a generic Linear org EXM-100.
 	raw := `{
-		"id": "uuid-pro-142",
-		"identifier": "PRO-142",
+		"id": "uuid-exm-100",
+		"identifier": "EXM-100",
 		"title": "Bug",
 		"state": {"name": "Accepted", "type": "completed"},
 		"team": {"key": "PRO"},
-		"project": {"id": "c6ff6228-3217-4b3a-830d-e19b0aebe37c", "name": "Hextropian Platform for Oil & Gas"},
+		"project": {"id": "00000000-0000-4000-8000-00000000abcd", "name": "Acme Platform"},
 		"projectMilestone": {"id": "9c16c0c6-8618-41f3-b202-465b4c1b4a5d", "name": "POC"},
-		"labels": {"nodes": [{"name": "wickland-poc"}, {"name": "bug"}]},
+		"labels": {"nodes": [{"name": "example-poc"}, {"name": "bug"}]},
 		"relations": {"nodes": []},
 		"inverseRelations": {"nodes": []},
 		"children": {"nodes": []}
@@ -416,13 +416,13 @@ func TestLinearToProvider_SurfacesProjectAndMilestone(t *testing.T) {
 		t.Fatalf("unmarshal: %v", err)
 	}
 	got := linearToProvider(l)
-	if got.Project != "Hextropian Platform for Oil & Gas" {
+	if got.Project != "Acme Platform" {
 		t.Errorf("Project = %q", got.Project)
 	}
 	if got.Milestone != "POC" {
 		t.Errorf("Milestone = %q", got.Milestone)
 	}
-	if got.Extras["project_id"] != "c6ff6228-3217-4b3a-830d-e19b0aebe37c" {
+	if got.Extras["project_id"] != "00000000-0000-4000-8000-00000000abcd" {
 		t.Errorf("Extras.project_id = %v", got.Extras["project_id"])
 	}
 }
@@ -431,7 +431,7 @@ func TestCreate_PassesProjectAndMilestoneToInput(t *testing.T) {
 	mock := newGQLMock(t)
 	// Resolution lookups (project name -> id, milestone name within project -> id)
 	mock.on(`projects(filter: { name`, `{ "data": { "projects": { "nodes": [
-		{"id": "proj-uuid", "name": "Hextropian Platform for Oil & Gas"}
+		{"id": "proj-uuid", "name": "Acme Platform"}
 	] } } }`)
 	mock.on(`project(id:`, `{ "data": { "project": { "projectMilestones": { "nodes": [
 		{"id": "milestone-uuid", "name": "POC"}
@@ -442,7 +442,7 @@ func TestCreate_PassesProjectAndMilestoneToInput(t *testing.T) {
 		"data": { "issueCreate": { "success": true, "issue": {
 			"id": "u", "identifier": "PRO-200", "title": "x",
 			"state": {"name":"Backlog","type":"unstarted"}, "team": {"key":"PRO"},
-			"project": {"id":"proj-uuid","name":"Hextropian Platform for Oil & Gas"},
+			"project": {"id":"proj-uuid","name":"Acme Platform"},
 			"projectMilestone": {"id":"milestone-uuid","name":"POC"},
 			"labels": {"nodes": []}, "relations": {"nodes": []}, "inverseRelations": {"nodes": []}, "children": {"nodes": []}
 		} } }
@@ -451,13 +451,13 @@ func TestCreate_PassesProjectAndMilestoneToInput(t *testing.T) {
 	a, _ := New(map[string]interface{}{"api_key": "test", "team_key": "PRO", "endpoint": mock.server.URL})
 	out, err := a.Create(context.Background(), providers.CreateIssueInput{
 		Title:     "x",
-		Project:   "Hextropian Platform for Oil & Gas",
+		Project:   "Acme Platform",
 		Milestone: "POC",
 	})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if out.Project != "Hextropian Platform for Oil & Gas" || out.Milestone != "POC" {
+	if out.Project != "Acme Platform" || out.Milestone != "POC" {
 		t.Errorf("returned issue missing project/milestone: %+v", out)
 	}
 
@@ -484,7 +484,7 @@ func TestCreate_PassesProjectAndMilestoneToInput(t *testing.T) {
 
 // TestIntegration_LiveLinearReadOnly exercises the adapter against the real
 // Linear GraphQL endpoint. Skipped unless LINEAR_API_KEY is set in the env.
-// LINEAR_TEAM_KEY (default "PRO") and LINEAR_TEST_ISSUE_ID (e.g. "PRO-142")
+// LINEAR_TEAM_KEY (default "PRO") and LINEAR_TEST_ISSUE_ID (e.g. "EXM-100")
 // scope what is read. The test is intentionally read-only -- no writes against
 // the user's real workspace.
 func TestIntegration_LiveLinearReadOnly(t *testing.T) {
@@ -568,7 +568,7 @@ func TestIntegration_LiveLinearFullCycle(t *testing.T) {
 	a, err := New(map[string]interface{}{
 		"api_key":  apiKey,
 		"team_key": teamKey,
-		// HexGraph's Product team has two `started` states (Started, Delivered);
+		// a generic Linear org's Product team has two `started` states (Started, Delivered);
 		// override so set-status -> InProgress lands in "Started" deterministically.
 		"status_overrides": map[string]interface{}{
 			"in_progress": "Started",
