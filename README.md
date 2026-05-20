@@ -7,6 +7,9 @@
 Deterministic control plane for Paivot runtimes with external orchestration surfaces. `pvg` started as the enforcement binary for [paivot-graph](https://github.com/paivot-ai/paivot-graph), and now also owns the shared workflow operations used by Codex and OpenCode: live `nd` routing, deterministic next-step selection, story transitions, merge gating, recovery, and vault governance.
 
 ```
+pvg init [--force]           # Scaffold .paivot/ provider config in a repo
+pvg issues <subcommand>      # Provider-abstracted backlog CLI (12 verbs)
+pvg notes <subcommand>       # Provider-abstracted notes CLI (7 verbs)
 pvg hook session-start       # Load vault context at session start
 pvg guard                    # PreToolUse scope guard (reads JSON from stdin)
 pvg nd root --ensure         # Resolve/init the shared live nd vault
@@ -334,7 +337,7 @@ pvg seed              # Bootstrap vault notes (skip if exists)
 pvg seed --force      # Overwrite all vault notes with latest content
 ```
 
-Seeds agent prompts (8 agents), skill content, and behavioral notes (Session Operating Mode, Pre-Compact Checklist, Stop Capture Checklist) into the Obsidian vault.
+Seeds agent prompts (11 agents: BA, Designer, Architect, the three BLT challengers, Sr PM, Developer, PM, Anchor, Retro), skill content, and behavioral notes (Session Operating Mode, Pre-Compact Checklist, Stop Capture Checklist) into the Obsidian vault.
 
 ### Settings
 
@@ -400,12 +403,12 @@ All tests use `t.TempDir()` for isolated environments. No mocks in integration t
 Tag and push:
 
 ```bash
-git tag v1.18.0
-git push origin v1.18.0
+git tag vX.Y.Z   # e.g. v1.53.13
+git push origin vX.Y.Z
 ```
 
-The [release workflow](.github/workflows/release.yml) runs tests, then uses GoReleaser to produce binaries for darwin/linux x amd64/arm64.
+The [release workflow](.github/workflows/release.yml) runs tests, then uses GoReleaser to produce binaries for darwin/linux/windows x amd64/arm64.
 
 ## License
 
-Copyright 2025 Ramiro Salas. All rights reserved.
+Apache License 2.0. See [LICENSE](LICENSE) for full text.
