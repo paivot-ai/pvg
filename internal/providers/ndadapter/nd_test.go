@@ -124,6 +124,65 @@ func TestDecodeIssueList_EmptyIsEmpty(t *testing.T) {
 	}
 }
 
+func TestDecodeComments_JSON(t *testing.T) {
+	got, err := decodeComments([]byte(`[{
+		"author": "alice",
+		"body": "plain body",
+		"created_at": "2026-05-20T07:09:23Z"
+	}]`))
+	if err != nil {
+		t.Fatalf("decodeComments(JSON): %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("len = %d, want 1", len(got))
+	}
+	if got[0].Author != "alice" || got[0].Body != "plain body" {
+		t.Errorf("comment = %+v", got[0])
+	}
+}
+
+func TestDecodeComments_NdMarkdownWithHeadingBody(t *testing.T) {
+	raw := []byte(`## Comments
+
+### 2026-05-20T07:09:23Z alice
+## Comment Heading
+Body keeps markdown.
+### Body Subheading
+This heading is part of the body.
+
+### 2026-05-20T08:10:11Z bob
+Second body
+`)
+	got, err := decodeComments(raw)
+	if err != nil {
+		t.Fatalf("decodeComments(markdown): %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("len = %d, want 2", len(got))
+	}
+	if got[0].Author != "alice" {
+		t.Errorf("first author = %q, want alice", got[0].Author)
+	}
+	for _, fragment := range []string{"## Comment Heading", "### Body Subheading", "This heading is part of the body."} {
+		if !strings.Contains(got[0].Body, fragment) {
+			t.Errorf("first body missing %q: %q", fragment, got[0].Body)
+		}
+	}
+	if got[1].Author != "bob" || got[1].Body != "Second body" {
+		t.Errorf("second comment = %+v", got[1])
+	}
+}
+
+func TestDecodeComments_NdMarkdownNoComments(t *testing.T) {
+	got, err := decodeComments([]byte("## Comments\n"))
+	if err != nil {
+		t.Fatalf("decodeComments(no comments): %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("expected empty, got %v", got)
+	}
+}
+
 func TestAppendListFilter_LabelsAndParent(t *testing.T) {
 	args := appendListFilter([]string{"list", "--json"}, providers.ListFilter{
 		Labels: []string{"a", "b"},

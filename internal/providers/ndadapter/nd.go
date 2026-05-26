@@ -183,15 +183,24 @@ func (a *Adapter) ListComments(ctx context.Context, id string) ([]providers.Comm
 		}
 		return nil, err
 	}
+	return decodeComments(out)
+}
+
+func decodeComments(out []byte) ([]providers.Comment, error) {
 	var raw []struct {
 		Author    string    `json:"author"`
 		Body      string    `json:"body"`
 		CreatedAt time.Time `json:"created_at"`
 	}
-	if len(bytes.TrimSpace(out)) == 0 || string(bytes.TrimSpace(out)) == "null" {
+	trimmed := bytes.TrimSpace(out)
+	if len(trimmed) == 0 || string(trimmed) == "null" {
 		return nil, nil
 	}
-	if err := json.Unmarshal(out, &raw); err != nil {
+	if err := json.Unmarshal(trimmed, &raw); err != nil {
+		comments, parseErr := decodeMarkdownComments(trimmed)
+		if parseErr == nil {
+			return comments, nil
+		}
 		return nil, fmt.Errorf("decode comments json: %w", err)
 	}
 	cs := make([]providers.Comment, len(raw))
@@ -199,6 +208,65 @@ func (a *Adapter) ListComments(ctx context.Context, id string) ([]providers.Comm
 		cs[i] = providers.Comment{Author: r.Author, Body: r.Body, CreatedAt: r.CreatedAt}
 	}
 	return cs, nil
+}
+
+func decodeMarkdownComments(out []byte) ([]providers.Comment, error) {
+	text := strings.ReplaceAll(string(out), "\r\n", "\n")
+	lines := strings.Split(text, "\n")
+	var comments []providers.Comment
+	var current *providers.Comment
+	var body []string
+
+	flush := func() {
+		if current == nil {
+			return
+		}
+		c := *current
+		c.Body = strings.TrimRight(strings.Join(body, "\n"), "\n")
+		comments = append(comments, c)
+		current = nil
+		body = nil
+	}
+
+	for _, line := range lines {
+		if createdAt, author, ok := parseMarkdownCommentHeading(line); ok {
+			flush()
+			current = &providers.Comment{Author: author, CreatedAt: createdAt}
+			continue
+		}
+		if current != nil {
+			body = append(body, line)
+		}
+	}
+	flush()
+
+	if len(comments) == 0 {
+		if strings.TrimSpace(text) == "## Comments" {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("no nd comment headings found")
+	}
+	return comments, nil
+}
+
+func parseMarkdownCommentHeading(line string) (time.Time, string, bool) {
+	if !strings.HasPrefix(line, "### ") {
+		return time.Time{}, "", false
+	}
+	rest := strings.TrimSpace(strings.TrimPrefix(line, "### "))
+	fields := strings.Fields(rest)
+	if len(fields) < 2 {
+		return time.Time{}, "", false
+	}
+	createdAt, err := time.Parse(time.RFC3339Nano, fields[0])
+	if err != nil {
+		createdAt, err = time.Parse(time.RFC3339, fields[0])
+	}
+	if err != nil {
+		return time.Time{}, "", false
+	}
+	author := strings.TrimSpace(strings.TrimPrefix(rest, fields[0]))
+	return createdAt, author, true
 }
 
 // --- Links ---
