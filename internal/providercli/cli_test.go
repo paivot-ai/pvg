@@ -2,8 +2,11 @@ package providercli
 
 import (
 	"flag"
+	"io"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
 
 	_ "github.com/paivot-ai/pvg/internal/providers/ndadapter"
@@ -108,6 +111,68 @@ func TestRunIssues_NoArgsErrors(t *testing.T) {
 	}
 }
 
+func TestRunIssuesCommentsHandlesNdMarkdownOutputWithHeadingBody(t *testing.T) {
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "bin")
+	if err := os.MkdirAll(bin, 0o755); err != nil {
+		t.Fatalf("mkdir bin: %v", err)
+	}
+	fakeND := filepath.Join(bin, "nd")
+	script := `#!/bin/sh
+case "$*" in
+  *"comments list HXT-heading --json"*)
+    cat <<'EOF'
+## Comments
+
+### 2026-05-20T07:09:23Z tester
+## Comment Heading
+Comment body keeps markdown headings.
+### Body Subheading
+Still part of the same comment body.
+EOF
+    exit 0
+    ;;
+esac
+echo "unexpected nd args: $*" >&2
+exit 42
+`
+	if err := os.WriteFile(fakeND, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake nd: %v", err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	project := filepath.Join(dir, "project")
+	if err := os.MkdirAll(filepath.Join(project, ".paivot"), 0o755); err != nil {
+		t.Fatalf("mkdir project: %v", err)
+	}
+	config := "backlog:\n" +
+		"  primary:\n" +
+		"    adapter: nd\n" +
+		"    config:\n" +
+		"      vault: " + strconv.Quote(filepath.Join(dir, "vault")) + "\n"
+	if err := os.WriteFile(filepath.Join(project, ".paivot", "config.yaml"), []byte(config), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	oldWD, _ := os.Getwd()
+	t.Cleanup(func() { _ = os.Chdir(oldWD) })
+	if err := os.Chdir(project); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+
+	out, err := captureStdout(t, func() error {
+		return RunIssues([]string{"comments", "HXT-heading"})
+	})
+	if err != nil {
+		t.Fatalf("RunIssues comments: %v", err)
+	}
+	for _, fragment := range []string{"tester", "## Comment Heading", "### Body Subheading"} {
+		if !strings.Contains(out, fragment) {
+			t.Errorf("stdout missing %q: %s", fragment, out)
+		}
+	}
+}
+
 func TestRunNotes_NoArgsErrors(t *testing.T) {
 	if err := RunNotes(nil); err == nil {
 		t.Error("expected error when no subcommand")
@@ -135,4 +200,23 @@ func TestOpenBacklog_LoadsConfigOrDefaults(t *testing.T) {
 	if r.Primary().Name() != "nd" {
 		t.Errorf("primary = %q, want nd", r.Primary().Name())
 	}
+}
+
+func captureStdout(t *testing.T, fn func() error) (string, error) {
+	t.Helper()
+	old := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	os.Stdout = w
+	runErr := fn()
+	_ = w.Close()
+	os.Stdout = old
+	out, readErr := io.ReadAll(r)
+	_ = r.Close()
+	if readErr != nil {
+		t.Fatalf("read stdout: %v", readErr)
+	}
+	return string(out), runErr
 }
