@@ -312,6 +312,12 @@ cd $PROJECT_ROOT && pwd
 pvg worktree remove .claude/worktrees/dev-PROJ-a1b
 ```
 
+While dispatcher mode is active, the PreToolUse guard also blocks `git checkout`/`git switch`
+to `worktree-agent-*` branches in the parent checkout. Those branches belong to Claude Code's
+automatic worktree isolation; checking them out on the shared HEAD can make another Paivot
+window appear to lose edits. Delete stale `worktree-agent-*` branches directly, or create an
+explicit `git worktree add .claude/worktrees/dev-<story> story/<story>` checkout for code work.
+
 ### Diagnostics
 
 ```bash
