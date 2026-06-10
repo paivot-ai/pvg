@@ -239,8 +239,16 @@ func BuildContinuationPrompt(state *loop.State, decision *loop.StopDecision, max
 	if wc.Ready > 0 {
 		prompt += fmt.Sprintf("- Developer: %d ready\n", wc.Ready)
 	}
-	prompt += "\nAll work is scoped to the current epic. Do NOT query nd globally for dispatch.\n"
-	prompt += "Concurrency: within current epic only, stack-dependent limits (heavy stacks: 2 dev / 1 PM / 3 total; light stacks: 4 dev / 2 PM / 6 total). Dispatcher-only.\n"
+	// Protocol-boilerplate refresh: the blocked-stop reason is rendered
+	// prominently in the transcript on EVERY iteration ("Stop hook error:"
+	// is Claude Code's fixed label for any blocked stop). The dispatcher
+	// already carries the full protocol from piv-loop.md and the PreCompact
+	// reminder, so re-inject the long reminders periodically instead of
+	// every iteration to keep transcript noise down.
+	if decision.NewIteration <= 1 || decision.NewIteration%5 == 0 {
+		prompt += "\nAll work is scoped to the current epic. Do NOT query nd globally for dispatch.\n"
+		prompt += "Concurrency: within current epic only, stack-dependent limits (heavy stacks: 2 dev / 1 PM / 3 total; light stacks: 4 dev / 2 PM / 6 total). Dispatcher-only.\n"
+	}
 
 	return prompt
 }

@@ -89,7 +89,7 @@ func TestBuildContinuationPrompt_Actionable_WithDeliveries(t *testing.T) {
 func TestBuildContinuationPrompt_StackDependentConcurrency(t *testing.T) {
 	state := &loop.State{Mode: "all"}
 	decision := &loop.StopDecision{
-		NewIteration: 2,
+		NewIteration: 5, // refresh iteration: full protocol reminder included
 		Reason:       "Actionable work remains",
 	}
 	wc := &loop.WorkCounts{Ready: 3}
@@ -305,5 +305,33 @@ func TestCheckLoop_UsesAncestorLoopStateFromNestedWorktree(t *testing.T) {
 
 	if _, err := os.Stat(loop.StatePath(root)); !os.IsNotExist(err) {
 		t.Fatal("expected ancestor loop state to be removed when backlog is empty")
+	}
+}
+
+// Off-refresh iterations stay compact: the long protocol reminders appear
+// only on iteration 1 and every 5th, not in every blocked-stop reason.
+func TestBuildContinuationPrompt_CompactBetweenRefreshes(t *testing.T) {
+	state := &loop.State{Mode: "epic", TargetEpic: "PROJ-e1"}
+	decision := &loop.StopDecision{
+		NewIteration: 22,
+		Reason:       "Actionable work remains",
+	}
+	wc := &loop.WorkCounts{Ready: 40, Delivered: 3}
+
+	prompt := BuildContinuationPrompt(state, decision, "50", wc)
+
+	if strings.Contains(prompt, "Concurrency:") || strings.Contains(prompt, "scoped to the current epic") {
+		t.Errorf("iteration 22 must be compact, got:\n%s", prompt)
+	}
+	for _, want := range []string{"Iteration 22/50", "Continue.", "3 delivered", "40 ready"} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("compact prompt missing %q:\n%s", want, prompt)
+		}
+	}
+
+	decision.NewIteration = 25 // multiple of 5: refresh
+	prompt = BuildContinuationPrompt(state, decision, "50", wc)
+	if !strings.Contains(prompt, "Concurrency:") {
+		t.Errorf("iteration 25 must include the protocol refresh:\n%s", prompt)
 	}
 }
