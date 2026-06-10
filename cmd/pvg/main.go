@@ -886,6 +886,16 @@ func loopSetup(cwd string, args []string) error {
 		}
 	}
 
+	// Route already-landed stories to PM review instead of re-dispatching a
+	// developer onto work that is already merged into the epic branch.
+	if reroutes, err := loop.ReconcileLanded(cwd); err != nil {
+		return fmt.Errorf("reconcile landed stories: %w", err)
+	} else if len(reroutes) > 0 {
+		for _, r := range reroutes {
+			fmt.Printf("[LOOP] Story %s already merged into %s (%s) -- routed to PM review\n", r.StoryID, r.Epic, r.Commit)
+		}
+	}
+
 	// Idempotent: if already active, report status and return success
 	if loop.IsActive(cwd) {
 		fmt.Println("[LOOP] Execution loop already active -- no changes made.")
@@ -1228,6 +1238,14 @@ func loopRecover(cwd string, args []string) error {
 	} else {
 		for _, r := range resets {
 			fmt.Printf("[RECOVER] Reset orphaned story %s to open (%s)\n", r.StoryID, r.Reason)
+		}
+	}
+
+	if reroutes, err := loop.ReconcileLanded(cwd); err != nil {
+		execErrors = append(execErrors, fmt.Sprintf("reconcile landed stories: %v", err))
+	} else {
+		for _, r := range reroutes {
+			fmt.Printf("[RECOVER] Story %s already merged into %s (%s) -- routed to PM review\n", r.StoryID, r.Epic, r.Commit)
 		}
 	}
 
