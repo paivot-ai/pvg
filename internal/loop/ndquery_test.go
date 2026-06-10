@@ -182,12 +182,12 @@ func TestAutoSelectEpic_PicksHighestPriorityWithActionableWork(t *testing.T) {
 		]`,
 		// Epic One has no actionable work
 		"list --status !closed --label delivered --sort priority --limit 0 --json --parent PROJ-e1": `[]`,
-		"list --status open --label rejected --sort priority --limit 0 --json --parent PROJ-e1":         `[]`,
-		"ready --sort priority --json --parent PROJ-e1":                                                 `[]`,
+		"list --status open --label rejected --sort priority --limit 0 --json --parent PROJ-e1":     `[]`,
+		"ready --sort priority --json --parent PROJ-e1":                                             `[]`,
 		// Epic Two has ready work
 		"list --status !closed --label delivered --sort priority --limit 0 --json --parent PROJ-e2": `[]`,
-		"list --status open --label rejected --sort priority --limit 0 --json --parent PROJ-e2":         `[]`,
-		"ready --sort priority --json --parent PROJ-e2":                                                 `[{"ID":"PROJ-s1","Title":"Story","Status":"ready"}]`,
+		"list --status open --label rejected --sort priority --limit 0 --json --parent PROJ-e2":     `[]`,
+		"ready --sort priority --json --parent PROJ-e2":                                             `[{"ID":"PROJ-s1","Title":"Story","Status":"ready"}]`,
 	})
 
 	id, title, err := AutoSelectEpic(t.TempDir())
@@ -210,12 +210,12 @@ func TestAutoSelectEpic_RespectsExcludeList(t *testing.T) {
 		]`,
 		// Epic One has work but is excluded
 		"list --status !closed --label delivered --sort priority --limit 0 --json --parent PROJ-e1": `[{"ID":"PROJ-d1","Title":"Delivered","Status":"in_progress","Labels":["delivered"]}]`,
-		"list --status open --label rejected --sort priority --limit 0 --json --parent PROJ-e1":         `[]`,
-		"ready --sort priority --json --parent PROJ-e1":                                                 `[]`,
+		"list --status open --label rejected --sort priority --limit 0 --json --parent PROJ-e1":     `[]`,
+		"ready --sort priority --json --parent PROJ-e1":                                             `[]`,
 		// Epic Two also has work
 		"list --status !closed --label delivered --sort priority --limit 0 --json --parent PROJ-e2": `[]`,
-		"list --status open --label rejected --sort priority --limit 0 --json --parent PROJ-e2":         `[]`,
-		"ready --sort priority --json --parent PROJ-e2":                                                 `[{"ID":"PROJ-s2","Title":"Story","Status":"ready"}]`,
+		"list --status open --label rejected --sort priority --limit 0 --json --parent PROJ-e2":     `[]`,
+		"ready --sort priority --json --parent PROJ-e2":                                             `[{"ID":"PROJ-s2","Title":"Story","Status":"ready"}]`,
 	})
 
 	id, _, err := AutoSelectEpic(t.TempDir(), "PROJ-e1")
@@ -233,8 +233,8 @@ func TestAutoSelectEpic_ReturnsEmptyWhenNoActionableEpics(t *testing.T) {
 			{"ID":"PROJ-e1","Title":"Epic One","Type":"epic"}
 		]`,
 		"list --status !closed --label delivered --sort priority --limit 0 --json --parent PROJ-e1": `[]`,
-		"list --status open --label rejected --sort priority --limit 0 --json --parent PROJ-e1":         `[]`,
-		"ready --sort priority --json --parent PROJ-e1":                                                 `[]`,
+		"list --status open --label rejected --sort priority --limit 0 --json --parent PROJ-e1":     `[]`,
+		"ready --sort priority --json --parent PROJ-e1":                                             `[]`,
 	})
 
 	id, title, err := AutoSelectEpic(t.TempDir())
@@ -268,12 +268,12 @@ func TestAutoSelectEpic_PrefersDeliveredOverReady(t *testing.T) {
 		]`,
 		// Epic One has delivered work (pipeline needs unblocking)
 		"list --status !closed --label delivered --sort priority --limit 0 --json --parent PROJ-e1": `[{"ID":"PROJ-d1","Title":"Delivered","Status":"in_progress","Labels":["delivered"]}]`,
-		"list --status open --label rejected --sort priority --limit 0 --json --parent PROJ-e1":         `[]`,
-		"ready --sort priority --json --parent PROJ-e1":                                                 `[]`,
+		"list --status open --label rejected --sort priority --limit 0 --json --parent PROJ-e1":     `[]`,
+		"ready --sort priority --json --parent PROJ-e1":                                             `[]`,
 		// Epic Two has ready work
 		"list --status !closed --label delivered --sort priority --limit 0 --json --parent PROJ-e2": `[]`,
-		"list --status open --label rejected --sort priority --limit 0 --json --parent PROJ-e2":         `[]`,
-		"ready --sort priority --json --parent PROJ-e2":                                                 `[{"ID":"PROJ-s2","Title":"Story","Status":"ready"}]`,
+		"list --status open --label rejected --sort priority --limit 0 --json --parent PROJ-e2":     `[]`,
+		"ready --sort priority --json --parent PROJ-e2":                                             `[{"ID":"PROJ-s2","Title":"Story","Status":"ready"}]`,
 	})
 
 	id, _, err := AutoSelectEpic(t.TempDir())

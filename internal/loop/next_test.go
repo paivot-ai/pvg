@@ -546,7 +546,7 @@ func TestEvaluateNext_EpicMode_RedApprovedAdvancesToGreen(t *testing.T) {
 		"list --status !closed --label delivered --sort priority --limit 0 --json --parent PROJ-epic": `[]`,
 		"list --status open --label rejected --sort priority --limit 0 --json --parent PROJ-epic":     `[]`,
 		"ready --sort priority --json --parent PROJ-epic":                                             `[{"ID":"PROJ-s1","Title":"GREEN work","Status":"open","Priority":1,"Parent":"PROJ-epic","Labels":["hard-tdd","red-approved"]}]`,
-		"children PROJ-epic --json":                                                                   `[{"ID":"PROJ-s1","Status":"open","Labels":["hard-tdd","red-approved"]}]`,
+		"children PROJ-epic --json": `[{"ID":"PROJ-s1","Status":"open","Labels":["hard-tdd","red-approved"]}]`,
 	}))
 
 	result, err := EvaluateNext(t.TempDir(), "epic", "PROJ-epic", 1)

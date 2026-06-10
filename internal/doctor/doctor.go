@@ -183,8 +183,8 @@ func checkVaultDivergence(projectRoot string) Finding {
 		// data without erroring.
 		if n := countIssueFiles(localVault); n > 0 {
 			return Finding{
-				Name:   "vault-divergence",
-				Status: StatusWarn,
+				Name:    "vault-divergence",
+				Status:  StatusWarn,
 				Message: fmt.Sprintf("%d stale legacy issue file(s) remain under %s/issues -- direct 'nd --vault .vault' reads return outdated data; archive or delete them (they are not read by pvg)", n, localVault),
 			}
 		}
