@@ -73,16 +73,30 @@ func branchExists(projectRoot, branch string) bool {
 	return cmd.Run() == nil
 }
 
-// storyMergeCommit returns the newest commit on branch whose subject
-// references the story branch (covers both `merge(story/ID): ...` from pvg
-// story merge and git's default "Merge ... 'origin/story/ID'" messages).
-// Empty string when no such commit exists.
+// storyMergeCommit returns the newest commit unique to the epic branch
+// whose SUBJECT references the story ID. Matching the bare ID (not just
+// story/<ID>) covers merges from other platforms that commit directly with
+// subjects like "GREEN: ... (EPIC/STORY)". Subjects only: bodies routinely
+// carry "Unblocks: <ID>" trailers naming OTHER stories, which would
+// false-positive. A false positive is cheap anyway (one extra PM review
+// cycle); a false negative re-dispatches a developer onto landed work.
 func storyMergeCommit(projectRoot, branch, storyID string) string {
-	cmd := execCommand("git", "-C", projectRoot, "log", branch,
-		"--fixed-strings", "--grep", "story/"+storyID, "--format=%h", "-1")
+	// Limit to commits not on main when main exists: landing commits for an
+	// active epic live there, and it keeps old main history out of scope.
+	rangeSpec := branch
+	if branchExists(projectRoot, "main") {
+		rangeSpec = "main.." + branch
+	}
+	cmd := execCommand("git", "-C", projectRoot, "log", rangeSpec, "--format=%h\t%s")
 	out, err := cmd.Output()
 	if err != nil {
 		return ""
 	}
-	return strings.TrimSpace(string(out))
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		hash, subject, ok := strings.Cut(line, "\t")
+		if ok && strings.Contains(subject, storyID) {
+			return hash
+		}
+	}
+	return ""
 }

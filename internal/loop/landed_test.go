@@ -38,6 +38,18 @@ func TestReconcileLanded_RoutesMergedStoryToPMReview(t *testing.T) {
 	run("commit", "-qm", "feat: story work")
 	run("checkout", "-q", "epic/PROJ-epic1")
 	run("merge", "--no-ff", "story/PROJ-s1", "-m", "merge(story/PROJ-s1): integrate PROJ-s1")
+	// Prior-platform style: direct commit, bare ID in the subject only.
+	if err := os.WriteFile(filepath.Join(projectRoot, "skeleton.txt"), []byte("otp\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	run("add", "-A")
+	run("commit", "-qm", "GREEN: Bootstrap OTP application (14/14 tests pass) (PROJ-epic1/PROJ-s4)")
+	// Body-only mention of PROJ-s2 must NOT count as landed.
+	if err := os.WriteFile(filepath.Join(projectRoot, "notes.txt"), []byte("n\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	run("add", "-A")
+	run("commit", "-qm", "chore: unrelated housekeeping", "-m", "Unblocks: PROJ-s2")
 	run("checkout", "-q", "main")
 
 	override := filepath.Join(t.TempDir(), "shared-vault")
@@ -55,6 +67,7 @@ func TestReconcileLanded_RoutesMergedStoryToPMReview(t *testing.T) {
 				{"ID":"PROJ-s1","Status":"open","Parent":"PROJ-epic1","Type":"task","Labels":["hard-tdd"]},
 				{"ID":"PROJ-s2","Status":"open","Parent":"PROJ-epic1","Type":"task","Labels":[]},
 				{"ID":"PROJ-s3","Status":"open","Parent":"PROJ-other","Type":"task","Labels":[]},
+				{"ID":"PROJ-s4","Status":"open","Parent":"PROJ-epic1","Type":"task","Labels":[]},
 				{"ID":"PROJ-epic1","Status":"open","Parent":"","Type":"epic","Labels":[]}
 			]`)
 		}
@@ -67,13 +80,22 @@ func TestReconcileLanded_RoutesMergedStoryToPMReview(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReconcileLanded() error: %v", err)
 	}
-	// Only PROJ-s1 is merged; PROJ-s2 has no merge commit, PROJ-s3's epic
-	// branch does not exist, PROJ-epic1 is an epic.
-	if len(reroutes) != 1 || reroutes[0].StoryID != "PROJ-s1" || reroutes[0].Epic != "epic/PROJ-epic1" {
-		t.Fatalf("expected one reroute for PROJ-s1, got %#v", reroutes)
+	// PROJ-s1 (merge commit) and PROJ-s4 (prior-platform direct commit,
+	// bare ID in subject) are landed. PROJ-s2 only appears in a commit BODY
+	// (Unblocks trailer) -- not landed. PROJ-s3's epic branch does not
+	// exist; PROJ-epic1 is an epic.
+	if len(reroutes) != 2 {
+		t.Fatalf("expected reroutes for PROJ-s1 and PROJ-s4, got %#v", reroutes)
 	}
-	if reroutes[0].Commit == "" {
-		t.Fatal("expected the merge commit hash to be reported")
+	got := map[string]bool{}
+	for _, r := range reroutes {
+		got[r.StoryID] = true
+		if r.Commit == "" || r.Epic != "epic/PROJ-epic1" {
+			t.Fatalf("bad reroute %#v", r)
+		}
+	}
+	if !got["PROJ-s1"] || !got["PROJ-s4"] {
+		t.Fatalf("expected PROJ-s1 and PROJ-s4, got %#v", reroutes)
 	}
 
 	var joined []string
@@ -92,7 +114,7 @@ func TestReconcileLanded_RoutesMergedStoryToPMReview(t *testing.T) {
 		}
 	}
 	if strings.Contains(all, "PROJ-s2") || strings.Contains(all, "PROJ-s3") {
-		t.Fatalf("must not mutate unmerged stories:\n%s", all)
+		t.Fatalf("must not mutate unmerged or body-only-mentioned stories:\n%s", all)
 	}
 	if strings.Contains(all, "close") {
 		t.Fatalf("landed stories must never be auto-closed:\n%s", all)
