@@ -43,8 +43,9 @@ type HookInput struct {
 
 // ToolInput contains the parameters of the tool being called.
 type ToolInput struct {
-	FilePath string `json:"file_path"`
-	Command  string `json:"command"`
+	FilePath        string `json:"file_path"`
+	Command         string `json:"command"`
+	RunInBackground bool   `json:"run_in_background"`
 }
 
 // ProtectedFolders are vault subdirectories that require proposal workflow.
@@ -81,6 +82,9 @@ func Check(vaultDir, projectRoot string, input HookInput) Result {
 		}
 		return CheckDispatcher(projectRoot, input)
 	case "Bash":
+		if r := CheckBackgroundBash(projectRoot, input); !r.Allowed {
+			return r
+		}
 		if r := CheckCWDDrift(projectRoot); !r.Allowed {
 			return r
 		}
