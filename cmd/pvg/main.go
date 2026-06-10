@@ -14,7 +14,7 @@
 //	pvg guard                    # PreToolUse scope guard (stdin: JSON)
 //	pvg nd root --ensure         # Resolve/init shared nd vault
 //	pvg nd ready --json          # Run nd against shared live vault
-//	pvg nd sync                  # Export live vault to .vault/backlog-snapshot/
+//	pvg nd sync [--commit]       # Export live vault to snapshot (and commit it)
 //	pvg nd restore [--force]     # Restore live vault from the snapshot
 //	pvg seed [--force]           # Seed vault with agent prompts
 //	pvg story verify-delivery ID # Check delivery-proof completeness
@@ -199,7 +199,7 @@ Commands:
   loop recover           Clean up after context loss
   dispatcher on|off|status  Manage dispatcher mode
   nd root [--ensure]       Print (and optionally initialize) the shared live nd vault
-  nd sync                  Export the live nd vault to .vault/backlog-snapshot/ (git durability)
+  nd sync [--commit]       Export the live nd vault to .vault/backlog-snapshot/ (git durability); --commit stages and commits it
   nd restore [--force]     Restore the live nd vault from .vault/backlog-snapshot/
   nd <args...>             Run nd against the shared live vault
   issues <subcommand>      Backlog operations via configured adapter (nd, linear, ...)
@@ -359,7 +359,7 @@ func runDispatcher(args []string) error {
 
 func runND(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: pvg nd root [--ensure] | pvg nd sync | pvg nd restore [--force] | pvg nd <nd-args...>")
+		return fmt.Errorf("usage: pvg nd root [--ensure] | pvg nd sync [--commit] | pvg nd restore [--force] | pvg nd <nd-args...>")
 	}
 
 	// resolveRoot returns the project root, preferring the main repo root
@@ -412,8 +412,13 @@ func runND(args []string) error {
 	}
 
 	if args[0] == "sync" {
-		if len(args) > 1 {
-			return fmt.Errorf("pvg nd sync takes no arguments")
+		commit := false
+		for _, arg := range args[1:] {
+			if arg == "--commit" {
+				commit = true
+				continue
+			}
+			return fmt.Errorf("usage: pvg nd sync [--commit]")
 		}
 		projectRoot, err := resolveRoot()
 		if err != nil {
@@ -428,6 +433,17 @@ func runND(args []string) error {
 			return err
 		}
 		fmt.Printf("[ND SYNC] %d issue(s) exported to %s\n", res.Issues, res.SnapshotDir)
+		if commit {
+			committed, err := ndsync.CommitSnapshot(projectRoot)
+			if err != nil {
+				return err
+			}
+			if committed {
+				fmt.Println("[ND SYNC] snapshot committed")
+			} else {
+				fmt.Println("[ND SYNC] snapshot unchanged, nothing to commit")
+			}
+		}
 		return nil
 	}
 

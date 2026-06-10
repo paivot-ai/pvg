@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/paivot-ai/pvg/internal/loop"
@@ -123,6 +124,93 @@ func TestCheckSharedConfigConsistency_GitPaivotManagedNoShared(t *testing.T) {
 	f := checkSharedConfigConsistency(root)
 	if f.Status != StatusWarn {
 		t.Fatalf("expected warn (git repo without shared vault config), got %s: %s", f.Status, f.Message)
+	}
+}
+
+// --- vault-divergence ---
+
+func setupDivergedVaults(t *testing.T) (root, localVault, sharedVault string) {
+	t.Helper()
+	root = t.TempDir()
+	localVault = filepath.Join(root, ".vault")
+	sharedVault = filepath.Join(root, ".git", "paivot", "nd-vault")
+
+	// Shared mode configured and initialized.
+	if err := os.MkdirAll(filepath.Join(localVault, "issues"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(sharedVault, "issues"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	config := "# nd shared-worktree state\nmode: git_common_dir\npath: paivot/nd-vault\n"
+	if err := os.WriteFile(filepath.Join(localVault, ".nd-shared.yaml"), []byte(config), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sharedVault, ".nd.yaml"), []byte("vault: shared\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return root, localVault, sharedVault
+}
+
+func TestCheckVaultDivergence_LegacyMarkerFails(t *testing.T) {
+	root, localVault, sharedVault := setupDivergedVaults(t)
+
+	// Legacy local vault still initialized, with a diverging issue file.
+	if err := os.WriteFile(filepath.Join(localVault, ".nd.yaml"), []byte("vault: legacy\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(localVault, "issues", "TIX-1.md"), []byte("status: open\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sharedVault, "issues", "TIX-1.md"), []byte("status: closed\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	f := checkVaultDivergence(root)
+	if f.Status != StatusFail || !f.Fixable {
+		t.Fatalf("expected fixable fail, got %s (fixable=%v): %s", f.Status, f.Fixable, f.Message)
+	}
+	if !strings.Contains(f.Message, "1 overlapping issue file(s) differ") {
+		t.Fatalf("expected divergent issue count in message, got: %s", f.Message)
+	}
+
+	// --fix decommissions the marker but keeps legacy issue files.
+	msg := fixVaultDivergence(root)
+	if !strings.Contains(msg, "removed legacy marker") {
+		t.Fatalf("fix did not decommission: %s", msg)
+	}
+	if _, err := os.Stat(filepath.Join(localVault, ".nd.yaml")); !os.IsNotExist(err) {
+		t.Fatalf("legacy marker still present (stat err = %v)", err)
+	}
+	if _, err := os.Stat(filepath.Join(localVault, "issues", "TIX-1.md")); err != nil {
+		t.Fatalf("legacy issue files must remain: %v", err)
+	}
+
+	if f := checkVaultDivergence(root); f.Status != StatusPass {
+		t.Fatalf("expected pass after fix, got %s: %s", f.Status, f.Message)
+	}
+}
+
+func TestCheckVaultDivergence_CleanSharedModePasses(t *testing.T) {
+	root, _, _ := setupDivergedVaults(t)
+	f := checkVaultDivergence(root)
+	if f.Status != StatusPass {
+		t.Fatalf("expected pass (no legacy marker), got %s: %s", f.Status, f.Message)
+	}
+}
+
+func TestCheckVaultDivergence_LocalModePasses(t *testing.T) {
+	root := t.TempDir()
+	localVault := filepath.Join(root, ".vault")
+	if err := os.MkdirAll(localVault, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(localVault, ".nd.yaml"), []byte("vault: ok\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	f := checkVaultDivergence(root)
+	if f.Status != StatusPass {
+		t.Fatalf("expected pass (single local vault), got %s: %s", f.Status, f.Message)
 	}
 }
 
@@ -257,8 +345,8 @@ func TestRunAll_ProducesReport(t *testing.T) {
 	}
 
 	r := RunAll(root)
-	if len(r.Findings) != 6 {
-		t.Fatalf("expected 6 findings, got %d", len(r.Findings))
+	if len(r.Findings) != 7 {
+		t.Fatalf("expected 7 findings, got %d", len(r.Findings))
 	}
 
 	names := make(map[string]bool)

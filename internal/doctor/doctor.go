@@ -48,6 +48,7 @@ func RunAll(projectRoot string) Report {
 	r.Findings = append(r.Findings, checkVaultResolution(projectRoot))
 	r.Findings = append(r.Findings, checkNDReachable())
 	r.Findings = append(r.Findings, checkSharedConfigConsistency(projectRoot))
+	r.Findings = append(r.Findings, checkVaultDivergence(projectRoot))
 	r.Findings = append(r.Findings, checkNDDoctor(projectRoot))
 	r.Findings = append(r.Findings, checkLoopState(projectRoot))
 	r.Findings = append(r.Findings, checkWorktreeHygiene(projectRoot))
@@ -76,6 +77,10 @@ func Fix(projectRoot string, report Report) []string {
 			}
 		case "nd-doctor":
 			if msg := fixNDDoctor(projectRoot); msg != "" {
+				actions = append(actions, msg)
+			}
+		case "vault-divergence":
+			if msg := fixVaultDivergence(projectRoot); msg != "" {
 				actions = append(actions, msg)
 			}
 		}
@@ -157,6 +162,77 @@ func checkSharedConfigConsistency(projectRoot string) Finding {
 		return Finding{Name: "shared-config-consistency", Status: StatusFail, Message: fmt.Sprintf("shared config points to nonexistent path: %s", vaultDir)}
 	}
 	return Finding{Name: "shared-config-consistency", Status: StatusPass, Message: fmt.Sprintf("shared vault at %s", vaultDir)}
+}
+
+// checkVaultDivergence detects a legacy initialized local .vault coexisting
+// with a different live vault. Anything invoking `nd --vault .vault`
+// directly would read and write a store the guard and loop never see, so
+// PM acceptances and status changes silently vanish.
+func checkVaultDivergence(projectRoot string) Finding {
+	resolved, err := ndvault.Resolve(projectRoot)
+	if err != nil {
+		return Finding{Name: "vault-divergence", Status: StatusSkip, Message: "skipped (vault resolution failed)"}
+	}
+	localVault := filepath.Join(projectRoot, ".vault")
+	if filepath.Clean(resolved) == filepath.Clean(localVault) {
+		return Finding{Name: "vault-divergence", Status: StatusPass, Message: "single vault (local mode)"}
+	}
+	if _, err := os.Stat(filepath.Join(localVault, ".nd.yaml")); err != nil {
+		return Finding{Name: "vault-divergence", Status: StatusPass, Message: "no legacy local vault"}
+	}
+
+	msg := fmt.Sprintf("legacy local vault %s is initialized while the live vault is %s -- direct 'nd --vault .vault' writes diverge from what the guard reads", localVault, resolved)
+	if n := countDivergentIssues(localVault, resolved); n > 0 {
+		msg += fmt.Sprintf("; %d overlapping issue file(s) differ", n)
+	}
+	msg += ". Reconcile newer legacy writes into the live vault first, then run 'pvg doctor --fix' to decommission the legacy marker"
+	return Finding{Name: "vault-divergence", Status: StatusFail, Message: msg, Fixable: true}
+}
+
+// countDivergentIssues reports how many issue files exist in both stores
+// with different content.
+func countDivergentIssues(localVault, sharedVault string) int {
+	entries, err := os.ReadDir(filepath.Join(localVault, "issues"))
+	if err != nil {
+		return 0
+	}
+	count := 0
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".md") {
+			continue
+		}
+		localData, err := os.ReadFile(filepath.Join(localVault, "issues", entry.Name()))
+		if err != nil {
+			continue
+		}
+		sharedData, err := os.ReadFile(filepath.Join(sharedVault, "issues", entry.Name()))
+		if err != nil {
+			continue
+		}
+		if string(localData) != string(sharedData) {
+			count++
+		}
+	}
+	return count
+}
+
+// fixVaultDivergence decommissions the legacy local vault by removing its
+// .nd.yaml marker, after confirming the live vault is initialized. Legacy
+// issue files are left in place as inert history -- data reconciliation is
+// deliberately manual because neither store can be assumed authoritative.
+func fixVaultDivergence(projectRoot string) string {
+	resolved, err := ndvault.Resolve(projectRoot)
+	if err != nil {
+		return ""
+	}
+	if _, err := os.Stat(filepath.Join(resolved, ".nd.yaml")); err != nil {
+		return fmt.Sprintf("vault-divergence: NOT fixed -- live vault %s is not initialized", resolved)
+	}
+	marker := filepath.Join(projectRoot, ".vault", ".nd.yaml")
+	if err := os.Remove(marker); err != nil {
+		return fmt.Sprintf("vault-divergence: NOT fixed -- %v", err)
+	}
+	return fmt.Sprintf("vault-divergence: removed legacy marker %s (legacy issue files left in place; live vault is %s)", marker, resolved)
 }
 
 func checkNDDoctor(projectRoot string) Finding {

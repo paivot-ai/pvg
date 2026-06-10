@@ -11,10 +11,13 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 
+	"github.com/paivot-ai/pvg/internal/ndvault"
 	"github.com/paivot-ai/pvg/internal/paivotcfg"
 	"github.com/paivot-ai/pvg/internal/providers"
+	"github.com/paivot-ai/pvg/internal/worktree"
 )
 
 // RunIssues handles `pvg issues <subcommand> [args...]`.
@@ -102,12 +105,25 @@ func openBacklog() (*providers.BacklogRouter, error) {
 	if err != nil {
 		return nil, err
 	}
+	if cfg.Backlog.Primary.Config == nil {
+		cfg.Backlog.Primary.Config = map[string]interface{}{}
+	}
+	if err := normalizeNDVault(cfg.Backlog.Primary.Adapter, cfg.Backlog.Primary.Config); err != nil {
+		return nil, err
+	}
 	primary, err := providers.BuildBacklog(cfg.Backlog.Primary.Adapter, cfg.Backlog.Primary.Config)
 	if err != nil {
 		return nil, fmt.Errorf("build primary backlog: %w", err)
 	}
 	mirrors := make([]providers.BacklogAdapter, 0, len(cfg.Backlog.Mirrors))
-	for _, m := range cfg.Backlog.Mirrors {
+	for i := range cfg.Backlog.Mirrors {
+		m := &cfg.Backlog.Mirrors[i]
+		if m.Config == nil {
+			m.Config = map[string]interface{}{}
+		}
+		if err := normalizeNDVault(m.Adapter, m.Config); err != nil {
+			return nil, err
+		}
 		mirror, err := providers.BuildBacklog(m.Adapter, m.Config)
 		if err != nil {
 			return nil, fmt.Errorf("build mirror backlog %q: %w", m.Adapter, err)
@@ -115,6 +131,37 @@ func openBacklog() (*providers.BacklogRouter, error) {
 		mirrors = append(mirrors, mirror)
 	}
 	return providers.NewBacklogRouter(primary, mirrors, nil), nil
+}
+
+// Overridable for tests.
+var ensureNDVault = ndvault.Ensure
+
+// normalizeNDVault rewrites a relative nd vault path (including the ".vault"
+// default) to the shared live vault, resolved exactly like `pvg nd`. Without
+// this, `pvg issues` writes to a different store than the guard and the loop
+// read, and the backlog silently diverges across agents. Explicit absolute
+// paths are honored as deliberate overrides.
+func normalizeNDVault(adapter string, config map[string]interface{}) error {
+	if adapter != "nd" {
+		return nil
+	}
+	if v, _ := config["vault"].(string); v != "" && filepath.IsAbs(v) {
+		return nil
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		return err
+	}
+	root := cwd
+	if mainRoot, rerr := worktree.ResolveProjectRoot(cwd); rerr == nil {
+		root = mainRoot
+	}
+	dir, err := ensureNDVault(root)
+	if err != nil {
+		return fmt.Errorf("resolve nd vault: %w", err)
+	}
+	config["vault"] = dir
+	return nil
 }
 
 func issuesCreate(ctx context.Context, r *providers.BacklogRouter, args []string) error {

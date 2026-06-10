@@ -168,6 +168,15 @@ func TestEnsure_MigratesLegacyLocalVault(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(want, "issues", "TIX-1.md")); err != nil {
 		t.Fatalf("issue not migrated: %v", err)
 	}
+
+	// The legacy marker must be decommissioned so no resolver (or hardcoded
+	// `nd --vault .vault`) can silently target the stale store again.
+	if _, err := os.Stat(filepath.Join(localVault, ".nd.yaml")); !os.IsNotExist(err) {
+		t.Fatalf("legacy .nd.yaml not decommissioned (stat err = %v)", err)
+	}
+	if _, err := os.Stat(filepath.Join(localVault, "issues", "TIX-1.md")); err != nil {
+		t.Fatalf("legacy issue files must stay as inert history: %v", err)
+	}
 }
 
 func TestEnsure_NonGitProjectKeepsLocalVault(t *testing.T) {

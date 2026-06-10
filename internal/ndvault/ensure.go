@@ -194,6 +194,15 @@ func migrateLegacyVault(projectRoot, vaultDir string) (bool, error) {
 	if err := copyVaultFile(localConfig, filepath.Join(vaultDir, ".nd.yaml")); err != nil {
 		return false, fmt.Errorf("migrate .nd.yaml: %w", err)
 	}
+
+	// Decommission the legacy marker so no resolver -- pvg, bare nd, or a
+	// hardcoded `nd --vault .vault` -- can silently target the stale local
+	// store again. Direct invocations against .vault now fail loudly
+	// ("not initialized") instead of diverging. The legacy issue files
+	// stay in place as inert history.
+	if err := os.Remove(localConfig); err != nil && !os.IsNotExist(err) {
+		return false, fmt.Errorf("decommission legacy vault marker: %w", err)
+	}
 	return true, nil
 }
 

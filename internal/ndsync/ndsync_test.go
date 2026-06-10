@@ -289,3 +289,57 @@ func TestSyncRestore_RoundTrip(t *testing.T) {
 		}
 	}
 }
+
+func TestCommitSnapshot_CommitsAndIsIdempotent(t *testing.T) {
+	root := t.TempDir()
+	run := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", append([]string{"-C", root}, args...)...)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	run("init", "-q")
+	run("config", "user.email", "test@test")
+	run("config", "user.name", "test")
+	if err := os.WriteFile(filepath.Join(root, "README.md"), []byte("x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	run("add", "-A")
+	run("commit", "-qm", "init")
+
+	snapDir := filepath.Join(SnapshotDir(root), "issues")
+	if err := os.MkdirAll(snapDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(snapDir, "PROJ-a.md"), []byte("status: open\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	committed, err := CommitSnapshot(root)
+	if err != nil {
+		t.Fatalf("CommitSnapshot() error: %v", err)
+	}
+	if !committed {
+		t.Fatal("expected a commit for a new snapshot")
+	}
+
+	// Working tree must be clean for the snapshot dir afterwards.
+	status := exec.Command("git", "-C", root, "status", "--porcelain", "--", ".vault/backlog-snapshot")
+	out, err := status.Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out) != 0 {
+		t.Fatalf("snapshot still dirty after commit:\n%s", out)
+	}
+
+	// Second call with no changes is a clean no-op.
+	committed, err = CommitSnapshot(root)
+	if err != nil {
+		t.Fatalf("CommitSnapshot() second call error: %v", err)
+	}
+	if committed {
+		t.Fatal("expected no-op when snapshot matches HEAD")
+	}
+}

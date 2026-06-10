@@ -340,6 +340,12 @@ func TestOpenBacklog_LoadsConfigOrDefaults(t *testing.T) {
 		t.Fatalf("mkdir: %v", err)
 	}
 
+	// Vault resolution is exercised separately (TestNormalizeNDVault_*);
+	// this test cares about config loading and router wiring.
+	oldEnsure := ensureNDVault
+	ensureNDVault = func(string) (string, error) { return filepath.Join(dir, ".vault"), nil }
+	t.Cleanup(func() { ensureNDVault = oldEnsure })
+
 	old, _ := os.Getwd()
 	t.Cleanup(func() { _ = os.Chdir(old) })
 	if err := os.Chdir(dir); err != nil {
@@ -372,4 +378,46 @@ func captureStdout(t *testing.T, fn func() error) (string, error) {
 		t.Fatalf("read stdout: %v", readErr)
 	}
 	return string(out), runErr
+}
+
+func TestNormalizeNDVault_RewritesRelativeToSharedVault(t *testing.T) {
+	old := ensureNDVault
+	ensureNDVault = func(string) (string, error) { return "/repo/.git/paivot/nd-vault", nil }
+	t.Cleanup(func() { ensureNDVault = old })
+
+	// Default and relative paths are rewritten -- `pvg issues` must resolve
+	// the same store the guard and loop read.
+	cfg := map[string]interface{}{"vault": ".vault"}
+	if err := normalizeNDVault("nd", cfg); err != nil {
+		t.Fatalf("normalizeNDVault() error: %v", err)
+	}
+	if cfg["vault"] != "/repo/.git/paivot/nd-vault" {
+		t.Fatalf("vault = %v, want shared vault", cfg["vault"])
+	}
+
+	empty := map[string]interface{}{}
+	if err := normalizeNDVault("nd", empty); err != nil {
+		t.Fatalf("normalizeNDVault() error: %v", err)
+	}
+	if empty["vault"] != "/repo/.git/paivot/nd-vault" {
+		t.Fatalf("vault = %v, want shared vault for empty config", empty["vault"])
+	}
+
+	// Explicit absolute paths are deliberate overrides.
+	abs := map[string]interface{}{"vault": "/explicit/override"}
+	if err := normalizeNDVault("nd", abs); err != nil {
+		t.Fatalf("normalizeNDVault() error: %v", err)
+	}
+	if abs["vault"] != "/explicit/override" {
+		t.Fatalf("vault = %v, absolute override must be honored", abs["vault"])
+	}
+
+	// Non-nd adapters are untouched.
+	linear := map[string]interface{}{"vault": ".vault"}
+	if err := normalizeNDVault("linear", linear); err != nil {
+		t.Fatalf("normalizeNDVault() error: %v", err)
+	}
+	if linear["vault"] != ".vault" {
+		t.Fatalf("vault = %v, non-nd adapters must be untouched", linear["vault"])
+	}
 }

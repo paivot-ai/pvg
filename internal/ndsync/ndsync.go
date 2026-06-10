@@ -8,10 +8,14 @@ package ndsync
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
 )
+
+// For testing: allow mocking exec.Command.
+var execCommand = exec.Command
 
 const snapshotRelDir = ".vault/backlog-snapshot"
 const ndConfigName = ".nd.yaml"
@@ -169,6 +173,32 @@ func Restore(projectRoot, vaultDir string, force bool) (RestoreResult, error) {
 	}
 
 	return res, nil
+}
+
+// CommitSnapshot stages and commits the snapshot directory, making
+// `pvg nd sync --commit` one atomic durability step. Returns false with no
+// error when the snapshot already matches HEAD -- a perpetually dirty
+// tracked snapshot breaks worktree-cleanliness checks mid-loop, so sync
+// and commit must never be separated in unattended runs.
+func CommitSnapshot(projectRoot string) (bool, error) {
+	rel := filepath.FromSlash(snapshotRelDir)
+
+	add := execCommand("git", "-C", projectRoot, "add", "--", rel)
+	if out, err := add.CombinedOutput(); err != nil {
+		return false, fmt.Errorf("git add %s: %w\n%s", rel, err, strings.TrimSpace(string(out)))
+	}
+
+	// Exit 0 = no staged changes for the snapshot, nothing to commit.
+	diff := execCommand("git", "-C", projectRoot, "diff", "--cached", "--quiet", "--", rel)
+	if diff.Run() == nil {
+		return false, nil
+	}
+
+	commit := execCommand("git", "-C", projectRoot, "commit", "-m", "chore(paivot): backlog snapshot", "--", rel)
+	if out, err := commit.CombinedOutput(); err != nil {
+		return false, fmt.Errorf("git commit snapshot: %w\n%s", err, strings.TrimSpace(string(out)))
+	}
+	return true, nil
 }
 
 // issueFiles lists the *.md filenames in dir, sorted. A missing directory
