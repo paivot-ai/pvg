@@ -350,31 +350,10 @@ func replaceDir(src, dest string) error {
 	}
 	// Rename can fail across filesystems (temp dir on another volume); fall
 	// back to a recursive copy.
-	if err := copyTree(src, dest); err != nil {
+	if err := os.CopyFS(dest, os.DirFS(src)); err != nil {
 		return fmt.Errorf("install %s: %w", dest, err)
 	}
 	return nil
-}
-
-func copyTree(src, dest string) error {
-	return filepath.Walk(src, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-		rel, err := filepath.Rel(src, path)
-		if err != nil {
-			return err
-		}
-		target := filepath.Join(dest, rel)
-		if info.IsDir() {
-			return os.MkdirAll(target, 0o755)
-		}
-		data, err := os.ReadFile(path)
-		if err != nil {
-			return err
-		}
-		return os.WriteFile(target, data, info.Mode().Perm())
-	})
 }
 
 func copyExecutable(src, dest string) error {
