@@ -6,7 +6,9 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 func TestResolve_UsesPaivotVaultOverride(t *testing.T) {
@@ -228,6 +230,83 @@ func TestEnsure_EnvOverrideSkipsSharedConfig(t *testing.T) {
 	}
 	if _, err := os.Stat(SharedConfigPath(projectRoot)); !os.IsNotExist(err) {
 		t.Fatalf("shared config must not be written under env override (stat err = %v)", err)
+	}
+}
+
+func TestEnsure_FromSiblingWorktreeWritesConfigAtMainRoot(t *testing.T) {
+	mainRoot, worktreeRoot, sharedVault := setupSiblingWorktree(t)
+
+	oldExec := execCommand
+	defer func() { execCommand = oldExec }()
+	execCommand = func(name string, args ...string) *exec.Cmd {
+		if err := os.WriteFile(filepath.Join(sharedVault, ".nd.yaml"), []byte("vault: ok\n"), 0o644); err != nil {
+			t.Fatalf("write .nd.yaml: %v", err)
+		}
+		return exec.Command("sh", "-c", "exit 0")
+	}
+
+	got, err := Ensure(worktreeRoot)
+	if err != nil {
+		t.Fatalf("Ensure() error: %v", err)
+	}
+	if got != sharedVault {
+		t.Fatalf("Ensure() = %q, want %q", got, sharedVault)
+	}
+
+	// Config must land in the MAIN checkout, never inside the worktree
+	// (an untracked file there would dirty it and be lost with cleanup).
+	if _, err := os.Stat(SharedConfigPath(mainRoot)); err != nil {
+		t.Fatalf("config not written at main root: %v", err)
+	}
+	if _, err := os.Stat(SharedConfigPath(worktreeRoot)); !os.IsNotExist(err) {
+		t.Fatalf("config must not be written inside the worktree (stat err = %v)", err)
+	}
+}
+
+func TestEnsure_ConcurrentCallsInitOnce(t *testing.T) {
+	projectRoot, sharedVault := setupSharedWorktree(t)
+
+	oldExec := execCommand
+	defer func() { execCommand = oldExec }()
+
+	var mu sync.Mutex
+	initCalls := 0
+	execCommand = func(name string, args ...string) *exec.Cmd {
+		mu.Lock()
+		initCalls++
+		mu.Unlock()
+		// Widen the race window before the vault becomes initialized.
+		time.Sleep(100 * time.Millisecond)
+		if err := os.WriteFile(filepath.Join(sharedVault, ".nd.yaml"), []byte("vault: ok\n"), 0o644); err != nil {
+			t.Errorf("write .nd.yaml: %v", err)
+		}
+		return exec.Command("sh", "-c", "exit 0")
+	}
+
+	const workers = 8
+	results := make(chan error, workers)
+	dirs := make(chan string, workers)
+	for i := 0; i < workers; i++ {
+		go func() {
+			dir, err := Ensure(projectRoot)
+			dirs <- dir
+			results <- err
+		}()
+	}
+	for i := 0; i < workers; i++ {
+		if err := <-results; err != nil {
+			t.Fatalf("concurrent Ensure() error: %v", err)
+		}
+		if dir := <-dirs; dir != sharedVault {
+			t.Fatalf("concurrent Ensure() = %q, want %q", dir, sharedVault)
+		}
+	}
+
+	if initCalls != 1 {
+		t.Fatalf("nd init ran %d times, want exactly 1", initCalls)
+	}
+	if _, err := os.Stat(filepath.Join(sharedVault, ".init.lock")); !os.IsNotExist(err) {
+		t.Fatalf("init lock not released (stat err = %v)", err)
 	}
 }
 

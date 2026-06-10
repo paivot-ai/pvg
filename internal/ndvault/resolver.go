@@ -29,9 +29,32 @@ func Resolve(projectRoot string) (string, error) {
 
 	projectRoot = filepath.Clean(projectRoot)
 
-	// Shared vault ONLY when explicitly configured via .nd-shared.yaml.
+	// Shared vault when explicitly configured via .nd-shared.yaml.
 	if shared, err := resolveSharedVaultDir(projectRoot); err == nil {
 		return shared, nil
+	}
+
+	// Convergence fallbacks for linked worktrees and stale branches whose
+	// checkout does not (yet) carry the tracked config. Without these,
+	// concurrent agents resolve different vault views and nd writes
+	// diverge across loop iterations.
+	if commonDir, err := gitCommonDir(projectRoot); err == nil {
+		// The main checkout may hold the config even when this worktree
+		// branched before it was committed.
+		if filepath.Base(commonDir) == ".git" {
+			mainConfig := SharedConfigPath(filepath.Dir(commonDir))
+			if _, statErr := os.Stat(mainConfig); statErr == nil {
+				if mode, relPath, perr := parseSharedConfig(mainConfig); perr == nil && mode == "git_common_dir" {
+					return filepath.Join(commonDir, relPath), nil
+				}
+			}
+		}
+		// Or the shared vault may already be initialized even when no
+		// visible checkout carries the config.
+		shared := filepath.Join(commonDir, sharedVaultRelPath)
+		if _, statErr := os.Stat(filepath.Join(shared, ".nd.yaml")); statErr == nil {
+			return shared, nil
+		}
 	}
 
 	// Default: local .vault/ directory.
@@ -48,11 +71,19 @@ func SharedConfigPath(projectRoot string) string {
 	return filepath.Join(filepath.Clean(projectRoot), sharedConfigRelPath)
 }
 
-// SharedConfigured reports whether projectRoot or an ancestor carries a
-// shared-vault config.
+// SharedConfigured reports whether projectRoot, an ancestor, or the main
+// checkout of its git repository carries a shared-vault config.
 func SharedConfigured(projectRoot string) bool {
-	_, _, err := findSharedConfig(filepath.Clean(projectRoot))
-	return err == nil
+	projectRoot = filepath.Clean(projectRoot)
+	if _, _, err := findSharedConfig(projectRoot); err == nil {
+		return true
+	}
+	if commonDir, err := gitCommonDir(projectRoot); err == nil && filepath.Base(commonDir) == ".git" {
+		if _, err := os.Stat(SharedConfigPath(filepath.Dir(commonDir))); err == nil {
+			return true
+		}
+	}
+	return false
 }
 
 // FindRepoRoot returns the nearest ancestor of start containing .git.

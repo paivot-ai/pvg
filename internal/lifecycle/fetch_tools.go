@@ -96,6 +96,11 @@ func fetchTool(spec toolSpec, force bool) error {
 			return err
 		}
 		fmt.Printf("OK: %s %s installed to %s\n", spec.Name, tag, dest)
+		if !installed {
+			if _, err := lookPath(spec.Name); err != nil {
+				fmt.Printf("WARN: %s is not on PATH -- add %s to PATH\n", spec.Name, dest)
+			}
+		}
 	}
 
 	if !force && binaryCurrent && skillCurrent(spec, tag) {
@@ -190,8 +195,9 @@ func installToolBinary(spec toolSpec, tag, destDir string) error {
 		return fmt.Errorf("create %s: %w", destDir, err)
 	}
 	// Stage next to the destination so the final rename is atomic and safe
-	// even when the old binary is currently running.
-	staged := filepath.Join(destDir, "."+spec.Name+".pvg-new")
+	// even when the old binary is currently running. The PID suffix keeps
+	// concurrent fetch-tools runs from corrupting each other's staging file.
+	staged := filepath.Join(destDir, fmt.Sprintf(".%s.pvg-new-%d", spec.Name, os.Getpid()))
 	if err := copyExecutable(extracted, staged); err != nil {
 		return fmt.Errorf("stage binary: %w", err)
 	}

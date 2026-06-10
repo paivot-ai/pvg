@@ -133,6 +133,77 @@ func TestResolve_PaivotManagedWithoutSharedVaultFallsBackToLocal(t *testing.T) {
 	}
 }
 
+// setupSiblingWorktree builds a main checkout with a .git dir plus a linked
+// worktree OUTSIDE the main root, so upward config walks from the worktree
+// cannot reach the main checkout's .vault.
+func setupSiblingWorktree(t *testing.T) (mainRoot, worktreeRoot, sharedVault string) {
+	t.Helper()
+
+	base := t.TempDir()
+	mainRoot = filepath.Join(base, "repo")
+	worktreeRoot = filepath.Join(base, "wt")
+	gitDir := filepath.Join(mainRoot, ".git")
+	worktreeGitDir := filepath.Join(gitDir, "worktrees", "wt")
+	sharedVault = filepath.Join(gitDir, sharedVaultRelPath)
+
+	for _, dir := range []string{worktreeRoot, worktreeGitDir, filepath.Join(mainRoot, ".vault")} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	gitPtr := "gitdir: " + filepath.ToSlash(worktreeGitDir) + "\n"
+	if err := os.WriteFile(filepath.Join(worktreeRoot, ".git"), []byte(gitPtr), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(worktreeGitDir, "commondir"), []byte("../..\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return mainRoot, worktreeRoot, sharedVault
+}
+
+func TestResolve_SiblingWorktreeFindsMainCheckoutConfig(t *testing.T) {
+	mainRoot, worktreeRoot, sharedVault := setupSiblingWorktree(t)
+
+	// Config exists ONLY in the main checkout (e.g. not yet committed to
+	// the worktree's branch).
+	if err := os.WriteFile(SharedConfigPath(mainRoot), []byte(DefaultSharedConfig()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := Resolve(worktreeRoot)
+	if err != nil {
+		t.Fatalf("Resolve() error: %v", err)
+	}
+	if got != sharedVault {
+		t.Fatalf("Resolve() from sibling worktree = %q, want %q", got, sharedVault)
+	}
+}
+
+func TestResolve_FallsBackToInitializedSharedVault(t *testing.T) {
+	_, worktreeRoot, sharedVault := setupSiblingWorktree(t)
+
+	// No config anywhere, but the shared vault is initialized: it is the
+	// live source of record and must win over any local fallback.
+	if err := os.MkdirAll(sharedVault, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sharedVault, ".nd.yaml"), []byte("vault: ok\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// A local .vault in the worktree (tracked checkout content) must lose.
+	if err := os.MkdirAll(filepath.Join(worktreeRoot, ".vault"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := Resolve(worktreeRoot)
+	if err != nil {
+		t.Fatalf("Resolve() error: %v", err)
+	}
+	if got != sharedVault {
+		t.Fatalf("Resolve() = %q, want initialized shared vault %q", got, sharedVault)
+	}
+}
+
 func setupSharedWorktree(t *testing.T) (projectRoot, sharedVault string) {
 	t.Helper()
 
