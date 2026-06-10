@@ -689,3 +689,50 @@ func TestParseYAMLArray_Blank(t *testing.T) {
 		t.Errorf("expected empty, got %v", result)
 	}
 }
+
+// Regression: a ';'-chained checkout+merge ran the merge even though the
+// checkout aborted on a dirty working tree, landing an accepted story
+// directly on main. Only '&&'-chaining may transfer trust to the checkout
+// target; any other separator must be judged against the REAL current branch.
+func TestCheckMergeGate_SemicolonChainedCheckoutIsNotTrusted(t *testing.T) {
+	repo := t.TempDir()
+	runGit(t, repo, "init", "-b", "main")
+	runGit(t, repo, "config", "user.name", "Test User")
+	runGit(t, repo, "config", "user.email", "test@example.com")
+	if err := os.WriteFile(filepath.Join(repo, "README.md"), []byte("hi\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, repo, "add", "README.md")
+	runGit(t, repo, "commit", "-m", "init")
+	runGit(t, repo, "branch", "epic/PROJ-epic1")
+	runGit(t, repo, "branch", "story/PROJ-a1b2")
+	// HEAD stays on main -- the dangerous state.
+
+	writeProjectSettings(t, repo)
+	sharedVault := filepath.Join(repo, ".git", "paivot", "nd-vault")
+	issuesDir := filepath.Join(sharedVault, "issues")
+	if err := os.MkdirAll(issuesDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	content := "---\ntitle: Test\nstatus: closed\nparent: PROJ-epic1\nlabels: [delivered, accepted]\n---\nBody"
+	if err := os.WriteFile(filepath.Join(issuesDir, "PROJ-a1b2.md"), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, cmd := range []string{
+		`git checkout epic/PROJ-epic1; git merge --no-ff story/PROJ-a1b2 -m "merge"`,
+		`git checkout epic/PROJ-epic1 || true; git merge --no-ff story/PROJ-a1b2 -m "merge"`,
+		`git checkout epic/PROJ-epic1 & git merge --no-ff story/PROJ-a1b2 -m "merge"`,
+	} {
+		r := CheckMergeGate(repo, cmd)
+		if r.Allowed {
+			t.Fatalf("merge must be judged against real HEAD (main) for non-&& chain: %s", cmd)
+		}
+	}
+
+	// The && form remains trusted.
+	r := CheckMergeGate(repo, `git checkout epic/PROJ-epic1 && git merge --no-ff story/PROJ-a1b2 -m "merge"`)
+	if !r.Allowed {
+		t.Fatalf("&&-chained checkout+merge must be allowed, got: %s", r.Reason)
+	}
+}

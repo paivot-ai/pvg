@@ -14,7 +14,7 @@
 //	pvg guard                    # PreToolUse scope guard (stdin: JSON)
 //	pvg nd root --ensure         # Resolve/init shared nd vault
 //	pvg nd ready --json          # Run nd against shared live vault
-//	pvg nd sync [--commit]       # Export live vault to snapshot (and commit it)
+//	pvg nd sync [--commit|--out DIR] # Export live vault snapshot (commit it, or write out-of-tree)
 //	pvg nd restore [--force]     # Restore live vault from the snapshot
 //	pvg seed [--force]           # Seed vault with agent prompts
 //	pvg story verify-delivery ID # Check delivery-proof completeness
@@ -199,7 +199,7 @@ Commands:
   loop recover           Clean up after context loss
   dispatcher on|off|status  Manage dispatcher mode
   nd root [--ensure]       Print (and optionally initialize) the shared live nd vault
-  nd sync [--commit]       Export the live nd vault to .vault/backlog-snapshot/ (git durability); --commit stages and commits it
+  nd sync [--commit|--out DIR]  Export the live nd vault snapshot; --commit commits the tracked copy, --out writes outside the repo (automation)
   nd restore [--force]     Restore the live nd vault from .vault/backlog-snapshot/
   nd <args...>             Run nd against the shared live vault
   issues <subcommand>      Backlog operations via configured adapter (nd, linear, ...)
@@ -413,12 +413,24 @@ func runND(args []string) error {
 
 	if args[0] == "sync" {
 		commit := false
-		for _, arg := range args[1:] {
-			if arg == "--commit" {
+		outDir := ""
+		rest := args[1:]
+		for i := 0; i < len(rest); i++ {
+			switch rest[i] {
+			case "--commit":
 				commit = true
-				continue
+			case "--out":
+				if i+1 >= len(rest) {
+					return fmt.Errorf("--out requires a directory argument")
+				}
+				i++
+				outDir = rest[i]
+			default:
+				return fmt.Errorf("usage: pvg nd sync [--commit] [--out DIR]")
 			}
-			return fmt.Errorf("usage: pvg nd sync [--commit]")
+		}
+		if commit && outDir != "" {
+			return fmt.Errorf("--commit applies to the tracked in-repo snapshot; it cannot be combined with --out")
 		}
 		projectRoot, err := resolveRoot()
 		if err != nil {
@@ -428,7 +440,14 @@ func runND(args []string) error {
 		if err != nil {
 			return fmt.Errorf("resolve nd vault: %w", err)
 		}
-		res, err := ndsync.Sync(projectRoot, vaultDir)
+		var res ndsync.SyncResult
+		if outDir != "" {
+			// Out-of-tree export: automation (cron snapshots) must never
+			// dirty the tracked working tree -- that aborts agent checkouts.
+			res, err = ndsync.SyncTo(outDir, vaultDir)
+		} else {
+			res, err = ndsync.Sync(projectRoot, vaultDir)
+		}
 		if err != nil {
 			return err
 		}

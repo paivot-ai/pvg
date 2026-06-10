@@ -53,12 +53,22 @@ func SnapshotDir(projectRoot string) string {
 	return filepath.Join(projectRoot, filepath.FromSlash(snapshotRelDir))
 }
 
-// Sync mirrors the live vault's issues/*.md plus its .nd.yaml into the
-// snapshot directory. It is a full mirror: snapshot issue files that no
-// longer exist in the live vault are deleted. The snapshot README is
-// rewritten on every sync.
+// Sync mirrors the live vault into the default tracked snapshot directory
+// under projectRoot. See SyncTo.
 func Sync(projectRoot, vaultDir string) (SyncResult, error) {
-	res := SyncResult{SnapshotDir: SnapshotDir(projectRoot)}
+	return SyncTo(SnapshotDir(projectRoot), vaultDir)
+}
+
+// SyncTo mirrors the live vault's issues/*.md plus its .nd.yaml into an
+// arbitrary snapshot directory. It is a full mirror: snapshot issue files
+// that no longer exist in the live vault are deleted. The snapshot README
+// is rewritten on every sync.
+//
+// Out-of-tree destinations exist for automation (cron off-box snapshots):
+// writing the tracked in-repo snapshot dirties the working tree, which
+// aborts agent checkouts mid-loop.
+func SyncTo(snapshotDir, vaultDir string) (SyncResult, error) {
+	res := SyncResult{SnapshotDir: snapshotDir}
 
 	liveConfig := filepath.Join(vaultDir, ndConfigName)
 	if _, err := os.Stat(liveConfig); err != nil {

@@ -357,15 +357,45 @@ func currentBranch(projectRoot string) (string, bool) {
 // fixes the PreToolUse timing issue where the hook fires before the chained
 // command executes.
 func effectiveTargetBranch(projectRoot, command string) (string, bool) {
-	if matches := gitCheckoutRe.FindStringSubmatch(command); len(matches) > 1 {
-		target := strings.TrimSpace(matches[1])
+	if loc := gitCheckoutRe.FindStringSubmatchIndex(command); loc != nil && loc[2] >= 0 {
+		target := strings.TrimSpace(command[loc[2]:loc[3]])
 		// Only trust the checkout target if it looks like a branch name
 		// (not a flag like -b or --detach)
 		if target != "" && !strings.HasPrefix(target, "-") {
-			return target, true
+			// Only trust the checkout when it precedes the merge and is
+			// &&-chained to it. With ';' (or '|', '&', newline) the merge
+			// still runs after a FAILED checkout -- e.g. a dirty working
+			// tree aborts the checkout and the story merges onto whatever
+			// branch HEAD was actually on (this landed a story on main).
+			// gitIntegrationRe's match starts ON the separator char, so a
+			// "&&" pair straddles the slice boundary -- include the matched
+			// char so the pair is seen whole.
+			if mloc := gitIntegrationRe.FindStringIndex(command); mloc != nil && mloc[0] > loc[1] && safeAndChain(command[loc[1]:mloc[0]+1]) {
+				return target, true
+			}
+			return currentBranch(projectRoot)
 		}
 	}
 	return currentBranch(projectRoot)
+}
+
+// safeAndChain reports whether a shell command fragment contains only
+// separators that stop execution on failure (&&). Any ';', '|', newline,
+// or single '&' means a later command runs even when an earlier one fails.
+func safeAndChain(s string) bool {
+	for i := 0; i < len(s); i++ {
+		switch s[i] {
+		case ';', '\n', '|':
+			return false
+		case '&':
+			if i+1 < len(s) && s[i+1] == '&' {
+				i++ // consume the pair
+				continue
+			}
+			return false // single & backgrounds the checkout
+		}
+	}
+	return true
 }
 
 // ReadIssueType reads the type from an nd issue's frontmatter.
