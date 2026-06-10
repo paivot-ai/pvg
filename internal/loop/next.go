@@ -1,6 +1,9 @@
 package loop
 
-import "fmt"
+import (
+	"fmt"
+	"strconv"
+)
 
 type queueSnapshot struct {
 	Delivered []ndIssue
@@ -280,6 +283,28 @@ func chooseNextActions(queues queueSnapshot, scope string, n int) []NextAction {
 	return actions
 }
 
+// hardTDDPhase reports which hard-TDD phase a story is in. The red-approved
+// label is the phase boundary: absent means the story is in (or awaiting
+// review of) the RED test-writing phase; present means RED was approved by
+// the PM and the story is in the GREEN implementation phase. Empty string
+// for stories without the hard-tdd label.
+func hardTDDPhase(issue ndIssue) string {
+	if !hasLabel(issue.Labels, "hard-tdd") {
+		return ""
+	}
+	if hasLabel(issue.Labels, "red-approved") {
+		return "green"
+	}
+	return "red"
+}
+
+func actionPhase(issue ndIssue) string {
+	if phase := hardTDDPhase(issue); phase != "" {
+		return phase
+	}
+	return "normal"
+}
+
 func pmReviewAction(issue ndIssue, scope string) NextAction {
 	return NextAction{
 		Kind:     "pm_review",
@@ -289,15 +314,12 @@ func pmReviewAction(issue ndIssue, scope string) NextAction {
 		Queue:    "delivered",
 		Scope:    scope,
 		HardTDD:  hasLabel(issue.Labels, "hard-tdd"),
-		Priority: "1",
+		Phase:    hardTDDPhase(issue),
+		Priority: strconv.Itoa(issue.Priority),
 	}
 }
 
 func developerReworkAction(issue ndIssue, scope string) NextAction {
-	phase := "normal"
-	if hasLabel(issue.Labels, "hard-tdd") {
-		phase = "rework"
-	}
 	return NextAction{
 		Kind:     "developer_rework",
 		Role:     "developer",
@@ -306,16 +328,12 @@ func developerReworkAction(issue ndIssue, scope string) NextAction {
 		Queue:    "rejected",
 		Scope:    scope,
 		HardTDD:  hasLabel(issue.Labels, "hard-tdd"),
-		Phase:    phase,
-		Priority: "2",
+		Phase:    actionPhase(issue),
+		Priority: strconv.Itoa(issue.Priority),
 	}
 }
 
 func developerNewAction(issue ndIssue, scope string) NextAction {
-	phase := "normal"
-	if hasLabel(issue.Labels, "hard-tdd") {
-		phase = "red"
-	}
 	return NextAction{
 		Kind:     "developer_new",
 		Role:     "developer",
@@ -324,8 +342,8 @@ func developerNewAction(issue ndIssue, scope string) NextAction {
 		Queue:    "ready",
 		Scope:    scope,
 		HardTDD:  hasLabel(issue.Labels, "hard-tdd"),
-		Phase:    phase,
-		Priority: "3",
+		Phase:    actionPhase(issue),
+		Priority: strconv.Itoa(issue.Priority),
 	}
 }
 

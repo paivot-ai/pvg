@@ -136,16 +136,15 @@ func openBacklog() (*providers.BacklogRouter, error) {
 // Overridable for tests.
 var ensureNDVault = ndvault.Ensure
 
-// normalizeNDVault rewrites a relative nd vault path (including the ".vault"
-// default) to the shared live vault, resolved exactly like `pvg nd`. Without
-// this, `pvg issues` writes to a different store than the guard and the loop
-// read, and the backlog silently diverges across agents. Explicit absolute
-// paths are honored as deliberate overrides.
+// normalizeNDVault rewrites the nd adapter's vault path to the shared live
+// vault, resolved exactly like `pvg nd`. Without this, `pvg issues` reads
+// and writes a different store than the guard and the loop, and the backlog
+// silently diverges across agents. The override is UNCONDITIONAL -- Paivot's
+// invariant is one live vault per repo, and a configured path pointing
+// anywhere else is exactly the silent-divergence bug this guards against.
+// Use the ND_VAULT_DIR environment override for deliberate redirection.
 func normalizeNDVault(adapter string, config map[string]interface{}) error {
 	if adapter != "nd" {
-		return nil
-	}
-	if v, _ := config["vault"].(string); v != "" && filepath.IsAbs(v) {
 		return nil
 	}
 	cwd, err := os.Getwd()
@@ -158,7 +157,17 @@ func normalizeNDVault(adapter string, config map[string]interface{}) error {
 	}
 	dir, err := ensureNDVault(root)
 	if err != nil {
+		// No resolvable live vault (non-git project without .vault). An
+		// explicitly configured vault is then the only pointer there is --
+		// and with nothing else resolvable, pvg nd and the guard fail too,
+		// so no second store can silently diverge from it.
+		if v, _ := config["vault"].(string); v != "" {
+			return nil
+		}
 		return fmt.Errorf("resolve nd vault: %w", err)
+	}
+	if v, _ := config["vault"].(string); v != "" && filepath.IsAbs(v) && filepath.Clean(v) != filepath.Clean(dir) {
+		fmt.Fprintf(os.Stderr, "WARN: ignoring configured nd vault %s -- using the shared live vault %s (set ND_VAULT_DIR to override deliberately)\n", v, dir)
 	}
 	config["vault"] = dir
 	return nil

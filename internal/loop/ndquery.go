@@ -41,25 +41,35 @@ func QueryWorkCounts(projectRoot, mode, targetEpic string) (WorkCounts, error) {
 }
 
 // queryAllCounts uses nd subcommands to gather counts across the whole backlog.
+//
+// The delivered label is AUTHORITATIVE regardless of status: a story whose
+// developer added the label without claiming it (status open + delivered)
+// is awaiting PM review, not ready work. Bucketing it as ready would
+// re-dispatch a developer on already-delivered work forever.
 func queryAllCounts(projectRoot string) (WorkCounts, error) {
 	var wc WorkCounts
+
+	// nd list caps results at 50 unless --limit is explicit; pass --limit 0
+	// so counts stay correct on backlogs over 50 issues.
+	deliveredIssues, err := runND(projectRoot, "list", "--status", "!closed", "--label", "delivered", "--limit", "0", "--json")
+	if err != nil {
+		return wc, fmt.Errorf("query delivered work: %w", err)
+	}
+	wc.Delivered = len(deliveredIssues)
+
 	readyIssues, err := runND(projectRoot, "ready", "--json")
 	if err != nil {
 		return wc, fmt.Errorf("query ready work: %w", err)
 	}
+	readyIssues = filterOutLabel(readyIssues, "delivered")
 	wc.Ready = len(readyIssues)
 
-	// In-progress issues (includes delivered -- we separate below).
-	// nd list caps results at 50 unless --limit is explicit; pass --limit 0
-	// so counts stay correct on backlogs over 50 issues.
 	ipIssues, err := runND(projectRoot, "list", "--status", "in_progress", "--limit", "0", "--json")
 	if err != nil {
 		return wc, fmt.Errorf("query in-progress work: %w", err)
 	}
 	for _, issue := range ipIssues {
-		if hasLabel(issue.Labels, "delivered") {
-			wc.Delivered++
-		} else {
+		if !hasLabel(issue.Labels, "delivered") {
 			wc.InProgress++
 		}
 	}
@@ -68,7 +78,7 @@ func queryAllCounts(projectRoot string) (WorkCounts, error) {
 	if err != nil {
 		return wc, fmt.Errorf("query rejected work: %w", err)
 	}
-	wc.Rejected = len(rejectedIssues)
+	wc.Rejected = len(filterOutLabel(rejectedIssues, "delivered"))
 
 	// Blocked issues
 	blockedIssues, err := runND(projectRoot, "blocked", "--json")
@@ -81,7 +91,7 @@ func queryAllCounts(projectRoot string) (WorkCounts, error) {
 	if err != nil {
 		return wc, fmt.Errorf("query non-closed work: %w", err)
 	}
-	wc.Other = countOtherIssues(readyIssues, ipIssues, blockedIssues, allIssues)
+	wc.Other = countOtherIssues(append(append([]ndIssue{}, readyIssues...), deliveredIssues...), ipIssues, blockedIssues, allIssues)
 
 	return wc, nil
 }
@@ -121,6 +131,10 @@ func queryEpicCounts(projectRoot, epicID string) (WorkCounts, error) {
 			}
 		case "open":
 			switch {
+			case hasLabel(issue.Labels, "delivered"):
+				// Delivered label is authoritative: an unclaimed delivery
+				// (open + delivered) awaits PM review, it is not ready work.
+				wc.Delivered++
 			case hasLabel(issue.Labels, "rejected"):
 				wc.Rejected++
 			case blockedSet[issue.ID]:
@@ -221,18 +235,25 @@ func QueryInProgress(projectRoot string) ([]ndIssue, error) {
 	return runND(projectRoot, "list", "--status", "in_progress", "--limit", "0", "--json")
 }
 
-// QueryDelivered returns in-progress stories labeled delivered.
+// QueryDelivered returns non-closed stories labeled delivered. Status is
+// deliberately NOT restricted to in_progress: a developer that labeled the
+// story without claiming it (status open) has still delivered.
 func QueryDelivered(projectRoot string, filters ...string) ([]ndIssue, error) {
-	args := []string{"list", "--status", "in_progress", "--label", "delivered", "--sort", "priority", "--limit", "0", "--json"}
+	args := []string{"list", "--status", "!closed", "--label", "delivered", "--sort", "priority", "--limit", "0", "--json"}
 	args = append(args, filters...)
 	return runND(projectRoot, args...)
 }
 
-// QueryRejected returns open stories labeled rejected.
+// QueryRejected returns open stories labeled rejected, excluding delivered
+// ones (a delivered+rejected combination is inconsistent; PM review wins).
 func QueryRejected(projectRoot string, filters ...string) ([]ndIssue, error) {
 	args := []string{"list", "--status", "open", "--label", "rejected", "--sort", "priority", "--limit", "0", "--json"}
 	args = append(args, filters...)
-	return runND(projectRoot, args...)
+	issues, err := runND(projectRoot, args...)
+	if err != nil {
+		return nil, err
+	}
+	return filterOutLabel(issues, "delivered"), nil
 }
 
 // QueryReady returns ready work, excluding rejected stories that must be reworked first.
@@ -243,7 +264,7 @@ func QueryReady(projectRoot string, filters ...string) ([]ndIssue, error) {
 	if err != nil {
 		return nil, err
 	}
-	return filterOutLabel(issues, "rejected"), nil
+	return filterOutLabel(filterOutLabel(issues, "rejected"), "delivered"), nil
 }
 
 // hasLabel checks if a label exists in a slice (case-insensitive).

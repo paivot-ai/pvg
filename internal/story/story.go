@@ -52,6 +52,32 @@ func Transition(projectRoot, action, storyID string, opts TransitionOptions) (st
 	}
 
 	switch action {
+	case "claim":
+		// Claiming at dispatch closes the duplicate-dispatch window: the
+		// story leaves the ready queue the moment the dispatcher decides to
+		// spawn a developer, not when the developer eventually mutates nd.
+		if err := runND(projectRoot, "update", storyID, "--status=in_progress"); err != nil {
+			return "", err
+		}
+	case "approve-red":
+		// Hard-TDD RED approval: tests are validated, story returns to the
+		// ready queue for the GREEN implementation phase. The red-approved
+		// label is the phase boundary the loop reads. Deliberately NOT a
+		// close: a RED story has tests only, no implementation.
+		if err := runND(projectRoot, "update", storyID, "--status=open"); err != nil {
+			return "", err
+		}
+		_ = runND(projectRoot, "labels", "rm", storyID, "delivered")
+		_ = runND(projectRoot, "labels", "rm", storyID, "rejected")
+		if err := runND(projectRoot, "labels", "add", storyID, "red-approved"); err != nil {
+			return "", err
+		}
+		if err := appendContract(projectRoot, storyID, "red-approved",
+			fmt.Sprintf("RED tests approved via pvg story approve-red on %s.", today()),
+			"[ ] GREEN developer must implement against the approved RED tests without modifying them.",
+		); err != nil {
+			return "", err
+		}
 	case "deliver":
 		if err := runND(projectRoot, "update", storyID, "--status=in_progress"); err != nil {
 			return "", err

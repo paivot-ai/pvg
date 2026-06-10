@@ -403,13 +403,14 @@ func TestNormalizeNDVault_RewritesRelativeToSharedVault(t *testing.T) {
 		t.Fatalf("vault = %v, want shared vault for empty config", empty["vault"])
 	}
 
-	// Explicit absolute paths are deliberate overrides.
+	// Explicit absolute paths are overridden too (one live vault per repo;
+	// ND_VAULT_DIR is the deliberate escape hatch).
 	abs := map[string]interface{}{"vault": "/explicit/override"}
 	if err := normalizeNDVault("nd", abs); err != nil {
 		t.Fatalf("normalizeNDVault() error: %v", err)
 	}
-	if abs["vault"] != "/explicit/override" {
-		t.Fatalf("vault = %v, absolute override must be honored", abs["vault"])
+	if abs["vault"] != "/repo/.git/paivot/nd-vault" {
+		t.Fatalf("vault = %v, configured absolute path must be overridden by the shared vault", abs["vault"])
 	}
 
 	// Non-nd adapters are untouched.

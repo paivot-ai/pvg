@@ -178,6 +178,16 @@ func checkVaultDivergence(projectRoot string) Finding {
 		return Finding{Name: "vault-divergence", Status: StatusPass, Message: "single vault (local mode)"}
 	}
 	if _, err := os.Stat(filepath.Join(localVault, ".nd.yaml")); err != nil {
+		// No marker, but leftover issue files are still a stale-read risk:
+		// marker-less direct reads (nd --vault .vault show <id>) return old
+		// data without erroring.
+		if n := countIssueFiles(localVault); n > 0 {
+			return Finding{
+				Name:   "vault-divergence",
+				Status: StatusWarn,
+				Message: fmt.Sprintf("%d stale legacy issue file(s) remain under %s/issues -- direct 'nd --vault .vault' reads return outdated data; archive or delete them (they are not read by pvg)", n, localVault),
+			}
+		}
 		return Finding{Name: "vault-divergence", Status: StatusPass, Message: "no legacy local vault"}
 	}
 
@@ -187,6 +197,21 @@ func checkVaultDivergence(projectRoot string) Finding {
 	}
 	msg += ". Reconcile newer legacy writes into the live vault first, then run 'pvg doctor --fix' to decommission the legacy marker"
 	return Finding{Name: "vault-divergence", Status: StatusFail, Message: msg, Fixable: true}
+}
+
+// countIssueFiles reports how many issue markdown files a vault holds.
+func countIssueFiles(vault string) int {
+	entries, err := os.ReadDir(filepath.Join(vault, "issues"))
+	if err != nil {
+		return 0
+	}
+	count := 0
+	for _, entry := range entries {
+		if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".md") {
+			count++
+		}
+	}
+	return count
 }
 
 // countDivergentIssues reports how many issue files exist in both stores

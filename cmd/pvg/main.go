@@ -532,6 +532,28 @@ func runStory(args []string) error {
 		}
 		fmt.Println(msg)
 		return nil
+	case "claim":
+		if len(args) != 2 {
+			storyUsage()
+			return fmt.Errorf("usage: pvg story claim <story-id>")
+		}
+		msg, err := story.Transition(cwd, "claim", args[1], story.TransitionOptions{})
+		if err != nil {
+			return err
+		}
+		fmt.Println(msg)
+		return nil
+	case "approve-red":
+		if len(args) != 2 {
+			storyUsage()
+			return fmt.Errorf("usage: pvg story approve-red <story-id>")
+		}
+		msg, err := story.Transition(cwd, "approve-red", args[1], story.TransitionOptions{})
+		if err != nil {
+			return err
+		}
+		fmt.Println(msg)
+		return nil
 	case "accept":
 		return runStoryAccept(cwd, args[1:])
 	case "reject":
@@ -553,7 +575,9 @@ func storyUsage() {
 	fmt.Fprintln(os.Stderr, `pvg story -- shared workflow helpers
 
 Subcommands:
-  deliver <story-id>                      Mark a story delivered
+  claim <story-id>                        Claim a story at dispatch (status in_progress)
+  deliver <story-id>                      Mark a story delivered (claims it if still open)
+  approve-red <story-id>                  Hard-TDD: approve RED tests, advance to GREEN phase
   accept <story-id> [--reason TEXT] [--next STORY]
                                          Accept and close a story
   reject <story-id> [--feedback TEXT]    Reject a story back to open
@@ -831,6 +855,16 @@ func loopSetup(cwd string, args []string) error {
 
 	if err := ensureNDInitialized(cwd); err != nil {
 		return err
+	}
+
+	// Reconcile stale claims from dead sessions BEFORE epic selection so the
+	// loop sees real state, not a crashed session's shadows.
+	if resets, err := loop.ReconcileOrphans(cwd); err != nil {
+		return fmt.Errorf("reconcile orphaned in-progress stories: %w", err)
+	} else if len(resets) > 0 {
+		for _, r := range resets {
+			fmt.Printf("[LOOP] Reset orphaned story %s to open (%s)\n", r.StoryID, r.Reason)
+		}
 	}
 
 	// Idempotent: if already active, report status and return success
@@ -1165,6 +1199,17 @@ func loopRecover(cwd string, args []string) error {
 	// Remove snapshot after recovery
 	if err := loop.RemoveSnapshot(cwd); err != nil {
 		execErrors = append(execErrors, fmt.Sprintf("remove snapshot: %v", err))
+	}
+
+	// Snapshot-based recovery only covers agents the dead session recorded.
+	// Sweep for orphaned in_progress claims from sessions that never
+	// snapshotted (or from other machines).
+	if resets, err := loop.ReconcileOrphans(cwd); err != nil {
+		execErrors = append(execErrors, fmt.Sprintf("reconcile orphans: %v", err))
+	} else {
+		for _, r := range resets {
+			fmt.Printf("[RECOVER] Reset orphaned story %s to open (%s)\n", r.StoryID, r.Reason)
+		}
 	}
 
 	if jsonOutput {

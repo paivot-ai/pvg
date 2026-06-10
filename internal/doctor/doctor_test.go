@@ -186,8 +186,17 @@ func TestCheckVaultDivergence_LegacyMarkerFails(t *testing.T) {
 		t.Fatalf("legacy issue files must remain: %v", err)
 	}
 
+	// After the fix the marker is gone but stale issue files remain -- the
+	// check degrades to a WARN pointing at them rather than a silent pass.
+	if f := checkVaultDivergence(root); f.Status != StatusWarn {
+		t.Fatalf("expected warn after fix (stale issue files remain), got %s: %s", f.Status, f.Message)
+	}
+
+	if err := os.Remove(filepath.Join(localVault, "issues", "TIX-1.md")); err != nil {
+		t.Fatal(err)
+	}
 	if f := checkVaultDivergence(root); f.Status != StatusPass {
-		t.Fatalf("expected pass after fix, got %s: %s", f.Status, f.Message)
+		t.Fatalf("expected pass after stale files removed, got %s: %s", f.Status, f.Message)
 	}
 }
 
