@@ -1,6 +1,10 @@
 package loop
 
 import (
+	"os"
+	"os/exec"
+	"path/filepath"
+	"reflect"
 	"testing"
 )
 
@@ -50,7 +54,7 @@ func TestEvaluateRecover_OrphanedStory(t *testing.T) {
 	}
 }
 
-func TestEvaluateRecover_DeliveredStory(t *testing.T) {
+func TestEvaluateRecover_DeliveredStory_PreservesBranch(t *testing.T) {
 	cfg := RecoverConfig{
 		SnapshotStories: []SnapshotEntry{
 			{
@@ -58,7 +62,7 @@ func TestEvaluateRecover_DeliveredStory(t *testing.T) {
 				NDStatus:     "in_progress",
 				NDLabels:     []string{"delivered"},
 				WorktreePath: "/project/.claude/worktrees/agent-c3d",
-				BranchName:   "worktree-agent-c3d",
+				BranchName:   "story/PROJ-c3d",
 			},
 		},
 		InProgressIssues: []ndIssue{
@@ -69,8 +73,10 @@ func TestEvaluateRecover_DeliveredStory(t *testing.T) {
 	plan := EvaluateRecover(cfg)
 
 	kinds := actionKinds(plan.Actions)
+	// Worktree is disposable; the branch is the record of the delivered work.
 	assertContains(t, kinds, ActionRemoveWorktree, "remove_worktree")
-	assertContains(t, kinds, ActionDeleteBranch, "delete_branch")
+	assertContains(t, kinds, ActionPreserveBranch, "preserve_branch")
+	assertNotContains(t, kinds, ActionDeleteBranch, "delete_branch")
 	assertContains(t, kinds, ActionNoteDelivered, "note_delivered")
 	assertNotContains(t, kinds, ActionResetStory, "reset_story")
 
@@ -79,6 +85,113 @@ func TestEvaluateRecover_DeliveredStory(t *testing.T) {
 	}
 	if plan.Summary.StoriesReset != 0 {
 		t.Errorf("expected 0 stories reset, got %d", plan.Summary.StoriesReset)
+	}
+	if plan.Summary.BranchesPreserved != 1 {
+		t.Errorf("expected 1 branch preserved, got %d", plan.Summary.BranchesPreserved)
+	}
+	if plan.Summary.BranchesDeleted != 0 {
+		t.Errorf("expected 0 branches deleted, got %d", plan.Summary.BranchesDeleted)
+	}
+}
+
+func TestEvaluateRecover_AcceptedStory_PreservesBranch(t *testing.T) {
+	cfg := RecoverConfig{
+		SnapshotStories: []SnapshotEntry{
+			{
+				StoryID:      "PROJ-c3d",
+				NDStatus:     "in_progress",
+				NDLabels:     []string{"delivered"},
+				WorktreePath: "/project/.claude/worktrees/agent-c3d",
+				BranchName:   "story/PROJ-c3d",
+			},
+		},
+		InProgressIssues: []ndIssue{
+			{ID: "PROJ-c3d", Status: "in_progress", Labels: []string{"accepted"}},
+		},
+	}
+
+	plan := EvaluateRecover(cfg)
+
+	kinds := actionKinds(plan.Actions)
+	assertContains(t, kinds, ActionPreserveBranch, "preserve_branch")
+	assertNotContains(t, kinds, ActionDeleteBranch, "delete_branch")
+}
+
+func TestEvaluateRecover_OrphanWorktree_DeliveredStoryBranchPreserved(t *testing.T) {
+	cfg := RecoverConfig{
+		// Orphan worktree (not in snapshot) checked out on a story branch
+		// whose story is delivered in nd: remove the worktree, keep the branch.
+		CurrentWorktrees: []Worktree{
+			{
+				Path:   "/project/.claude/worktrees/orphan-d4e",
+				Branch: "story/PROJ-d4e",
+			},
+		},
+		InProgressIssues: []ndIssue{
+			{ID: "PROJ-d4e", Status: "in_progress", Labels: []string{"delivered"}},
+		},
+	}
+
+	plan := EvaluateRecover(cfg)
+
+	kinds := actionKinds(plan.Actions)
+	assertContains(t, kinds, ActionRemoveWorktree, "remove_worktree")
+	assertContains(t, kinds, ActionPreserveBranch, "preserve_branch")
+	assertNotContains(t, kinds, ActionDeleteBranch, "delete_branch")
+
+	if plan.Summary.BranchesPreserved != 1 {
+		t.Errorf("expected 1 branch preserved, got %d", plan.Summary.BranchesPreserved)
+	}
+	if plan.Summary.OrphanWorktrees != 1 {
+		t.Errorf("expected 1 orphan worktree, got %d", plan.Summary.OrphanWorktrees)
+	}
+}
+
+func TestEvaluateRecover_OrphanWorktree_NonDeliveredStoryBranchDeleted(t *testing.T) {
+	cfg := RecoverConfig{
+		CurrentWorktrees: []Worktree{
+			{
+				Path:   "/project/.claude/worktrees/orphan-d4e",
+				Branch: "story/PROJ-d4e",
+			},
+		},
+		InProgressIssues: []ndIssue{
+			{ID: "PROJ-d4e", Status: "in_progress", Labels: nil},
+		},
+	}
+
+	plan := EvaluateRecover(cfg)
+
+	kinds := actionKinds(plan.Actions)
+	assertContains(t, kinds, ActionDeleteBranch, "delete_branch")
+	assertNotContains(t, kinds, ActionPreserveBranch, "preserve_branch")
+}
+
+func TestEvaluateRecover_PreservedBranchNotRedeletedByStaleOrPMLoops(t *testing.T) {
+	cfg := RecoverConfig{
+		SnapshotStories: []SnapshotEntry{
+			{
+				StoryID:      "PROJ-c3d",
+				NDStatus:     "in_progress",
+				NDLabels:     []string{"delivered"},
+				WorktreePath: "/wt/agent-c3d",
+				BranchName:   "worktree-agent-PROJ-c3d",
+			},
+		},
+		InProgressIssues: []ndIssue{
+			{ID: "PROJ-c3d", Status: "in_progress", Labels: []string{"delivered"}},
+		},
+		// The same branch shows up in the unconditional PM isolation list.
+		PMIsolationBranches: []string{"worktree-agent-PROJ-c3d"},
+	}
+
+	plan := EvaluateRecover(cfg)
+
+	kinds := actionKinds(plan.Actions)
+	assertContains(t, kinds, ActionPreserveBranch, "preserve_branch")
+	assertNotContains(t, kinds, ActionDeleteBranch, "delete_branch")
+	if plan.Summary.BranchesDeleted != 0 {
+		t.Errorf("expected 0 branches deleted, got %d", plan.Summary.BranchesDeleted)
 	}
 }
 
@@ -196,9 +309,13 @@ func TestEvaluateRecover_MixedStories(t *testing.T) {
 	if plan.Summary.WorktreesRemoved != 4 {
 		t.Errorf("expected 4 worktrees removed, got %d", plan.Summary.WorktreesRemoved)
 	}
-	// 3 snapshot branches + 1 orphan = 4 branches deleted
-	if plan.Summary.BranchesDeleted != 4 {
-		t.Errorf("expected 4 branches deleted, got %d", plan.Summary.BranchesDeleted)
+	// 2 snapshot branches (a1b, e5f) + 1 orphan = 3 branches deleted;
+	// PROJ-c3d's branch is preserved (delivered but not merged).
+	if plan.Summary.BranchesDeleted != 3 {
+		t.Errorf("expected 3 branches deleted, got %d", plan.Summary.BranchesDeleted)
+	}
+	if plan.Summary.BranchesPreserved != 1 {
+		t.Errorf("expected 1 branch preserved, got %d", plan.Summary.BranchesPreserved)
 	}
 	// PROJ-a1b reset (in-progress, no delivered label)
 	if plan.Summary.StoriesReset != 1 {
@@ -309,6 +426,69 @@ func TestEvaluateRecover_StaleBranchDeduplication(t *testing.T) {
 	}
 	if plan.Summary.StaleBranchesDeleted != 1 {
 		t.Errorf("expected 1 stale branch (epic/PROJ-old only), got %d", plan.Summary.StaleBranchesDeleted)
+	}
+}
+
+func TestExecuteRecover_ResetStoryResolvesVaultAndAnchorsToProjectRoot(t *testing.T) {
+	var calls [][]string
+	var cmds []*exec.Cmd
+	oldExec := execCommand
+	execCommand = func(name string, args ...string) *exec.Cmd {
+		calls = append(calls, append([]string{name}, args...))
+		cmd := exec.Command("true")
+		cmds = append(cmds, cmd)
+		return cmd
+	}
+	defer func() { execCommand = oldExec }()
+
+	override := filepath.Join(t.TempDir(), "shared-vault")
+	if err := os.Setenv("ND_VAULT_DIR", override); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Unsetenv("ND_VAULT_DIR") }()
+
+	projectRoot := t.TempDir()
+	plan := RecoverPlan{
+		Actions: []RecoverAction{
+			{Kind: ActionResetStory, StoryID: "PROJ-a1b", Reason: "test"},
+		},
+	}
+
+	errs := ExecuteRecover(projectRoot, plan)
+	if len(errs) != 0 {
+		t.Fatalf("ExecuteRecover() errors: %v", errs)
+	}
+
+	want := []string{"nd", "--vault", override, "update", "PROJ-a1b", "--status", "open"}
+	if len(calls) != 1 || !reflect.DeepEqual(calls[0], want) {
+		t.Fatalf("unexpected nd call: got %#v want %#v", calls, want)
+	}
+	if cmds[0].Dir != projectRoot {
+		t.Fatalf("expected nd command Dir %q, got %q", projectRoot, cmds[0].Dir)
+	}
+}
+
+func TestExecuteRecover_PreserveBranchIsNoOp(t *testing.T) {
+	var calls [][]string
+	oldExec := execCommand
+	execCommand = func(name string, args ...string) *exec.Cmd {
+		calls = append(calls, append([]string{name}, args...))
+		return exec.Command("true")
+	}
+	defer func() { execCommand = oldExec }()
+
+	plan := RecoverPlan{
+		Actions: []RecoverAction{
+			{Kind: ActionPreserveBranch, StoryID: "PROJ-a1b", BranchName: "story/PROJ-a1b", Reason: "test"},
+		},
+	}
+
+	errs := ExecuteRecover(t.TempDir(), plan)
+	if len(errs) != 0 {
+		t.Fatalf("ExecuteRecover() errors: %v", errs)
+	}
+	if len(calls) != 0 {
+		t.Fatalf("expected no commands for preserve_branch, got %#v", calls)
 	}
 }
 

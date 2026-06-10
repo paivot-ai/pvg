@@ -23,19 +23,26 @@ type NextAction struct {
 
 // NextResult is the host-agnostic orchestration decision derived from nd state.
 type NextResult struct {
-	Mode          string      `json:"mode"`
-	TargetEpic    string      `json:"target_epic,omitempty"`
-	ActiveLoop    bool        `json:"active_loop"`
-	ScopeSource   string      `json:"scope_source,omitempty"`
-	Decision      string      `json:"decision"`
-	Reason        string      `json:"reason"`
-	Counts        WorkCounts  `json:"counts"`
-	Next          *NextAction `json:"next,omitempty"`
-	NextEpic      string      `json:"next_epic,omitempty"` // populated on "epic_complete" when a next epic exists
-	NextEpicTitle string      `json:"next_epic_title,omitempty"`
+	Mode          string       `json:"mode"`
+	TargetEpic    string       `json:"target_epic,omitempty"`
+	ActiveLoop    bool         `json:"active_loop"`
+	ScopeSource   string       `json:"scope_source,omitempty"`
+	Decision      string       `json:"decision"`
+	Reason        string       `json:"reason"`
+	Counts        WorkCounts   `json:"counts"`
+	Next          *NextAction  `json:"next,omitempty"`
+	Actions       []NextAction `json:"actions,omitempty"`   // full wave when --n > 1; Next stays the first action
+	NextEpic      string       `json:"next_epic,omitempty"` // populated on "epic_complete" when a next epic exists
+	NextEpicTitle string       `json:"next_epic_title,omitempty"`
 }
 
+// MaxWaveSize caps the number of actions a single `pvg loop next --n N` call
+// may select. Matches the light-stack total concurrency limit.
+const MaxWaveSize = 6
+
 // EvaluateNext selects the next orchestration step without mutating state.
+// n is the maximum wave size: up to n distinct-story actions are selected
+// (values < 1 are treated as 1; values above MaxWaveSize are capped).
 //
 // In epic mode (the default), the loop is CONTAINED to the target epic:
 //   - If the epic has actionable work: return it
@@ -45,7 +52,7 @@ type NextResult struct {
 //   - After epic completion: rotate to the next highest-priority epic
 //
 // In "all" mode (legacy escape hatch), behavior is unchanged: global priority queue.
-func EvaluateNext(projectRoot, mode, targetEpic string) (NextResult, error) {
+func EvaluateNext(projectRoot, mode, targetEpic string, n int) (NextResult, error) {
 	result := NextResult{
 		Mode:       mode,
 		TargetEpic: targetEpic,
@@ -54,6 +61,7 @@ func EvaluateNext(projectRoot, mode, targetEpic string) (NextResult, error) {
 	if result.Mode == "" {
 		result.Mode = "all"
 	}
+	n = clampWaveSize(n)
 
 	// Global counts are always needed for reporting, regardless of mode.
 	counts, err := QueryWorkCounts(projectRoot, result.Mode, result.TargetEpic)
@@ -63,14 +71,24 @@ func EvaluateNext(projectRoot, mode, targetEpic string) (NextResult, error) {
 	result.Counts = counts
 
 	if result.Mode == "epic" && result.TargetEpic != "" {
-		return evaluateEpicMode(projectRoot, result)
+		return evaluateEpicMode(projectRoot, result, n)
 	}
 
-	return evaluateAllMode(projectRoot, result)
+	return evaluateAllMode(projectRoot, result, n)
+}
+
+func clampWaveSize(n int) int {
+	if n < 1 {
+		return 1
+	}
+	if n > MaxWaveSize {
+		return MaxWaveSize
+	}
+	return n
 }
 
 // evaluateEpicMode enforces epic containment: never fall through to global.
-func evaluateEpicMode(projectRoot string, result NextResult) (NextResult, error) {
+func evaluateEpicMode(projectRoot string, result NextResult, n int) (NextResult, error) {
 	// Query work within the target epic only.
 	epicQueues, err := queryQueues(projectRoot, result.TargetEpic)
 	if err != nil {
@@ -84,10 +102,11 @@ func evaluateEpicMode(projectRoot string, result NextResult) (NextResult, error)
 	}
 
 	// If the epic has actionable work, do it.
-	if action := chooseNextAction(epicQueues, "epic"); action != nil {
+	if actions := chooseNextActions(epicQueues, "epic", n); len(actions) > 0 {
 		result.Decision = "act"
 		result.Reason = fmt.Sprintf("Epic %s has actionable work", result.TargetEpic)
-		result.Next = action
+		result.Next = &actions[0]
+		result.Actions = actions
 		return result, nil
 	}
 
@@ -147,7 +166,7 @@ func evaluateEpicMode(projectRoot string, result NextResult) (NextResult, error)
 }
 
 // evaluateAllMode is the legacy global priority queue (--all escape hatch).
-func evaluateAllMode(projectRoot string, result NextResult) (NextResult, error) {
+func evaluateAllMode(projectRoot string, result NextResult, n int) (NextResult, error) {
 	globalQueues, err := queryQueues(projectRoot, "")
 	if err != nil {
 		return result, err
@@ -157,10 +176,11 @@ func evaluateAllMode(projectRoot string, result NextResult) (NextResult, error) 
 	result.Counts.Rejected = len(globalQueues.Rejected)
 	result.Counts.Ready = len(globalQueues.Ready)
 
-	if action := chooseNextAction(globalQueues, "backlog"); action != nil {
+	if actions := chooseNextActions(globalQueues, "backlog", n); len(actions) > 0 {
 		result.Decision = "act"
-		result.Reason = reasonForAction(action)
-		result.Next = action
+		result.Reason = reasonForAction(&actions[0])
+		result.Next = &actions[0]
+		result.Actions = actions
 		return result, nil
 	}
 
@@ -217,60 +237,96 @@ func queryQueues(projectRoot, parent string) (queueSnapshot, error) {
 	return snapshot, nil
 }
 
-func chooseNextAction(queues queueSnapshot, scope string) *NextAction {
+// chooseNextActions selects a wave of up to n actions with distinct story IDs.
+// Priority order: at most one pm_review (delivered queue), then developer
+// rework (rejected queue), then new developer work (ready queue). Pure
+// function -- no mutation of the queues.
+func chooseNextActions(queues queueSnapshot, scope string, n int) []NextAction {
+	n = clampWaveSize(n)
+
+	var actions []NextAction
+	seen := make(map[string]bool)
+
+	// Max 1 PM review per wave: PM review unblocks the pipeline but PM
+	// concurrency is capped at one in heavy stacks.
 	if len(queues.Delivered) > 0 {
 		issue := queues.Delivered[0]
-		return &NextAction{
-			Kind:     "pm_review",
-			Role:     "pm_acceptor",
-			StoryID:  issue.ID,
-			Story:    issue.Title,
-			Queue:    "delivered",
-			Scope:    scope,
-			HardTDD:  hasLabel(issue.Labels, "hard-tdd"),
-			Priority: "1",
-		}
+		actions = append(actions, pmReviewAction(issue, scope))
+		seen[issue.ID] = true
 	}
 
-	if len(queues.Rejected) > 0 {
-		issue := queues.Rejected[0]
-		phase := "normal"
-		if hasLabel(issue.Labels, "hard-tdd") {
-			phase = "rework"
+	for _, issue := range queues.Rejected {
+		if len(actions) >= n {
+			return actions
 		}
-		return &NextAction{
-			Kind:     "developer_rework",
-			Role:     "developer",
-			StoryID:  issue.ID,
-			Story:    issue.Title,
-			Queue:    "rejected",
-			Scope:    scope,
-			HardTDD:  hasLabel(issue.Labels, "hard-tdd"),
-			Phase:    phase,
-			Priority: "2",
+		if seen[issue.ID] {
+			continue
 		}
+		actions = append(actions, developerReworkAction(issue, scope))
+		seen[issue.ID] = true
 	}
 
-	if len(queues.Ready) > 0 {
-		issue := queues.Ready[0]
-		phase := "normal"
-		if hasLabel(issue.Labels, "hard-tdd") {
-			phase = "red"
+	for _, issue := range queues.Ready {
+		if len(actions) >= n {
+			return actions
 		}
-		return &NextAction{
-			Kind:     "developer_new",
-			Role:     "developer",
-			StoryID:  issue.ID,
-			Story:    issue.Title,
-			Queue:    "ready",
-			Scope:    scope,
-			HardTDD:  hasLabel(issue.Labels, "hard-tdd"),
-			Phase:    phase,
-			Priority: "3",
+		if seen[issue.ID] {
+			continue
 		}
+		actions = append(actions, developerNewAction(issue, scope))
+		seen[issue.ID] = true
 	}
 
-	return nil
+	return actions
+}
+
+func pmReviewAction(issue ndIssue, scope string) NextAction {
+	return NextAction{
+		Kind:     "pm_review",
+		Role:     "pm_acceptor",
+		StoryID:  issue.ID,
+		Story:    issue.Title,
+		Queue:    "delivered",
+		Scope:    scope,
+		HardTDD:  hasLabel(issue.Labels, "hard-tdd"),
+		Priority: "1",
+	}
+}
+
+func developerReworkAction(issue ndIssue, scope string) NextAction {
+	phase := "normal"
+	if hasLabel(issue.Labels, "hard-tdd") {
+		phase = "rework"
+	}
+	return NextAction{
+		Kind:     "developer_rework",
+		Role:     "developer",
+		StoryID:  issue.ID,
+		Story:    issue.Title,
+		Queue:    "rejected",
+		Scope:    scope,
+		HardTDD:  hasLabel(issue.Labels, "hard-tdd"),
+		Phase:    phase,
+		Priority: "2",
+	}
+}
+
+func developerNewAction(issue ndIssue, scope string) NextAction {
+	phase := "normal"
+	if hasLabel(issue.Labels, "hard-tdd") {
+		phase = "red"
+	}
+	return NextAction{
+		Kind:     "developer_new",
+		Role:     "developer",
+		StoryID:  issue.ID,
+		Story:    issue.Title,
+		Queue:    "ready",
+		Scope:    scope,
+		HardTDD:  hasLabel(issue.Labels, "hard-tdd"),
+		Phase:    phase,
+		Priority: "3",
+	}
 }
 
 func reasonForAction(action *NextAction) string {

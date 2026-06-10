@@ -86,9 +86,13 @@ func SubagentStop() error {
 }
 
 // emitCWDResetWarning checks if dispatcher mode is active and outputs a
-// mandatory CWD reset instruction. This is the last line of defense against
-// session-fatal CWD corruption caused by Claude Code leaking the subagent's
-// CWD to the parent session before the dispatcher removes the worktree.
+// CWD reset instruction as a {"systemMessage": ...} JSON line.
+//
+// SubagentStop stdout is NOT injected into the model's context -- it is
+// transcript-only, so the model never sees this output. The systemMessage
+// form at least surfaces the warning to the user. The real protections
+// against session-fatal CWD corruption are the piv-loop CWD reset protocol
+// and the pvg worktree remove CWD guard.
 func emitCWDResetWarning(cwd, agentType string) {
 	// Only emit when Paivot dispatcher is active.
 	state, _, err := dispatcher.ReadStateRoot(cwd)
@@ -101,11 +105,14 @@ func emitCWDResetWarning(cwd, agentType string) {
 		root = cwd
 	}
 
-	fmt.Printf("[CWD-RESET MANDATORY] %s agent completed.\n", agentType)
-	fmt.Printf("Your VERY FIRST Bash command MUST be:\n")
-	fmt.Printf("  cd %s && pwd\n", root)
-	fmt.Printf("Only after that reset should the dispatcher remove the dev worktree.\n")
-	fmt.Printf("If you skip this, your session may die. This is not optional.\n")
+	msg := fmt.Sprintf(
+		"[CWD-RESET MANDATORY] %s agent completed. The dispatcher's very first Bash command must be: cd %s && pwd -- only after that reset should it remove the dev worktree. Skipping this can kill the session.",
+		agentType, root)
+	data, err := json.Marshal(map[string]string{"systemMessage": msg})
+	if err != nil {
+		return
+	}
+	fmt.Println(string(data))
 }
 
 // resolveGitRootQuiet returns the git repo root or empty string on failure.

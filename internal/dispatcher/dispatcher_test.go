@@ -233,6 +233,24 @@ func TestOn_CreatesDirectoryIfNeeded(t *testing.T) {
 	}
 }
 
+func TestKnowledgeDirs_ContainsExpectedSubfolders(t *testing.T) {
+	// "uat" must be present: the retro agent writes UAT scripts to
+	// .vault/knowledge/uat/.
+	expected := []string{"conventions", "decisions", "patterns", "debug", "skills", "uat"}
+	for _, want := range expected {
+		found := false
+		for _, dir := range knowledgeDirs {
+			if dir == want {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("knowledgeDirs missing %q", want)
+		}
+	}
+}
+
 func TestOn_InitializesProjectVault(t *testing.T) {
 	dir := t.TempDir()
 	// Start from nothing -- On() should build the full vault tree

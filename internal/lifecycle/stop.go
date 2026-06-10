@@ -151,7 +151,9 @@ func checkLoop(cwd string) error {
 		return nil
 	}
 
-	// Build and emit continuation
+	// Build and emit continuation. Claude Code's Stop hook contract only
+	// recognizes top-level "decision" and "reason" -- the full continuation
+	// prompt must be the reason or it never reaches the model.
 	maxIterStr := "unlimited"
 	if state.MaxIterations > 0 {
 		maxIterStr = strconv.Itoa(state.MaxIterations)
@@ -160,10 +162,7 @@ func checkLoop(cwd string) error {
 
 	continuation := map[string]any{
 		"decision": "block",
-		"reason":   decision.Reason,
-		"options": []map[string]string{
-			{"value": prompt},
-		},
+		"reason":   prompt,
 	}
 
 	data, err := json.Marshal(continuation)
@@ -177,15 +176,15 @@ func checkLoop(cwd string) error {
 }
 
 // isLoopPersistEnabled checks if loop state should persist across sessions.
-// Default is false (stale loop state is removed unless explicitly preserved).
+// Default is true (loop survives session boundaries for background agent flow).
 func isLoopPersistEnabled(cwd string) bool {
 	path := filepath.Join(cwd, ".vault", "knowledge", ".settings.yaml")
 	s := settings.LoadFile(path)
 	v, ok := s["loop.persist_across_sessions"]
 	if !ok {
-		return false // default
+		return true // default
 	}
-	return v == "true"
+	return v != "false"
 }
 
 // BuildContinuationPrompt creates the prompt for the next loop iteration.
@@ -241,7 +240,7 @@ func BuildContinuationPrompt(state *loop.State, decision *loop.StopDecision, max
 		prompt += fmt.Sprintf("- Developer: %d ready\n", wc.Ready)
 	}
 	prompt += "\nAll work is scoped to the current epic. Do NOT query nd globally for dispatch.\n"
-	prompt += "Concurrency: within current epic only. Max 2 dev, max 1 PM, max 3 total. Dispatcher-only.\n"
+	prompt += "Concurrency: within current epic only, stack-dependent limits (heavy stacks: 2 dev / 1 PM / 3 total; light stacks: 4 dev / 2 PM / 6 total). Dispatcher-only.\n"
 
 	return prompt
 }

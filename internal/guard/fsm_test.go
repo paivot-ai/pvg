@@ -260,6 +260,94 @@ func TestParseNdStatusChange_SemicolonChain(t *testing.T) {
 	}
 }
 
+// --- pvg-wrapped and pvg issues forms ---
+
+func TestParseNdStatusChange_PvgWrappedForms(t *testing.T) {
+	tests := []struct {
+		name       string
+		command    string
+		wantIDs    []string
+		wantStatus string
+		wantFound  bool
+	}{
+		{"pvg nd update equals", "pvg nd update PROJ-a3f8 --status=in_progress", []string{"PROJ-a3f8"}, "in_progress", true},
+		{"pvg nd update space", "pvg nd update PROJ-a3f8 --status closed", []string{"PROJ-a3f8"}, "closed", true},
+		{"pvg nd close", "pvg nd close PROJ-a3f8", []string{"PROJ-a3f8"}, "closed", true},
+		{"pvg nd close multiple", "pvg nd close PROJ-a1b2 PROJ-c3d4", []string{"PROJ-a1b2", "PROJ-c3d4"}, "closed", true},
+		{"pvg path prefix", "/usr/local/bin/pvg nd close PROJ-a3f8", []string{"PROJ-a3f8"}, "closed", true},
+		{"pvg nd chained", "echo hi && pvg nd update PROJ-a3f8 --status=open", []string{"PROJ-a3f8"}, "open", true},
+		{"pvg issues update equals", "pvg issues update PROJ-a3f8 --status=closed", []string{"PROJ-a3f8"}, "closed", true},
+		{"pvg issues update space", "pvg issues update PROJ-a3f8 --status open", []string{"PROJ-a3f8"}, "open", true},
+		{"pvg issues close", "pvg issues close PROJ-a3f8", []string{"PROJ-a3f8"}, "closed", true},
+		{"pvg issues close with reason", `pvg issues close PROJ-a3f8 --reason "done"`, []string{"PROJ-a3f8"}, "closed", true},
+		{"pvg issues reopen", "pvg issues reopen PROJ-a3f8", []string{"PROJ-a3f8"}, "open", true},
+		{"pvg issues chained", "git pull; pvg issues close PROJ-a3f8", []string{"PROJ-a3f8"}, "closed", true},
+		{"pvg issues list not a mutation", "pvg issues list --status open", nil, "", false},
+		{"pvg issues show not a mutation", "pvg issues show PROJ-a3f8", nil, "", false},
+		{"mid-token pvg not matched", "echo pvg issues close PROJ-a3f8 is a command", nil, "", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ids, status, found := parseNdStatusChange(tt.command)
+			if found != tt.wantFound {
+				t.Fatalf("found=%v want %v (ids=%v status=%q)", found, tt.wantFound, ids, status)
+			}
+			if !tt.wantFound {
+				return
+			}
+			if status != tt.wantStatus {
+				t.Errorf("status=%q want %q", status, tt.wantStatus)
+			}
+			if len(ids) != len(tt.wantIDs) {
+				t.Fatalf("ids=%v want %v", ids, tt.wantIDs)
+			}
+			for i := range ids {
+				if ids[i] != tt.wantIDs[i] {
+					t.Errorf("ids[%d]=%q want %q", i, ids[i], tt.wantIDs[i])
+				}
+			}
+		})
+	}
+}
+
+func TestParseNdContractLabelAdd_PvgForms(t *testing.T) {
+	tests := []struct {
+		name       string
+		command    string
+		wantID     string
+		wantLabels []string
+		wantFound  bool
+	}{
+		{"pvg nd update add-label", "pvg nd update PROJ-a3f8 --add-label=delivered", "PROJ-a3f8", []string{"delivered"}, true},
+		{"pvg nd labels add", "pvg nd labels add PROJ-a3f8 delivered", "PROJ-a3f8", []string{"delivered"}, true},
+		{"pvg issues update add-label equals", "pvg issues update PROJ-a3f8 --add-label=accepted", "PROJ-a3f8", []string{"accepted"}, true},
+		{"pvg issues update add-label space", "pvg issues update PROJ-a3f8 --add-label rejected", "PROJ-a3f8", []string{"rejected"}, true},
+		{"pvg issues update no label", "pvg issues update PROJ-a3f8 --title=x", "", nil, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			id, labels, found := parseNdContractLabelAdd(tt.command)
+			if found != tt.wantFound {
+				t.Fatalf("found=%v want %v (id=%q labels=%v)", found, tt.wantFound, id, labels)
+			}
+			if !tt.wantFound {
+				return
+			}
+			if id != tt.wantID {
+				t.Errorf("id=%q want %q", id, tt.wantID)
+			}
+			if len(labels) != len(tt.wantLabels) {
+				t.Fatalf("labels=%v want %v", labels, tt.wantLabels)
+			}
+			for i := range labels {
+				if labels[i] != tt.wantLabels[i] {
+					t.Errorf("labels[%d]=%q want %q", i, labels[i], tt.wantLabels[i])
+				}
+			}
+		})
+	}
+}
+
 func TestParseNdContractLabelAdd_Update(t *testing.T) {
 	id, labels, found := parseNdContractLabelAdd("nd update PROJ-a3f8 --add-label=delivered")
 	if !found || id != "PROJ-a3f8" || len(labels) != 1 || labels[0] != "delivered" {
@@ -544,6 +632,47 @@ func TestCheckFSM_EmptyProjectRoot(t *testing.T) {
 	}
 }
 
+func TestCheckFSM_BlocksPvgNdWrappedTransition(t *testing.T) {
+	dir := setupFSMProject(t, true, "PROJ-a1b2", "open")
+	r := CheckFSM(dir, "pvg nd update PROJ-a1b2 --status=closed")
+	if r.Allowed {
+		t.Error("expected blocked for open -> closed via pvg nd update, got allowed")
+	}
+}
+
+func TestCheckFSM_BlocksPvgIssuesUpdateTransition(t *testing.T) {
+	dir := setupFSMProject(t, true, "PROJ-a1b2", "open")
+	r := CheckFSM(dir, "pvg issues update PROJ-a1b2 --status=closed")
+	if r.Allowed {
+		t.Error("expected blocked for open -> closed via pvg issues update, got allowed")
+	}
+}
+
+func TestCheckFSM_BlocksPvgIssuesCloseTransition(t *testing.T) {
+	dir := setupFSMProject(t, true, "PROJ-a1b2", "open")
+	r := CheckFSM(dir, "pvg issues close PROJ-a1b2")
+	if r.Allowed {
+		t.Error("expected blocked for open -> closed via pvg issues close, got allowed")
+	}
+}
+
+func TestCheckFSM_AllowsPvgIssuesCloseFromInProgress(t *testing.T) {
+	dir := setupFSMProject(t, true, "PROJ-a1b2", "in_progress")
+	r := CheckFSM(dir, "pvg issues close PROJ-a1b2")
+	if !r.Allowed {
+		t.Errorf("expected allowed for in_progress -> closed via pvg issues close, got blocked: %s", r.Reason)
+	}
+}
+
+func TestCheckFSM_AllowsPvgIssuesReopen(t *testing.T) {
+	// reopen -> open is a backward transition, always allowed.
+	dir := setupFSMProject(t, true, "PROJ-a1b2", "closed")
+	r := CheckFSM(dir, "pvg issues reopen PROJ-a1b2")
+	if !r.Allowed {
+		t.Errorf("expected allowed for closed -> open via pvg issues reopen, got blocked: %s", r.Reason)
+	}
+}
+
 func TestCheckFSM_BackwardAllowed(t *testing.T) {
 	dir := setupFSMProject(t, true, "PROJ-a1b2", "in_progress")
 	r := CheckFSM(dir, "nd update PROJ-a1b2 --status=open")
@@ -552,27 +681,107 @@ func TestCheckFSM_BackwardAllowed(t *testing.T) {
 	}
 }
 
-func TestCheckFSM_BlocksDeliveredLabelWhenNotInProgress(t *testing.T) {
+// --- Label contracts (CheckLabelContract): active whenever the repo is
+// Paivot-managed, independent of workflow.fsm ---
+
+func TestCheckLabelContract_BlocksDeliveredLabelWhenNotInProgress(t *testing.T) {
 	dir := setupFSMProject(t, true, "PROJ-a1b2", "open")
-	r := CheckFSM(dir, "nd labels add PROJ-a1b2 delivered")
+	r := CheckLabelContract(dir, "nd labels add PROJ-a1b2 delivered")
 	if r.Allowed {
 		t.Error("expected delivered label blocked while issue is open")
 	}
 }
 
-func TestCheckFSM_AllowsDeliveredLabelFromInProgress(t *testing.T) {
+func TestCheckLabelContract_AllowsDeliveredLabelFromInProgress(t *testing.T) {
 	dir := setupFSMProject(t, true, "PROJ-a1b2", "in_progress")
-	r := CheckFSM(dir, "nd update PROJ-a1b2 --add-label delivered")
+	r := CheckLabelContract(dir, "nd update PROJ-a1b2 --add-label delivered")
 	if !r.Allowed {
 		t.Errorf("expected delivered label allowed from in_progress, got blocked: %s", r.Reason)
 	}
 }
 
-func TestCheckFSM_BlocksAcceptedLabelBeforeClose(t *testing.T) {
+func TestCheckLabelContract_BlocksAcceptedLabelBeforeClose(t *testing.T) {
 	dir := setupFSMProject(t, true, "PROJ-a1b2", "in_progress")
-	r := CheckFSM(dir, "nd labels add PROJ-a1b2 accepted")
+	r := CheckLabelContract(dir, "nd labels add PROJ-a1b2 accepted")
 	if r.Allowed {
 		t.Error("expected accepted label blocked while issue is still in_progress")
+	}
+}
+
+func TestCheckLabelContract_EnforcedEvenWhenFSMDisabled(t *testing.T) {
+	// workflow.fsm gates only the status-transition checks; the contract
+	// labels are enforced for any Paivot-managed repo (settings file present).
+	dir := setupFSMProject(t, false, "PROJ-a1b2", "open")
+	r := CheckLabelContract(dir, "nd labels add PROJ-a1b2 delivered")
+	if r.Allowed {
+		t.Error("expected delivered label blocked while open even with FSM disabled")
+	}
+}
+
+func TestCheckLabelContract_AllowsWhenNotPaivotManaged(t *testing.T) {
+	dir := t.TempDir() // no .vault/knowledge/.settings.yaml anywhere
+	r := CheckLabelContract(dir, "nd labels add PROJ-a1b2 delivered")
+	if !r.Allowed {
+		t.Errorf("expected allowed in non-Paivot repo, got blocked: %s", r.Reason)
+	}
+}
+
+func TestCheckLabelContract_BlocksPvgIssuesAddLabelForm(t *testing.T) {
+	dir := setupFSMProject(t, false, "PROJ-a1b2", "open")
+	r := CheckLabelContract(dir, "pvg issues update PROJ-a1b2 --add-label delivered")
+	if r.Allowed {
+		t.Error("expected pvg issues --add-label delivered blocked while issue is open")
+	}
+}
+
+func TestCheckLabelContract_BlocksPvgNdLabelsAddForm(t *testing.T) {
+	dir := setupFSMProject(t, false, "PROJ-a1b2", "open")
+	r := CheckLabelContract(dir, "pvg nd labels add PROJ-a1b2 delivered")
+	if r.Allowed {
+		t.Error("expected pvg nd labels add delivered blocked while issue is open")
+	}
+}
+
+func TestCheckLabelContract_CombinedUpdateValidatesAgainstNewStatus(t *testing.T) {
+	// PM reject command: one command moves the story to open AND adds the
+	// rejected label. The label must be validated against the NEW status
+	// (open), not the pre-update status (in_progress).
+	dir := setupFSMProject(t, false, "PROJ-a1b2", "in_progress")
+	r := CheckLabelContract(dir, "pvg issues update PROJ-a1b2 --status=open --remove-label delivered --add-label rejected")
+	if !r.Allowed {
+		t.Errorf("expected combined status+label update allowed (rejected validated against new status open), got blocked: %s", r.Reason)
+	}
+}
+
+func TestCheckLabelContract_CombinedUpdateBlocksWrongNewStatus(t *testing.T) {
+	// delivered requires in_progress; the same command moves it to closed.
+	dir := setupFSMProject(t, false, "PROJ-a1b2", "in_progress")
+	r := CheckLabelContract(dir, "nd update PROJ-a1b2 --status=closed --add-label delivered")
+	if r.Allowed {
+		t.Error("expected delivered label blocked when the same command sets status closed")
+	}
+}
+
+func TestGuardCheck_WiresLabelContractForBash(t *testing.T) {
+	// End-to-end: guard.Check must route Bash commands through
+	// CheckLabelContract even when workflow.fsm is disabled.
+	dir := setupFSMProject(t, false, "PROJ-a1b2", "open")
+	input := HookInput{
+		ToolName:  "Bash",
+		ToolInput: ToolInput{Command: "pvg issues update PROJ-a1b2 --add-label delivered"},
+	}
+	r := Check("", dir, input)
+	if r.Allowed {
+		t.Error("expected guard.Check to block delivered label on open issue via label contract")
+	}
+}
+
+func TestCheckLabelContract_CombinedUpdateAllowsAcceptedWithClose(t *testing.T) {
+	// accepted requires closed; the same command closes the story.
+	dir := setupFSMProject(t, false, "PROJ-a1b2", "in_progress")
+	r := CheckLabelContract(dir, "pvg issues update PROJ-a1b2 --status=closed --add-label accepted")
+	if !r.Allowed {
+		t.Errorf("expected accepted+close combined update allowed, got blocked: %s", r.Reason)
 	}
 }
 

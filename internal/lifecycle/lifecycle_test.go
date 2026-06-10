@@ -1,14 +1,19 @@
 package lifecycle
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/paivot-ai/vlt"
+
+	"github.com/paivot-ai/pvg/internal/dispatcher"
+	"github.com/paivot-ai/pvg/internal/loop"
 )
 
 func TestDetectProject_FallsBackToBasename(t *testing.T) {
@@ -483,7 +488,27 @@ We chose Go for the pvg CLI because it compiles to a single binary.
 	outputProjectKnowledge(knowledgeDir, dir)
 }
 
-func TestCleanupStaleLoop_RemovesByDefault(t *testing.T) {
+func TestOutputProjectKnowledge_IncludesUATSubfolder(t *testing.T) {
+	dir := t.TempDir()
+	uatDir := filepath.Join(dir, ".vault", "knowledge", "uat")
+	if err := os.MkdirAll(uatDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	note := "---\ntype: convention\ncreated: 2026-06-01\n---\n\nUAT script for checkout flow.\n"
+	if err := os.WriteFile(filepath.Join(uatDir, "Checkout UAT.md"), []byte(note), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	out := captureStdoutDuring(t, func() {
+		outputProjectKnowledge(filepath.Join(dir, ".vault", "knowledge"), dir)
+	})
+
+	if !strings.Contains(out, "uat/Checkout UAT") {
+		t.Errorf("expected uat note in project knowledge output, got %q", out)
+	}
+}
+
+func TestCleanupStaleLoop_PreservesByDefault(t *testing.T) {
 	dir := t.TempDir()
 	vaultDir := filepath.Join(dir, ".vault")
 	if err := os.MkdirAll(vaultDir, 0755); err != nil {
@@ -497,12 +522,38 @@ func TestCleanupStaleLoop_RemovesByDefault(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// No settings file = persist disabled (default); state should be removed
+	// No settings file = persist enabled (the default); state must survive
+	// so background agent completions can resume the loop in a new session.
 	cleanupStaleLoop(dir)
 
-	// State file should be gone
+	if _, err := os.Stat(statePath); os.IsNotExist(err) {
+		t.Error("expected loop state file to be preserved by default (persist=true)")
+	}
+}
+
+func TestCleanupStaleLoop_RemovesWhenPersistExplicitlyDisabled(t *testing.T) {
+	dir := t.TempDir()
+	vaultDir := filepath.Join(dir, ".vault")
+	knowledgeDir := filepath.Join(vaultDir, "knowledge")
+	if err := os.MkdirAll(knowledgeDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	stateContent := `{"active":true,"mode":"all","iteration":5,"max_iterations":50,"consecutive_waits":0,"max_consecutive_waits":3,"wait_iterations":0,"started_at":"2026-03-06T18:00:00Z"}`
+	statePath := filepath.Join(vaultDir, ".piv-loop-state.json")
+	if err := os.WriteFile(statePath, []byte(stateContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	settingsContent := "loop.persist_across_sessions: false\n"
+	if err := os.WriteFile(filepath.Join(knowledgeDir, ".settings.yaml"), []byte(settingsContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cleanupStaleLoop(dir)
+
 	if _, err := os.Stat(statePath); !os.IsNotExist(err) {
-		t.Error("expected loop state file to be removed by default (persist=false)")
+		t.Error("expected loop state file to be removed when persist=false")
 	}
 }
 
@@ -541,6 +592,137 @@ func TestCleanupStaleLoop_NoopWhenNoState(t *testing.T) {
 	cleanupStaleLoop(dir)
 }
 
+func TestShouldCleanupStaleLoop_SourceGating(t *testing.T) {
+	tests := []struct {
+		source string
+		want   bool
+	}{
+		{"startup", true},
+		{"clear", true},
+		{"", true}, // missing source: treat as fresh session
+		{"compact", false},
+		{"resume", false},
+	}
+	for _, tt := range tests {
+		if got := shouldCleanupStaleLoop(tt.source); got != tt.want {
+			t.Errorf("shouldCleanupStaleLoop(%q) = %v, want %v", tt.source, got, tt.want)
+		}
+	}
+}
+
+func TestHookInput_ParsesSource(t *testing.T) {
+	var input hookInput
+	if err := json.Unmarshal([]byte(`{"cwd":"/tmp/project","source":"compact"}`), &input); err != nil {
+		t.Fatal(err)
+	}
+	if input.CWD != "/tmp/project" {
+		t.Errorf("CWD = %q", input.CWD)
+	}
+	if input.Source != "compact" {
+		t.Errorf("Source = %q, want compact", input.Source)
+	}
+}
+
+func TestSessionStartAfterCompact_EmitsDispatcherAndLoopContext(t *testing.T) {
+	dir := t.TempDir()
+	if err := dispatcher.On(dir); err != nil {
+		t.Fatalf("dispatcher.On: %v", err)
+	}
+
+	state := loop.NewState("epic", "PROJ-epic", 50)
+	state.Iteration = 4
+	if err := loop.WriteState(dir, state); err != nil {
+		t.Fatalf("WriteState: %v", err)
+	}
+
+	out := captureStdoutDuring(t, func() {
+		if err := sessionStartAfterCompact(dir); err != nil {
+			t.Errorf("sessionStartAfterCompact: %v", err)
+		}
+	})
+
+	checks := []string{
+		"DISPATCHER MODE -- SURVIVES COMPACTION",
+		"LOOP RECOVERY -- RUN IMMEDIATELY AFTER COMPACTION",
+		"[LOOP] Active loop: epic PROJ-epic, iteration 4.",
+		"pvg loop recover",
+		"pvg loop next --json",
+		"CONCURRENCY LIMITS", // operating-mode fallback
+	}
+	for _, check := range checks {
+		if !strings.Contains(out, check) {
+			t.Errorf("compact-mode output missing %q", check)
+		}
+	}
+
+	// Loop state must survive compaction.
+	if _, err := os.Stat(loop.StatePath(dir)); err != nil {
+		t.Errorf("expected loop state to survive compaction handling: %v", err)
+	}
+}
+
+func TestSessionStartAfterCompact_NoDispatcherNoLoop(t *testing.T) {
+	dir := t.TempDir()
+
+	out := captureStdoutDuring(t, func() {
+		if err := sessionStartAfterCompact(dir); err != nil {
+			t.Errorf("sessionStartAfterCompact: %v", err)
+		}
+	})
+
+	if strings.Contains(out, "DISPATCHER MODE -- SURVIVES COMPACTION") {
+		t.Error("dispatcher reminder must not appear when dispatcher mode is off")
+	}
+	if strings.Contains(out, "[LOOP] Active loop:") {
+		t.Error("loop status must not appear when no loop is active")
+	}
+	if !strings.Contains(out, "CONCURRENCY LIMITS") {
+		t.Error("operating-mode fallback must always be emitted on compact")
+	}
+}
+
+func TestSessionStart_CompactSourcePreservesLoopState(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, ".vault"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	state := loop.NewState("all", "", 50)
+	if err := loop.WriteState(dir, state); err != nil {
+		t.Fatalf("WriteState: %v", err)
+	}
+	// Persist explicitly disabled: even so, compact must NOT clean up.
+	knowledgeDir := filepath.Join(dir, ".vault", "knowledge")
+	if err := os.MkdirAll(knowledgeDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(knowledgeDir, ".settings.yaml"), []byte("loop.persist_across_sessions: false\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	payload := []byte(`{"cwd":` + strconv.Quote(dir) + `,"source":"compact"}`)
+	stdinR, stdinW, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := stdinW.Write(payload); err != nil {
+		t.Fatal(err)
+	}
+	_ = stdinW.Close()
+	origStdin := os.Stdin
+	os.Stdin = stdinR
+	defer func() { os.Stdin = origStdin }()
+
+	_ = captureStdoutDuring(t, func() {
+		if err := SessionStart(); err != nil {
+			t.Errorf("SessionStart: %v", err)
+		}
+	})
+
+	if _, err := os.Stat(loop.StatePath(dir)); err != nil {
+		t.Errorf("expected active loop state to survive compaction, got %v", err)
+	}
+}
+
 func TestCleanupStaleLoop_RemovesAncestorStateFromNestedWorktree(t *testing.T) {
 	root := t.TempDir()
 	worktree := filepath.Join(root, ".claude", "worktrees", "agent-1")
@@ -557,9 +739,18 @@ func TestCleanupStaleLoop_RemovesAncestorStateFromNestedWorktree(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// Persist explicitly disabled at the project root that owns the state.
+	knowledgeDir := filepath.Join(root, ".vault", "knowledge")
+	if err := os.MkdirAll(knowledgeDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(knowledgeDir, ".settings.yaml"), []byte("loop.persist_across_sessions: false\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
 	cleanupStaleLoop(worktree)
 
 	if _, err := os.Stat(statePath); !os.IsNotExist(err) {
-		t.Fatal("expected ancestor loop state file to be removed by default")
+		t.Fatal("expected ancestor loop state file to be removed when persist=false")
 	}
 }

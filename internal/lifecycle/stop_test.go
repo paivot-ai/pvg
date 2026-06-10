@@ -1,6 +1,8 @@
 package lifecycle
 
 import (
+	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -81,6 +83,25 @@ func TestBuildContinuationPrompt_Actionable_WithDeliveries(t *testing.T) {
 	}
 	if !strings.Contains(prompt, "2 ready") {
 		t.Error("expected ready count")
+	}
+}
+
+func TestBuildContinuationPrompt_StackDependentConcurrency(t *testing.T) {
+	state := &loop.State{Mode: "all"}
+	decision := &loop.StopDecision{
+		NewIteration: 2,
+		Reason:       "Actionable work remains",
+	}
+	wc := &loop.WorkCounts{Ready: 3}
+
+	prompt := BuildContinuationPrompt(state, decision, "50", wc)
+
+	want := "Concurrency: within current epic only, stack-dependent limits (heavy stacks: 2 dev / 1 PM / 3 total; light stacks: 4 dev / 2 PM / 6 total). Dispatcher-only."
+	if !strings.Contains(prompt, want) {
+		t.Errorf("expected stack-dependent concurrency line, got:\n%s", prompt)
+	}
+	if strings.Contains(prompt, "Max 2 dev") {
+		t.Error("hardcoded heavy-stack-only limits must not appear in the prompt")
 	}
 }
 
@@ -180,6 +201,79 @@ func TestCheckLoop_PreservesStateWhenNDQueryFails(t *testing.T) {
 	if preserved.WaitIterations != state.WaitIterations {
 		t.Errorf("expected wait iterations %d preserved, got %d", state.WaitIterations, preserved.WaitIterations)
 	}
+}
+
+func TestCheckLoop_BlockEmitsFullPromptAsReason(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, ".vault"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	state := loop.NewState("all", "", 50)
+	if err := loop.WriteState(dir, state); err != nil {
+		t.Fatalf("WriteState() error: %v", err)
+	}
+
+	// Stub nd: one ready story, nothing else -- forces a block decision.
+	binDir := filepath.Join(dir, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	script := `#!/bin/sh
+case "$*" in
+  *"ready --json"*) printf '[{"ID":"PROJ-s1","Title":"Story","Status":"open"}]' ;;
+  *) printf '[]' ;;
+esac
+`
+	if err := os.WriteFile(filepath.Join(binDir, "nd"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	out := captureStdoutDuring(t, func() {
+		if err := checkLoop(dir); err != nil {
+			t.Errorf("checkLoop() error: %v", err)
+		}
+	})
+
+	var continuation map[string]any
+	if err := json.Unmarshal([]byte(strings.TrimSpace(out)), &continuation); err != nil {
+		t.Fatalf("expected JSON continuation on stdout, got %q: %v", out, err)
+	}
+	if continuation["decision"] != "block" {
+		t.Fatalf("expected decision=block, got %v", continuation["decision"])
+	}
+	// Claude Code's Stop hook contract only recognizes top-level decision and
+	// reason: the full continuation prompt must BE the reason.
+	reason, _ := continuation["reason"].(string)
+	if !strings.Contains(reason, "[LOOP] Iteration") {
+		t.Errorf("expected full prompt header in reason, got %q", reason)
+	}
+	if !strings.Contains(reason, "pvg loop next --json") {
+		t.Errorf("expected continuation instructions in reason, got %q", reason)
+	}
+	if _, hasOptions := continuation["options"]; hasOptions {
+		t.Error("continuation must not contain an options key (not part of the Stop hook contract)")
+	}
+}
+
+func captureStdoutDuring(t *testing.T, fn func()) string {
+	t.Helper()
+	old := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	os.Stdout = w
+	fn()
+	_ = w.Close()
+	os.Stdout = old
+	data, err := io.ReadAll(r)
+	_ = r.Close()
+	if err != nil {
+		t.Fatalf("read stdout: %v", err)
+	}
+	return string(data)
 }
 
 func TestCheckLoop_UsesAncestorLoopStateFromNestedWorktree(t *testing.T) {

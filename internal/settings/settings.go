@@ -35,7 +35,9 @@ var defaults = map[string]string{
 	"dnf.specialist_review":        "false",
 	"dnf.max_iterations":           "3",
 	"architecture.c4":              "false",
-	"loop.persist_across_sessions": "false",
+	"loop.persist_across_sessions": "true",
+	"lint.quality_gates":           "",
+	"lint.brownfield":              "false",
 }
 
 var execCommand = exec.Command

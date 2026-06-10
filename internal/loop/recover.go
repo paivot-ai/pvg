@@ -5,6 +5,7 @@ import (
 	"os/exec"
 	"strings"
 
+	"github.com/paivot-ai/pvg/internal/ndvault"
 	"github.com/paivot-ai/pvg/internal/worktree"
 )
 
@@ -16,6 +17,9 @@ const (
 	ActionDeleteBranch   ActionKind = "delete_branch"
 	ActionResetStory     ActionKind = "reset_story"
 	ActionNoteDelivered  ActionKind = "note_delivered"
+	// ActionPreserveBranch is informational (no-op in ExecuteRecover): the
+	// branch holds delivered-but-unmerged work and must NOT be deleted.
+	ActionPreserveBranch ActionKind = "preserve_branch"
 )
 
 // RecoverAction is one step in a recovery plan.
@@ -42,6 +46,7 @@ type RecoverConfig struct {
 type RecoverSummary struct {
 	WorktreesRemoved     int `json:"worktrees_removed"`
 	BranchesDeleted      int `json:"branches_deleted"`
+	BranchesPreserved    int `json:"branches_preserved"`
 	StoriesReset         int `json:"stories_reset"`
 	StoriesDelivered     int `json:"stories_delivered"`
 	OrphanWorktrees      int `json:"orphan_worktrees"`
@@ -56,6 +61,10 @@ type RecoverPlan struct {
 
 // EvaluateRecover is a pure function -- no I/O. It examines the snapshot,
 // current worktrees, and nd state to produce a recovery plan.
+//
+// Branches that hold delivered-but-unmerged work are PRESERVED: the worktree
+// checkout is disposable, but the branch is the record. Deleting it would
+// destroy work that the PM has not yet reviewed or merged.
 func EvaluateRecover(cfg RecoverConfig) RecoverPlan {
 	var plan RecoverPlan
 
@@ -77,13 +86,23 @@ func EvaluateRecover(cfg RecoverConfig) RecoverPlan {
 		}
 
 		if entry.BranchName != "" {
-			plan.Actions = append(plan.Actions, RecoverAction{
-				Kind:       ActionDeleteBranch,
-				StoryID:    entry.StoryID,
-				BranchName: entry.BranchName,
-				Reason:     "snapshot branch cleanup",
-			})
-			plan.Summary.BranchesDeleted++
+			if isDeliveredInND(entry.StoryID, cfg.InProgressIssues) {
+				plan.Actions = append(plan.Actions, RecoverAction{
+					Kind:       ActionPreserveBranch,
+					StoryID:    entry.StoryID,
+					BranchName: entry.BranchName,
+					Reason:     "story is delivered/accepted but not merged -- branch preserved as the record of the work",
+				})
+				plan.Summary.BranchesPreserved++
+			} else {
+				plan.Actions = append(plan.Actions, RecoverAction{
+					Kind:       ActionDeleteBranch,
+					StoryID:    entry.StoryID,
+					BranchName: entry.BranchName,
+					Reason:     "snapshot branch cleanup",
+				})
+				plan.Summary.BranchesDeleted++
+			}
 		}
 
 		// Story state adjustment -- only if still in-progress in nd
@@ -122,20 +141,30 @@ func EvaluateRecover(cfg RecoverConfig) RecoverPlan {
 		plan.Summary.OrphanWorktrees++
 
 		if wt.Branch != "" {
-			plan.Actions = append(plan.Actions, RecoverAction{
-				Kind:       ActionDeleteBranch,
-				BranchName: wt.Branch,
-				Reason:     "orphan worktree branch cleanup",
-			})
-			plan.Summary.BranchesDeleted++
+			if storyID, ok := storyIDFromStoryBranch(wt.Branch); ok && isDeliveredInND(storyID, cfg.InProgressIssues) {
+				plan.Actions = append(plan.Actions, RecoverAction{
+					Kind:       ActionPreserveBranch,
+					StoryID:    storyID,
+					BranchName: wt.Branch,
+					Reason:     "story is delivered/accepted but not merged -- branch preserved as the record of the work",
+				})
+				plan.Summary.BranchesPreserved++
+			} else {
+				plan.Actions = append(plan.Actions, RecoverAction{
+					Kind:       ActionDeleteBranch,
+					BranchName: wt.Branch,
+					Reason:     "orphan worktree branch cleanup",
+				})
+				plan.Summary.BranchesDeleted++
+			}
 		}
 	}
 
 	// Stale merged branches: epic/*, story/*, worktree-* fully merged into main.
-	// Skip any already scheduled for deletion above.
+	// Skip any already scheduled for deletion or preservation above.
 	scheduledBranches := make(map[string]bool)
 	for _, a := range plan.Actions {
-		if a.Kind == ActionDeleteBranch {
+		if a.Kind == ActionDeleteBranch || a.Kind == ActionPreserveBranch {
 			scheduledBranches[a.BranchName] = true
 		}
 	}
@@ -176,6 +205,34 @@ func isInProgressInND(storyID string, issues []ndIssue) bool {
 		}
 	}
 	return false
+}
+
+// isDeliveredInND reports whether a story carries the delivered or accepted
+// label in the live nd state (cfg.InProgressIssues). Such a story's branch
+// holds work that has not been merged yet and must not be deleted.
+func isDeliveredInND(storyID string, issues []ndIssue) bool {
+	if storyID == "" {
+		return false
+	}
+	for _, issue := range issues {
+		if issue.ID != storyID {
+			continue
+		}
+		if hasLabel(issue.Labels, "delivered") || hasLabel(issue.Labels, "accepted") {
+			return true
+		}
+	}
+	return false
+}
+
+// storyIDFromStoryBranch extracts the story ID from a story/<ID> branch name.
+func storyIDFromStoryBranch(branch string) (string, bool) {
+	const prefix = "story/"
+	if !strings.HasPrefix(branch, prefix) {
+		return "", false
+	}
+	id := strings.TrimPrefix(branch, prefix)
+	return id, id != ""
 }
 
 // BuildRecoverConfig gathers snapshot, worktrees, and nd state into a
@@ -246,7 +303,15 @@ func ExecuteRecover(projectRoot string, plan RecoverPlan) []string {
 			}
 
 		case ActionResetStory:
-			cmd := exec.Command("nd", "update", action.StoryID, "--status", "open")
+			// Mirror runND: resolve the shared vault and anchor the command to
+			// the project root so the mutation targets the right nd state.
+			vaultDir, err := ndvault.Resolve(projectRoot)
+			if err != nil {
+				errors = append(errors, fmt.Sprintf("reset story %s: resolve nd vault: %v", action.StoryID, err))
+				continue
+			}
+			cmd := execCommand("nd", "--vault", vaultDir, "update", action.StoryID, "--status", "open")
+			cmd.Dir = projectRoot
 			if out, err := cmd.CombinedOutput(); err != nil {
 				errors = append(errors, fmt.Sprintf("reset story %s: %s (%v)", action.StoryID, strings.TrimSpace(string(out)), err))
 			}
@@ -254,6 +319,9 @@ func ExecuteRecover(projectRoot string, plan RecoverPlan) []string {
 		case ActionNoteDelivered:
 			// No nd mutation -- story stays in-progress with delivered label.
 			// This is informational: the dispatcher should spawn PM-Acceptor next.
+
+		case ActionPreserveBranch:
+			// No-op: informational action surfacing why the branch was kept.
 		}
 	}
 

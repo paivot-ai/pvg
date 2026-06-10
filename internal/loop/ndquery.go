@@ -49,8 +49,10 @@ func queryAllCounts(projectRoot string) (WorkCounts, error) {
 	}
 	wc.Ready = len(readyIssues)
 
-	// In-progress issues (includes delivered -- we separate below)
-	ipIssues, err := runND(projectRoot, "list", "--status", "in_progress", "--json")
+	// In-progress issues (includes delivered -- we separate below).
+	// nd list caps results at 50 unless --limit is explicit; pass --limit 0
+	// so counts stay correct on backlogs over 50 issues.
+	ipIssues, err := runND(projectRoot, "list", "--status", "in_progress", "--limit", "0", "--json")
 	if err != nil {
 		return wc, fmt.Errorf("query in-progress work: %w", err)
 	}
@@ -62,7 +64,7 @@ func queryAllCounts(projectRoot string) (WorkCounts, error) {
 		}
 	}
 
-	rejectedIssues, err := runND(projectRoot, "list", "--status", "open", "--label", "rejected", "--json")
+	rejectedIssues, err := runND(projectRoot, "list", "--status", "open", "--label", "rejected", "--limit", "0", "--json")
 	if err != nil {
 		return wc, fmt.Errorf("query rejected work: %w", err)
 	}
@@ -75,7 +77,7 @@ func queryAllCounts(projectRoot string) (WorkCounts, error) {
 	}
 	wc.Blocked = len(blockedIssues)
 
-	allIssues, err := runND(projectRoot, "list", "--status", "!closed", "--json")
+	allIssues, err := runND(projectRoot, "list", "--status", "!closed", "--limit", "0", "--json")
 	if err != nil {
 		return wc, fmt.Errorf("query non-closed work: %w", err)
 	}
@@ -85,6 +87,13 @@ func queryAllCounts(projectRoot string) (WorkCounts, error) {
 }
 
 // queryEpicCounts uses nd children to count work within a specific epic.
+//
+// nd has 5 statuses: open, in_progress, blocked, deferred, closed. There is
+// no "ready" status -- readiness is a graph property. An open child with open
+// blockers (graph-blocked) still has status "open", so the graph-blocked set
+// is fetched via `nd blocked --json` to classify open children as Ready vs
+// Blocked. Without this, dependency-blocked epics would never surface as
+// epic_blocked.
 func queryEpicCounts(projectRoot, epicID string) (WorkCounts, error) {
 	var wc WorkCounts
 
@@ -93,14 +102,17 @@ func queryEpicCounts(projectRoot, epicID string) (WorkCounts, error) {
 		return wc, fmt.Errorf("query epic children: %w", err)
 	}
 
+	blockedIssues, err := runND(projectRoot, "blocked", "--json")
+	if err != nil {
+		return wc, fmt.Errorf("query blocked set: %w", err)
+	}
+	blockedSet := make(map[string]bool, len(blockedIssues))
+	for _, issue := range blockedIssues {
+		blockedSet[issue.ID] = true
+	}
+
 	for _, issue := range issues {
 		switch strings.ToLower(issue.Status) {
-		case "ready":
-			if hasLabel(issue.Labels, "rejected") {
-				wc.Rejected++
-				continue
-			}
-			wc.Ready++
 		case "in_progress":
 			if hasLabel(issue.Labels, "delivered") {
 				wc.Delivered++
@@ -108,16 +120,20 @@ func queryEpicCounts(projectRoot, epicID string) (WorkCounts, error) {
 				wc.InProgress++
 			}
 		case "open":
-			if hasLabel(issue.Labels, "rejected") {
+			switch {
+			case hasLabel(issue.Labels, "rejected"):
 				wc.Rejected++
-			} else {
-				wc.Other++
+			case blockedSet[issue.ID]:
+				wc.Blocked++
+			default:
+				wc.Ready++
 			}
 		case "blocked":
 			wc.Blocked++
 		case "closed":
 			// done issues are not counted
 		default:
+			// deferred and any custom statuses
 			wc.Other++
 		}
 	}
@@ -202,19 +218,19 @@ func runND(projectRoot string, args ...string) ([]ndIssue, error) {
 
 // QueryInProgress returns all in-progress issues from nd.
 func QueryInProgress(projectRoot string) ([]ndIssue, error) {
-	return runND(projectRoot, "list", "--status", "in_progress", "--json")
+	return runND(projectRoot, "list", "--status", "in_progress", "--limit", "0", "--json")
 }
 
 // QueryDelivered returns in-progress stories labeled delivered.
 func QueryDelivered(projectRoot string, filters ...string) ([]ndIssue, error) {
-	args := []string{"list", "--status", "in_progress", "--label", "delivered", "--sort", "priority", "--json"}
+	args := []string{"list", "--status", "in_progress", "--label", "delivered", "--sort", "priority", "--limit", "0", "--json"}
 	args = append(args, filters...)
 	return runND(projectRoot, args...)
 }
 
 // QueryRejected returns open stories labeled rejected.
 func QueryRejected(projectRoot string, filters ...string) ([]ndIssue, error) {
-	args := []string{"list", "--status", "open", "--label", "rejected", "--sort", "priority", "--json"}
+	args := []string{"list", "--status", "open", "--label", "rejected", "--sort", "priority", "--limit", "0", "--json"}
 	args = append(args, filters...)
 	return runND(projectRoot, args...)
 }
@@ -244,7 +260,7 @@ func hasLabel(labels []string, target string) bool {
 // actionable work (delivered, rejected, or ready children).
 // Returns the epic ID and title, or empty strings when no epic qualifies.
 func AutoSelectEpic(projectRoot string, exclude ...string) (string, string, error) {
-	epics, err := runND(projectRoot, "list", "--type", "epic", "--status", "!closed", "--sort", "priority", "--json")
+	epics, err := runND(projectRoot, "list", "--type", "epic", "--status", "!closed", "--sort", "priority", "--limit", "0", "--json")
 	if err != nil {
 		return "", "", fmt.Errorf("list epics: %w", err)
 	}

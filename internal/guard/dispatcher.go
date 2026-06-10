@@ -16,7 +16,11 @@ var dfArtifacts = map[string]string{
 	"ARCHITECTURE.md": "architect",
 }
 
-var ndMutatingCommandRe = regexp.MustCompile(`(?:^|[;&|]\s*)(?:\S*/)?nd\s+(?:--\S+(?:\s+\S+)?\s+)*(create|update|close|reopen|delete|defer|undefer|labels\s+(?:add|remove|rm)|comments\s+add|dep\s+(?:add|rm|relate|unrelate)|link|unlink)\b`)
+// ndMutatingCommandRe covers bare nd and the sanctioned `pvg nd ...` wrapper.
+var ndMutatingCommandRe = regexp.MustCompile(ndCmdPrefix + `(create|update|close|reopen|delete|defer|undefer|labels\s+(?:add|remove|rm)|comments\s+add|dep\s+(?:add|rm|relate|unrelate)|link|unlink)\b`)
+
+// pvgIssuesMutatingRe covers the normalized `pvg issues ...` mutating forms.
+var pvgIssuesMutatingRe = regexp.MustCompile(pvgIssuesPrefix + `(create|update|close|reopen|comment|link|unlink)\b`)
 
 var dispatcherMutatingAgents = []string{
 	"paivot-graph:sr-pm",
@@ -136,11 +140,22 @@ func dfBlockMsg(artifact, agentName string) string {
 }
 
 func checkDispatcherNDMutation(projectRoot string, state *dispatcher.State, command string) Result {
-	if command == "" || !ndMutatingCommandRe.MatchString(command) {
+	if command == "" {
+		return Result{Allowed: true}
+	}
+	if !ndMutatingCommandRe.MatchString(command) && !pvgIssuesMutatingRe.MatchString(command) {
 		return Result{Allowed: true}
 	}
 
 	if dispatcherWriteAllowed(projectRoot, state) {
+		return Result{Allowed: true}
+	}
+
+	// Epic completion gate exemption: the dispatcher itself closes and
+	// accepts EPICS (pvg issues update EPIC_ID --status closed /
+	// --add-label accepted, or pvg nd close EPIC_ID). Commands whose target
+	// issues are all of type "epic" are allowed from the coordinator.
+	if isEpicMutationCommand(projectRoot, command) {
 		return Result{Allowed: true}
 	}
 
@@ -153,6 +168,30 @@ func checkDispatcherNDMutation(projectRoot string, state *dispatcher.State, comm
 			"  - developer for delivery/progress updates\n" +
 			"  - pm for accept/reject and close/reopen actions",
 	}
+}
+
+// isEpicMutationCommand reports whether every issue targeted by the command
+// has frontmatter type: epic. Commands with no extractable target IDs are not
+// exempt.
+func isEpicMutationCommand(projectRoot, command string) bool {
+	ids := make(map[string]bool)
+	if statusIDs, _, found := parseNdStatusChange(command); found {
+		for _, id := range statusIDs {
+			ids[id] = true
+		}
+	}
+	if id, _, found := parseNdContractLabelAdd(command); found {
+		ids[id] = true
+	}
+	if len(ids) == 0 {
+		return false
+	}
+	for id := range ids {
+		if ReadIssueType(projectRoot, id) != "epic" {
+			return false
+		}
+	}
+	return true
 }
 
 func dispatcherWriteAllowed(projectRoot string, state *dispatcher.State) bool {

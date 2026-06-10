@@ -145,10 +145,10 @@ func TestQueryWorkCounts_EpicModeStillQueriesWholeBacklog(t *testing.T) {
 
 	want := [][]string{
 		{"nd", "--vault", override, "ready", "--json"},
-		{"nd", "--vault", override, "list", "--status", "in_progress", "--json"},
-		{"nd", "--vault", override, "list", "--status", "open", "--label", "rejected", "--json"},
+		{"nd", "--vault", override, "list", "--status", "in_progress", "--limit", "0", "--json"},
+		{"nd", "--vault", override, "list", "--status", "open", "--label", "rejected", "--limit", "0", "--json"},
 		{"nd", "--vault", override, "blocked", "--json"},
-		{"nd", "--vault", override, "list", "--status", "!closed", "--json"},
+		{"nd", "--vault", override, "list", "--status", "!closed", "--limit", "0", "--json"},
 	}
 	if !reflect.DeepEqual(calls, want) {
 		t.Fatalf("unexpected nd calls:\n got: %#v\nwant: %#v", calls, want)
@@ -175,18 +175,18 @@ func TestCountOtherIssues(t *testing.T) {
 func TestAutoSelectEpic_PicksHighestPriorityWithActionableWork(t *testing.T) {
 	withStubbedND(t, map[string]string{
 		// List non-closed epics sorted by priority
-		"list --type epic --status !closed --sort priority --json": `[
+		"list --type epic --status !closed --sort priority --limit 0 --json": `[
 			{"ID":"PROJ-e1","Title":"Epic One","Type":"epic","Priority":0},
 			{"ID":"PROJ-e2","Title":"Epic Two","Type":"epic","Priority":1}
 		]`,
 		// Epic One has no actionable work
-		"list --status in_progress --label delivered --sort priority --json --parent PROJ-e1": `[]`,
-		"list --status open --label rejected --sort priority --json --parent PROJ-e1":         `[]`,
-		"ready --sort priority --json --parent PROJ-e1":                                       `[]`,
+		"list --status in_progress --label delivered --sort priority --limit 0 --json --parent PROJ-e1": `[]`,
+		"list --status open --label rejected --sort priority --limit 0 --json --parent PROJ-e1":         `[]`,
+		"ready --sort priority --json --parent PROJ-e1":                                                 `[]`,
 		// Epic Two has ready work
-		"list --status in_progress --label delivered --sort priority --json --parent PROJ-e2": `[]`,
-		"list --status open --label rejected --sort priority --json --parent PROJ-e2":         `[]`,
-		"ready --sort priority --json --parent PROJ-e2":                                       `[{"ID":"PROJ-s1","Title":"Story","Status":"ready"}]`,
+		"list --status in_progress --label delivered --sort priority --limit 0 --json --parent PROJ-e2": `[]`,
+		"list --status open --label rejected --sort priority --limit 0 --json --parent PROJ-e2":         `[]`,
+		"ready --sort priority --json --parent PROJ-e2":                                                 `[{"ID":"PROJ-s1","Title":"Story","Status":"ready"}]`,
 	})
 
 	id, title, err := AutoSelectEpic(t.TempDir())
@@ -203,18 +203,18 @@ func TestAutoSelectEpic_PicksHighestPriorityWithActionableWork(t *testing.T) {
 
 func TestAutoSelectEpic_RespectsExcludeList(t *testing.T) {
 	withStubbedND(t, map[string]string{
-		"list --type epic --status !closed --sort priority --json": `[
+		"list --type epic --status !closed --sort priority --limit 0 --json": `[
 			{"ID":"PROJ-e1","Title":"Epic One","Type":"epic","Priority":0},
 			{"ID":"PROJ-e2","Title":"Epic Two","Type":"epic","Priority":1}
 		]`,
 		// Epic One has work but is excluded
-		"list --status in_progress --label delivered --sort priority --json --parent PROJ-e1": `[{"ID":"PROJ-d1","Title":"Delivered","Status":"in_progress","Labels":["delivered"]}]`,
-		"list --status open --label rejected --sort priority --json --parent PROJ-e1":         `[]`,
-		"ready --sort priority --json --parent PROJ-e1":                                       `[]`,
+		"list --status in_progress --label delivered --sort priority --limit 0 --json --parent PROJ-e1": `[{"ID":"PROJ-d1","Title":"Delivered","Status":"in_progress","Labels":["delivered"]}]`,
+		"list --status open --label rejected --sort priority --limit 0 --json --parent PROJ-e1":         `[]`,
+		"ready --sort priority --json --parent PROJ-e1":                                                 `[]`,
 		// Epic Two also has work
-		"list --status in_progress --label delivered --sort priority --json --parent PROJ-e2": `[]`,
-		"list --status open --label rejected --sort priority --json --parent PROJ-e2":         `[]`,
-		"ready --sort priority --json --parent PROJ-e2":                                       `[{"ID":"PROJ-s2","Title":"Story","Status":"ready"}]`,
+		"list --status in_progress --label delivered --sort priority --limit 0 --json --parent PROJ-e2": `[]`,
+		"list --status open --label rejected --sort priority --limit 0 --json --parent PROJ-e2":         `[]`,
+		"ready --sort priority --json --parent PROJ-e2":                                                 `[{"ID":"PROJ-s2","Title":"Story","Status":"ready"}]`,
 	})
 
 	id, _, err := AutoSelectEpic(t.TempDir(), "PROJ-e1")
@@ -228,12 +228,12 @@ func TestAutoSelectEpic_RespectsExcludeList(t *testing.T) {
 
 func TestAutoSelectEpic_ReturnsEmptyWhenNoActionableEpics(t *testing.T) {
 	withStubbedND(t, map[string]string{
-		"list --type epic --status !closed --sort priority --json": `[
+		"list --type epic --status !closed --sort priority --limit 0 --json": `[
 			{"ID":"PROJ-e1","Title":"Epic One","Type":"epic"}
 		]`,
-		"list --status in_progress --label delivered --sort priority --json --parent PROJ-e1": `[]`,
-		"list --status open --label rejected --sort priority --json --parent PROJ-e1":         `[]`,
-		"ready --sort priority --json --parent PROJ-e1":                                       `[]`,
+		"list --status in_progress --label delivered --sort priority --limit 0 --json --parent PROJ-e1": `[]`,
+		"list --status open --label rejected --sort priority --limit 0 --json --parent PROJ-e1":         `[]`,
+		"ready --sort priority --json --parent PROJ-e1":                                                 `[]`,
 	})
 
 	id, title, err := AutoSelectEpic(t.TempDir())
@@ -247,7 +247,7 @@ func TestAutoSelectEpic_ReturnsEmptyWhenNoActionableEpics(t *testing.T) {
 
 func TestAutoSelectEpic_ReturnsEmptyWhenNoEpicsExist(t *testing.T) {
 	withStubbedND(t, map[string]string{
-		"list --type epic --status !closed --sort priority --json": `[]`,
+		"list --type epic --status !closed --sort priority --limit 0 --json": `[]`,
 	})
 
 	id, _, err := AutoSelectEpic(t.TempDir())
@@ -261,18 +261,18 @@ func TestAutoSelectEpic_ReturnsEmptyWhenNoEpicsExist(t *testing.T) {
 
 func TestAutoSelectEpic_PrefersDeliveredOverReady(t *testing.T) {
 	withStubbedND(t, map[string]string{
-		"list --type epic --status !closed --sort priority --json": `[
+		"list --type epic --status !closed --sort priority --limit 0 --json": `[
 			{"ID":"PROJ-e1","Title":"Epic One","Type":"epic","Priority":0},
 			{"ID":"PROJ-e2","Title":"Epic Two","Type":"epic","Priority":1}
 		]`,
 		// Epic One has delivered work (pipeline needs unblocking)
-		"list --status in_progress --label delivered --sort priority --json --parent PROJ-e1": `[{"ID":"PROJ-d1","Title":"Delivered","Status":"in_progress","Labels":["delivered"]}]`,
-		"list --status open --label rejected --sort priority --json --parent PROJ-e1":         `[]`,
-		"ready --sort priority --json --parent PROJ-e1":                                       `[]`,
+		"list --status in_progress --label delivered --sort priority --limit 0 --json --parent PROJ-e1": `[{"ID":"PROJ-d1","Title":"Delivered","Status":"in_progress","Labels":["delivered"]}]`,
+		"list --status open --label rejected --sort priority --limit 0 --json --parent PROJ-e1":         `[]`,
+		"ready --sort priority --json --parent PROJ-e1":                                                 `[]`,
 		// Epic Two has ready work
-		"list --status in_progress --label delivered --sort priority --json --parent PROJ-e2": `[]`,
-		"list --status open --label rejected --sort priority --json --parent PROJ-e2":         `[]`,
-		"ready --sort priority --json --parent PROJ-e2":                                       `[{"ID":"PROJ-s2","Title":"Story","Status":"ready"}]`,
+		"list --status in_progress --label delivered --sort priority --limit 0 --json --parent PROJ-e2": `[]`,
+		"list --status open --label rejected --sort priority --limit 0 --json --parent PROJ-e2":         `[]`,
+		"ready --sort priority --json --parent PROJ-e2":                                                 `[{"ID":"PROJ-s2","Title":"Story","Status":"ready"}]`,
 	})
 
 	id, _, err := AutoSelectEpic(t.TempDir())
@@ -282,6 +282,51 @@ func TestAutoSelectEpic_PrefersDeliveredOverReady(t *testing.T) {
 	// PROJ-e1 is higher priority (P0) and has delivered work
 	if id != "PROJ-e1" {
 		t.Fatalf("expected PROJ-e1 (has delivered work, higher priority), got %s", id)
+	}
+}
+
+func TestQueryEpicCounts_ClassifiesOpenChildrenByGraphBlockedSet(t *testing.T) {
+	withStubbedND(t, map[string]string{
+		"children PROJ-epic --json": `[
+			{"ID":"PROJ-s1","Status":"open","Labels":[]},
+			{"ID":"PROJ-s2","Status":"open","Labels":[]},
+			{"ID":"PROJ-s3","Status":"open","Labels":["rejected"]},
+			{"ID":"PROJ-s4","Status":"in_progress","Labels":["delivered"]},
+			{"ID":"PROJ-s5","Status":"in_progress","Labels":[]},
+			{"ID":"PROJ-s6","Status":"blocked","Labels":[]},
+			{"ID":"PROJ-s7","Status":"deferred","Labels":[]},
+			{"ID":"PROJ-s8","Status":"closed","Labels":[]}
+		]`,
+		// PROJ-s2 is open but graph-blocked (open blockers).
+		"blocked --json": `[{"ID":"PROJ-s2","Status":"open","Labels":[]}]`,
+	})
+
+	wc, err := QueryEpicCounts(t.TempDir(), "PROJ-epic")
+	if err != nil {
+		t.Fatalf("QueryEpicCounts() error: %v", err)
+	}
+
+	want := WorkCounts{Ready: 1, Rejected: 1, Delivered: 1, InProgress: 1, Blocked: 2, Other: 1}
+	if !reflect.DeepEqual(wc, want) {
+		t.Fatalf("unexpected counts: got %+v want %+v", wc, want)
+	}
+}
+
+func TestQueryEpicCounts_AllOpenChildrenGraphBlockedYieldsBlockedOnly(t *testing.T) {
+	withStubbedND(t, map[string]string{
+		"children PROJ-epic --json": `[
+			{"ID":"PROJ-s1","Status":"open","Labels":[]},
+			{"ID":"PROJ-s2","Status":"open","Labels":[]}
+		]`,
+		"blocked --json": `[{"ID":"PROJ-s1"},{"ID":"PROJ-s2"}]`,
+	})
+
+	wc, err := QueryEpicCounts(t.TempDir(), "PROJ-epic")
+	if err != nil {
+		t.Fatalf("QueryEpicCounts() error: %v", err)
+	}
+	if wc.Blocked != 2 || wc.Ready != 0 || wc.Other != 0 {
+		t.Fatalf("expected 2 blocked / 0 ready / 0 other, got %+v", wc)
 	}
 }
 

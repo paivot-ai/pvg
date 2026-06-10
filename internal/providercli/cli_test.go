@@ -179,6 +179,159 @@ func TestRunNotes_NoArgsErrors(t *testing.T) {
 	}
 }
 
+// setupFakeND installs a fake nd binary that logs every invocation's args to
+// a file and responds per-subcommand, then chdirs into a project configured
+// with the nd backlog adapter. Returns the args log path.
+func setupFakeND(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "bin")
+	if err := os.MkdirAll(bin, 0o755); err != nil {
+		t.Fatalf("mkdir bin: %v", err)
+	}
+	logFile := filepath.Join(dir, "nd-args.log")
+	script := `#!/bin/sh
+echo "$*" >> "` + logFile + `"
+case "$*" in
+  *" list "*|*" list") printf '[]' ;;
+  *"blocked --json"*) printf '[{"ID":"VP-9","Title":"Blocked story","Status":"open"}]' ;;
+  *) printf '' ;;
+esac
+exit 0
+`
+	if err := os.WriteFile(filepath.Join(bin, "nd"), []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake nd: %v", err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	project := filepath.Join(dir, "project")
+	if err := os.MkdirAll(filepath.Join(project, ".paivot"), 0o755); err != nil {
+		t.Fatalf("mkdir project: %v", err)
+	}
+	config := "backlog:\n" +
+		"  primary:\n" +
+		"    adapter: nd\n" +
+		"    config:\n" +
+		"      vault: " + strconv.Quote(filepath.Join(dir, "vault")) + "\n"
+	if err := os.WriteFile(filepath.Join(project, ".paivot", "config.yaml"), []byte(config), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	oldWD, _ := os.Getwd()
+	t.Cleanup(func() { _ = os.Chdir(oldWD) })
+	if err := os.Chdir(project); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+	return logFile
+}
+
+func readArgsLog(t *testing.T, logFile string) string {
+	t.Helper()
+	data, err := os.ReadFile(logFile)
+	if err != nil {
+		t.Fatalf("read args log: %v", err)
+	}
+	return string(data)
+}
+
+func TestRunIssuesList_PassesTypeAndSortToND(t *testing.T) {
+	logFile := setupFakeND(t)
+
+	_, err := captureStdout(t, func() error {
+		return RunIssues([]string{"list", "--type", "epic", "--sort", "priority", "--json"})
+	})
+	if err != nil {
+		t.Fatalf("RunIssues list: %v", err)
+	}
+
+	logged := readArgsLog(t, logFile)
+	for _, fragment := range []string{"--type epic", "--sort priority"} {
+		if !strings.Contains(logged, fragment) {
+			t.Errorf("nd invocation missing %q: %s", fragment, logged)
+		}
+	}
+}
+
+func TestRunIssuesClose_PassesReasonToND(t *testing.T) {
+	logFile := setupFakeND(t)
+
+	_, err := captureStdout(t, func() error {
+		return RunIssues([]string{"close", "VP-1", "--reason", "obsolete"})
+	})
+	if err != nil {
+		t.Fatalf("RunIssues close: %v", err)
+	}
+
+	logged := readArgsLog(t, logFile)
+	if !strings.Contains(logged, "close VP-1 --reason obsolete") {
+		t.Errorf("nd invocation missing close reason: %s", logged)
+	}
+}
+
+func TestRunIssuesClose_WithoutReason(t *testing.T) {
+	logFile := setupFakeND(t)
+
+	_, err := captureStdout(t, func() error {
+		return RunIssues([]string{"close", "VP-1"})
+	})
+	if err != nil {
+		t.Fatalf("RunIssues close: %v", err)
+	}
+
+	logged := readArgsLog(t, logFile)
+	if !strings.Contains(logged, "close VP-1") {
+		t.Errorf("nd close not invoked: %s", logged)
+	}
+	if strings.Contains(logged, "--reason") {
+		t.Errorf("unexpected --reason flag without reason: %s", logged)
+	}
+}
+
+func TestRunIssuesClose_MissingIDErrors(t *testing.T) {
+	setupFakeND(t)
+	if err := RunIssues([]string{"close", "--reason", "no id"}); err == nil {
+		t.Error("expected error when close has no issue ID")
+	}
+}
+
+func TestRunIssuesBlocked_JSONOutput(t *testing.T) {
+	setupFakeND(t)
+
+	out, err := captureStdout(t, func() error {
+		return RunIssues([]string{"blocked", "--json"})
+	})
+	if err != nil {
+		t.Fatalf("RunIssues blocked: %v", err)
+	}
+
+	trimmed := strings.TrimSpace(out)
+	if !strings.HasPrefix(trimmed, "[") {
+		t.Fatalf("expected JSON array output with --json, got %q", out)
+	}
+	if !strings.Contains(trimmed, `"VP-9"`) {
+		t.Errorf("expected blocked issue in JSON output, got %q", out)
+	}
+}
+
+func TestRunIssuesBlocked_TextOutputWithoutFlag(t *testing.T) {
+	setupFakeND(t)
+
+	out, err := captureStdout(t, func() error {
+		return RunIssues([]string{"blocked"})
+	})
+	if err != nil {
+		t.Fatalf("RunIssues blocked: %v", err)
+	}
+
+	trimmed := strings.TrimSpace(out)
+	if strings.HasPrefix(trimmed, "[") {
+		t.Fatalf("expected text output without --json, got %q", out)
+	}
+	if !strings.Contains(trimmed, "VP-9") {
+		t.Errorf("expected blocked issue in text output, got %q", out)
+	}
+}
+
 func TestOpenBacklog_LoadsConfigOrDefaults(t *testing.T) {
 	dir := t.TempDir()
 	// Empty .paivot dir is enough to anchor LocateProjectRoot, and Load

@@ -112,11 +112,11 @@ func (r *BacklogRouter) Update(ctx context.Context, id string, in UpdateIssueInp
 	return out, nil
 }
 
-func (r *BacklogRouter) Close(ctx context.Context, id string) error {
-	if err := r.primary.Close(ctx, id); err != nil {
+func (r *BacklogRouter) Close(ctx context.Context, id, reason string) error {
+	if err := r.primary.Close(ctx, id, reason); err != nil {
 		return err
 	}
-	r.fanOut(ctx, "Close", func(a BacklogAdapter) error { return a.Close(ctx, id) })
+	r.fanOut(ctx, "Close", func(a BacklogAdapter) error { return a.Close(ctx, id, reason) })
 	return nil
 }
 

@@ -207,6 +207,9 @@ func (a *Adapter) Show(ctx context.Context, id string) (providers.Issue, error) 
 	return linearToProvider(resp.Issue), nil
 }
 
+// List queries Linear issues. f.Type and f.Sort are accepted and ignored:
+// Linear has no first-class issue-type field matching nd's vocabulary, and
+// the GraphQL issues query returns its own default ordering.
 func (a *Adapter) List(ctx context.Context, f providers.ListFilter) ([]providers.Issue, error) {
 	filter := map[string]interface{}{}
 	if a.teamKey != "" {
@@ -317,7 +320,9 @@ func (a *Adapter) Update(ctx context.Context, id string, in providers.UpdateIssu
 	return linearToProvider(resp.IssueUpdate.Issue), nil
 }
 
-func (a *Adapter) Close(ctx context.Context, id string) error {
+// Close moves the issue to the closed workflow state. Linear has no
+// close-reason concept; the reason is accepted and ignored gracefully.
+func (a *Adapter) Close(ctx context.Context, id, _ string) error {
 	stateID, err := a.resolveStateID(ctx, providers.StatusClosed)
 	if err != nil {
 		return err

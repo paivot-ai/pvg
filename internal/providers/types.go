@@ -131,6 +131,8 @@ type ListFilter struct {
 	Parent    string // "" means no filter; "-" can mean "no parent" if adapter supports it
 	Project   string // project name or ID; adapters without projects ignore it
 	Milestone string // milestone name or ID; adapters without milestones ignore it
+	Type      string // issue type (epic|story|bug|task); adapters without types ignore it
+	Sort      string // sort field (e.g. priority, created, updated, id); adapters without sorting ignore it
 	Limit     int
 }
 
@@ -158,7 +160,9 @@ type BacklogAdapter interface {
 	Show(ctx context.Context, id string) (Issue, error)
 	List(ctx context.Context, f ListFilter) ([]Issue, error)
 	Update(ctx context.Context, id string, in UpdateIssueInput) (Issue, error)
-	Close(ctx context.Context, id string) error
+	// Close closes an issue. reason is optional ("" means none); adapters
+	// without a close-reason concept ignore it.
+	Close(ctx context.Context, id, reason string) error
 	Reopen(ctx context.Context, id string) error
 
 	AddComment(ctx context.Context, id, body string) (Comment, error)

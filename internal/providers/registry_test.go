@@ -20,8 +20,8 @@ func (f *fakeBacklog) List(context.Context, ListFilter) ([]Issue, error)       {
 func (f *fakeBacklog) Update(context.Context, string, UpdateIssueInput) (Issue, error) {
 	return Issue{}, nil
 }
-func (f *fakeBacklog) Close(context.Context, string) error  { return nil }
-func (f *fakeBacklog) Reopen(context.Context, string) error { return nil }
+func (f *fakeBacklog) Close(context.Context, string, string) error { return nil }
+func (f *fakeBacklog) Reopen(context.Context, string) error        { return nil }
 func (f *fakeBacklog) AddComment(context.Context, string, string) (Comment, error) {
 	return Comment{}, nil
 }

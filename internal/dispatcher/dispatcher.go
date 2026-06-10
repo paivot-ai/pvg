@@ -60,6 +60,7 @@ var knowledgeDirs = []string{
 	"patterns",
 	"debug",
 	"skills",
+	"uat",
 }
 
 // initProjectVault ensures the .vault/ directory tree exists.

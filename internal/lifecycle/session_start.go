@@ -11,17 +11,25 @@ import (
 
 	"github.com/paivot-ai/vlt"
 
+	"github.com/paivot-ai/pvg/internal/dispatcher"
 	"github.com/paivot-ai/pvg/internal/loop"
 	"github.com/paivot-ai/pvg/internal/vaultcfg"
 )
 
 // hookInput matches the JSON Claude Code sends to lifecycle hooks.
+// Source is one of "startup", "resume", "clear", or "compact".
 type hookInput struct {
-	CWD string `json:"cwd"`
+	CWD    string `json:"cwd"`
+	Source string `json:"source"`
 }
 
 // SessionStart loads vault context and project-local knowledge at session start.
 // Reads JSON from stdin, outputs structured context to stdout. Always exits 0.
+//
+// SessionStart stdout IS injected into Claude's context (unlike PreCompact
+// stdout, which is user-visible only), so when the hook fires with
+// source=="compact" it re-injects the dispatcher rules and loop instructions
+// that the compaction summary may have dropped.
 func SessionStart() error {
 	// 1. Parse hook input
 	var input hookInput
@@ -33,8 +41,18 @@ func SessionStart() error {
 		input.CWD, _ = os.Getwd()
 	}
 
-	// 1b. Clean up stale loop state if persist is disabled (the default)
-	cleanupStaleLoop(input.CWD)
+	// Compaction mid-session: re-inject critical context, keep loop state.
+	if input.Source == "compact" {
+		return sessionStartAfterCompact(input.CWD)
+	}
+
+	// 1b. Clean up stale loop state if persist is disabled. Only fresh
+	// session boundaries ("startup", "clear") may clean up -- "compact" and
+	// "resume" continue an existing session, where removing the state would
+	// kill a running loop.
+	if shouldCleanupStaleLoop(input.Source) {
+		cleanupStaleLoop(input.CWD)
+	}
 
 	// 2. Detect project name
 	project := detectProject(input.CWD)
@@ -120,7 +138,7 @@ func detectProject(cwd string) string {
 // outputProjectKnowledge prints summaries of project-local knowledge notes.
 func outputProjectKnowledge(projectVaultDir, cwd string) {
 	maxNotes := readMaxNotesSetting(cwd)
-	subfolders := []string{"conventions", "decisions", "patterns", "debug", "skills"}
+	subfolders := []string{"conventions", "decisions", "patterns", "debug", "skills", "uat"}
 
 	fmt.Println("Project-local knowledge (.vault/knowledge/):")
 	fmt.Println()
@@ -297,8 +315,40 @@ func readStackDetectionSetting(cwd string) bool {
 	return false
 }
 
+// shouldCleanupStaleLoop reports whether a SessionStart source represents a
+// fresh session boundary where stale loop state may be removed. Compaction
+// and resume fire mid-session: an active loop must survive them.
+func shouldCleanupStaleLoop(source string) bool {
+	return source != "compact" && source != "resume"
+}
+
+// sessionStartAfterCompact handles SessionStart with source=="compact".
+// It re-injects the dispatcher rules and loop recovery instructions into the
+// model's context, plus the operating-mode fallback. The expensive vault
+// project search is skipped to keep post-compaction re-entry fast. Loop state
+// is never cleaned up here -- compaction fires mid-session.
+func sessionStartAfterCompact(cwd string) error {
+	if state, _, err := dispatcher.ReadStateRoot(cwd); err == nil && state.Enabled {
+		fmt.Print(staticDispatcherReminder())
+		fmt.Print(staticLoopRecoveryReminder())
+	}
+
+	if loop.IsActiveFrom(cwd) {
+		if state, _, err := loop.ReadStateRoot(cwd); err == nil {
+			epic := state.TargetEpic
+			if epic == "" {
+				epic = "(all)"
+			}
+			fmt.Printf("[LOOP] Active loop: epic %s, iteration %d. Run `pvg loop recover` FIRST, then `pvg loop next --json`.\n", epic, state.Iteration)
+		}
+	}
+
+	fmt.Print(staticOperatingMode())
+	return nil
+}
+
 // cleanupStaleLoop removes loop state left over from a previous session
-// when loop.persist_across_sessions is false (the default).
+// when loop.persist_across_sessions is false (default is true).
 func cleanupStaleLoop(cwd string) {
 	state, root, err := loop.ReadStateRoot(cwd)
 	if err != nil || !state.Active {

@@ -15,14 +15,14 @@ import (
 func TestEvaluateNext_EpicMode_ActsOnDeliveredInEpic(t *testing.T) {
 	withStubbedND(t, epicModeStubs(map[string]string{
 		// Epic has a delivered story
-		"list --status in_progress --label delivered --sort priority --json --parent PROJ-epic": `[{"ID":"PROJ-s1","Title":"Epic delivery","Status":"in_progress","Parent":"PROJ-epic","Labels":["delivered"]}]`,
-		"list --status open --label rejected --sort priority --json --parent PROJ-epic":         `[]`,
-		"ready --sort priority --json --parent PROJ-epic":                                       `[]`,
+		"list --status in_progress --label delivered --sort priority --limit 0 --json --parent PROJ-epic": `[{"ID":"PROJ-s1","Title":"Epic delivery","Status":"in_progress","Parent":"PROJ-epic","Labels":["delivered"]}]`,
+		"list --status open --label rejected --sort priority --limit 0 --json --parent PROJ-epic":         `[]`,
+		"ready --sort priority --json --parent PROJ-epic":                                                 `[]`,
 		// Epic children: one delivered
 		"children PROJ-epic --json": `[{"ID":"PROJ-s1","Status":"in_progress","Labels":["delivered"]}]`,
 	}))
 
-	result, err := EvaluateNext(t.TempDir(), "epic", "PROJ-epic")
+	result, err := EvaluateNext(t.TempDir(), "epic", "PROJ-epic", 1)
 	if err != nil {
 		t.Fatalf("EvaluateNext() error: %v", err)
 	}
@@ -40,14 +40,14 @@ func TestEvaluateNext_EpicMode_ActsOnDeliveredInEpic(t *testing.T) {
 func TestEvaluateNext_EpicMode_DoesNotFallThroughToGlobal(t *testing.T) {
 	withStubbedND(t, epicModeStubs(map[string]string{
 		// Epic has NO actionable work
-		"list --status in_progress --label delivered --sort priority --json --parent PROJ-epic": `[]`,
-		"list --status open --label rejected --sort priority --json --parent PROJ-epic":         `[]`,
-		"ready --sort priority --json --parent PROJ-epic":                                       `[]`,
+		"list --status in_progress --label delivered --sort priority --limit 0 --json --parent PROJ-epic": `[]`,
+		"list --status open --label rejected --sort priority --limit 0 --json --parent PROJ-epic":         `[]`,
+		"ready --sort priority --json --parent PROJ-epic":                                                 `[]`,
 		// Epic children: one in-progress (agents working)
 		"children PROJ-epic --json": `[{"ID":"PROJ-s1","Status":"in_progress","Labels":[]}]`,
 	}))
 
-	result, err := EvaluateNext(t.TempDir(), "epic", "PROJ-epic")
+	result, err := EvaluateNext(t.TempDir(), "epic", "PROJ-epic", 1)
 	if err != nil {
 		t.Fatalf("EvaluateNext() error: %v", err)
 	}
@@ -63,19 +63,19 @@ func TestEvaluateNext_EpicMode_DoesNotFallThroughToGlobal(t *testing.T) {
 func TestEvaluateNext_EpicMode_EpicCompleteWhenAllClosed(t *testing.T) {
 	withStubbedND(t, epicModeStubs(map[string]string{
 		// Epic has no actionable work
-		"list --status in_progress --label delivered --sort priority --json --parent PROJ-epic": `[]`,
-		"list --status open --label rejected --sort priority --json --parent PROJ-epic":         `[]`,
-		"ready --sort priority --json --parent PROJ-epic":                                       `[]`,
+		"list --status in_progress --label delivered --sort priority --limit 0 --json --parent PROJ-epic": `[]`,
+		"list --status open --label rejected --sort priority --limit 0 --json --parent PROJ-epic":         `[]`,
+		"ready --sort priority --json --parent PROJ-epic":                                                 `[]`,
 		// Epic children: all closed (empty result)
 		"children PROJ-epic --json": `[]`,
 		// AutoSelectEpic: another epic exists
-		"list --type epic --status !closed --sort priority --json":                            `[{"ID":"PROJ-epic","Type":"epic"},{"ID":"PROJ-e2","Title":"Next Epic","Type":"epic"}]`,
-		"list --status in_progress --label delivered --sort priority --json --parent PROJ-e2": `[]`,
-		"list --status open --label rejected --sort priority --json --parent PROJ-e2":         `[]`,
-		"ready --sort priority --json --parent PROJ-e2":                                       `[{"ID":"PROJ-s2","Title":"Story Two","Status":"ready"}]`,
+		"list --type epic --status !closed --sort priority --limit 0 --json":                            `[{"ID":"PROJ-epic","Type":"epic"},{"ID":"PROJ-e2","Title":"Next Epic","Type":"epic"}]`,
+		"list --status in_progress --label delivered --sort priority --limit 0 --json --parent PROJ-e2": `[]`,
+		"list --status open --label rejected --sort priority --limit 0 --json --parent PROJ-e2":         `[]`,
+		"ready --sort priority --json --parent PROJ-e2":                                                 `[{"ID":"PROJ-s2","Title":"Story Two","Status":"ready"}]`,
 	}))
 
-	result, err := EvaluateNext(t.TempDir(), "epic", "PROJ-epic")
+	result, err := EvaluateNext(t.TempDir(), "epic", "PROJ-epic", 1)
 	if err != nil {
 		t.Fatalf("EvaluateNext() error: %v", err)
 	}
@@ -89,16 +89,16 @@ func TestEvaluateNext_EpicMode_EpicCompleteWhenAllClosed(t *testing.T) {
 
 func TestEvaluateNext_EpicMode_EpicCompleteLastEpic(t *testing.T) {
 	withStubbedND(t, epicModeStubs(map[string]string{
-		"list --status in_progress --label delivered --sort priority --json --parent PROJ-epic": `[]`,
-		"list --status open --label rejected --sort priority --json --parent PROJ-epic":         `[]`,
-		"ready --sort priority --json --parent PROJ-epic":                                       `[]`,
+		"list --status in_progress --label delivered --sort priority --limit 0 --json --parent PROJ-epic": `[]`,
+		"list --status open --label rejected --sort priority --limit 0 --json --parent PROJ-epic":         `[]`,
+		"ready --sort priority --json --parent PROJ-epic":                                                 `[]`,
 		"children PROJ-epic --json": `[]`,
 		// No other epics
-		"list --type epic --status !closed --sort priority --json": `[{"ID":"PROJ-epic","Type":"epic"}]`,
+		"list --type epic --status !closed --sort priority --limit 0 --json": `[{"ID":"PROJ-epic","Type":"epic"}]`,
 		// PROJ-epic is excluded by AutoSelectEpic, so no match
 	}))
 
-	result, err := EvaluateNext(t.TempDir(), "epic", "PROJ-epic")
+	result, err := EvaluateNext(t.TempDir(), "epic", "PROJ-epic", 1)
 	if err != nil {
 		t.Fatalf("EvaluateNext() error: %v", err)
 	}
@@ -112,13 +112,36 @@ func TestEvaluateNext_EpicMode_EpicCompleteLastEpic(t *testing.T) {
 
 func TestEvaluateNext_EpicMode_EpicBlockedWhenOnlyBlocked(t *testing.T) {
 	withStubbedND(t, epicModeStubs(map[string]string{
-		"list --status in_progress --label delivered --sort priority --json --parent PROJ-epic": `[]`,
-		"list --status open --label rejected --sort priority --json --parent PROJ-epic":         `[]`,
-		"ready --sort priority --json --parent PROJ-epic":                                       `[]`,
+		"list --status in_progress --label delivered --sort priority --limit 0 --json --parent PROJ-epic": `[]`,
+		"list --status open --label rejected --sort priority --limit 0 --json --parent PROJ-epic":         `[]`,
+		"ready --sort priority --json --parent PROJ-epic":                                                 `[]`,
 		"children PROJ-epic --json": `[{"ID":"PROJ-s1","Status":"blocked","Labels":[]}]`,
 	}))
 
-	result, err := EvaluateNext(t.TempDir(), "epic", "PROJ-epic")
+	result, err := EvaluateNext(t.TempDir(), "epic", "PROJ-epic", 1)
+	if err != nil {
+		t.Fatalf("EvaluateNext() error: %v", err)
+	}
+	if result.Decision != "epic_blocked" {
+		t.Fatalf("expected epic_blocked, got %s: %s", result.Decision, result.Reason)
+	}
+}
+
+func TestEvaluateNext_EpicMode_EpicBlockedWhenChildrenOpenButGraphBlocked(t *testing.T) {
+	// nd has no "ready" status: children that are open but dependency-blocked
+	// keep status "open". They must classify as Blocked (via nd blocked),
+	// not Other, so the loop escalates with epic_blocked instead of waiting
+	// forever.
+	withStubbedND(t, epicModeStubs(map[string]string{
+		"list --status in_progress --label delivered --sort priority --limit 0 --json --parent PROJ-epic": `[]`,
+		"list --status open --label rejected --sort priority --limit 0 --json --parent PROJ-epic":         `[]`,
+		"ready --sort priority --json --parent PROJ-epic":                                                 `[]`,
+		// Children are open but graph-blocked.
+		"children PROJ-epic --json": `[{"ID":"PROJ-s1","Status":"open","Labels":[]},{"ID":"PROJ-s2","Status":"open","Labels":[]}]`,
+		"blocked --json":            `[{"ID":"PROJ-s1","Status":"open","Labels":[]},{"ID":"PROJ-s2","Status":"open","Labels":[]}]`,
+	}))
+
+	result, err := EvaluateNext(t.TempDir(), "epic", "PROJ-epic", 1)
 	if err != nil {
 		t.Fatalf("EvaluateNext() error: %v", err)
 	}
@@ -131,14 +154,14 @@ func TestEvaluateNext_EpicMode_WaitsOnDeliveredInEpicCounts(t *testing.T) {
 	// Edge case: queryQueues finds no delivered (because nd query timing),
 	// but epicCounts shows delivered. Should wait, not fall through.
 	withStubbedND(t, epicModeStubs(map[string]string{
-		"list --status in_progress --label delivered --sort priority --json --parent PROJ-epic": `[]`,
-		"list --status open --label rejected --sort priority --json --parent PROJ-epic":         `[]`,
-		"ready --sort priority --json --parent PROJ-epic":                                       `[]`,
+		"list --status in_progress --label delivered --sort priority --limit 0 --json --parent PROJ-epic": `[]`,
+		"list --status open --label rejected --sort priority --limit 0 --json --parent PROJ-epic":         `[]`,
+		"ready --sort priority --json --parent PROJ-epic":                                                 `[]`,
 		// But children shows delivered (race-safe: epicCounts catches it)
 		"children PROJ-epic --json": `[{"ID":"PROJ-s1","Status":"in_progress","Labels":["delivered"]},{"ID":"PROJ-s2","Status":"closed","Labels":[]}]`,
 	}))
 
-	result, err := EvaluateNext(t.TempDir(), "epic", "PROJ-epic")
+	result, err := EvaluateNext(t.TempDir(), "epic", "PROJ-epic", 1)
 	if err != nil {
 		t.Fatalf("EvaluateNext() error: %v", err)
 	}
@@ -153,17 +176,17 @@ func TestEvaluateNext_EpicMode_WaitsOnDeliveredInEpicCounts(t *testing.T) {
 
 func TestEvaluateNext_AllMode_PrefersRejectedBeforeReady(t *testing.T) {
 	withStubbedND(t, map[string]string{
-		"ready --json":                               `[{"ID":"PROJ-rework","Status":"ready","Labels":["rejected"]},{"ID":"PROJ-ready","Status":"ready","Labels":[]}]`,
-		"list --status in_progress --json":           `[]`,
-		"list --status open --label rejected --json": `[{"ID":"PROJ-rework","Status":"open","Labels":["rejected"]}]`,
-		"blocked --json":                             `[]`,
-		"list --status !closed --json":               `[{"ID":"PROJ-rework","Status":"open","Labels":["rejected"]},{"ID":"PROJ-ready","Status":"ready","Labels":[]}]`,
-		"list --status in_progress --label delivered --sort priority --json": `[]`,
-		"list --status open --label rejected --sort priority --json":         `[{"ID":"PROJ-rework","Title":"Fix me","Status":"open","Labels":["rejected"]}]`,
-		"ready --sort priority --json":                                       `[{"ID":"PROJ-rework","Title":"Fix me","Status":"ready","Labels":["rejected"]},{"ID":"PROJ-ready","Title":"New work","Status":"ready","Labels":[]}]`,
+		"ready --json": `[{"ID":"PROJ-rework","Status":"ready","Labels":["rejected"]},{"ID":"PROJ-ready","Status":"ready","Labels":[]}]`,
+		"list --status in_progress --limit 0 --json":           `[]`,
+		"list --status open --label rejected --limit 0 --json": `[{"ID":"PROJ-rework","Status":"open","Labels":["rejected"]}]`,
+		"blocked --json":                         `[]`,
+		"list --status !closed --limit 0 --json": `[{"ID":"PROJ-rework","Status":"open","Labels":["rejected"]},{"ID":"PROJ-ready","Status":"ready","Labels":[]}]`,
+		"list --status in_progress --label delivered --sort priority --limit 0 --json": `[]`,
+		"list --status open --label rejected --sort priority --limit 0 --json":         `[{"ID":"PROJ-rework","Title":"Fix me","Status":"open","Labels":["rejected"]}]`,
+		"ready --sort priority --json":                                                 `[{"ID":"PROJ-rework","Title":"Fix me","Status":"ready","Labels":["rejected"]},{"ID":"PROJ-ready","Title":"New work","Status":"ready","Labels":[]}]`,
 	})
 
-	result, err := EvaluateNext(t.TempDir(), "all", "")
+	result, err := EvaluateNext(t.TempDir(), "all", "", 1)
 	if err != nil {
 		t.Fatalf("EvaluateNext() error: %v", err)
 	}
@@ -177,17 +200,17 @@ func TestEvaluateNext_AllMode_PrefersRejectedBeforeReady(t *testing.T) {
 
 func TestEvaluateNext_AllMode_HardTDDReadyStartsInRedPhase(t *testing.T) {
 	withStubbedND(t, map[string]string{
-		"ready --json":                               `[{"ID":"PROJ-hard","Status":"ready","Labels":["hard-tdd"]}]`,
-		"list --status in_progress --json":           `[]`,
-		"list --status open --label rejected --json": `[]`,
-		"blocked --json":                             `[]`,
-		"list --status !closed --json":               `[{"ID":"PROJ-hard","Status":"ready","Labels":["hard-tdd"]}]`,
-		"list --status in_progress --label delivered --sort priority --json": `[]`,
-		"list --status open --label rejected --sort priority --json":         `[]`,
-		"ready --sort priority --json":                                       `[{"ID":"PROJ-hard","Title":"Hard story","Status":"ready","Labels":["hard-tdd"]}]`,
+		"ready --json": `[{"ID":"PROJ-hard","Status":"ready","Labels":["hard-tdd"]}]`,
+		"list --status in_progress --limit 0 --json":           `[]`,
+		"list --status open --label rejected --limit 0 --json": `[]`,
+		"blocked --json":                         `[]`,
+		"list --status !closed --limit 0 --json": `[{"ID":"PROJ-hard","Status":"ready","Labels":["hard-tdd"]}]`,
+		"list --status in_progress --label delivered --sort priority --limit 0 --json": `[]`,
+		"list --status open --label rejected --sort priority --limit 0 --json":         `[]`,
+		"ready --sort priority --json":                                                 `[{"ID":"PROJ-hard","Title":"Hard story","Status":"ready","Labels":["hard-tdd"]}]`,
 	})
 
-	result, err := EvaluateNext(t.TempDir(), "all", "")
+	result, err := EvaluateNext(t.TempDir(), "all", "", 1)
 	if err != nil {
 		t.Fatalf("EvaluateNext() error: %v", err)
 	}
@@ -198,17 +221,17 @@ func TestEvaluateNext_AllMode_HardTDDReadyStartsInRedPhase(t *testing.T) {
 
 func TestEvaluateNext_AllMode_WaitsWhenOnlyInProgressRemains(t *testing.T) {
 	withStubbedND(t, map[string]string{
-		"ready --json":                               `[]`,
-		"list --status in_progress --json":           `[{"ID":"PROJ-run","Status":"in_progress","Labels":[]}]`,
-		"list --status open --label rejected --json": `[]`,
-		"blocked --json":                             `[]`,
-		"list --status !closed --json":               `[{"ID":"PROJ-run","Status":"in_progress","Labels":[]}]`,
-		"list --status in_progress --label delivered --sort priority --json": `[]`,
-		"list --status open --label rejected --sort priority --json":         `[]`,
-		"ready --sort priority --json":                                       `[]`,
+		"ready --json": `[]`,
+		"list --status in_progress --limit 0 --json":           `[{"ID":"PROJ-run","Status":"in_progress","Labels":[]}]`,
+		"list --status open --label rejected --limit 0 --json": `[]`,
+		"blocked --json":                         `[]`,
+		"list --status !closed --limit 0 --json": `[{"ID":"PROJ-run","Status":"in_progress","Labels":[]}]`,
+		"list --status in_progress --label delivered --sort priority --limit 0 --json": `[]`,
+		"list --status open --label rejected --sort priority --limit 0 --json":         `[]`,
+		"ready --sort priority --json":                                                 `[]`,
 	})
 
-	result, err := EvaluateNext(t.TempDir(), "all", "")
+	result, err := EvaluateNext(t.TempDir(), "all", "", 1)
 	if err != nil {
 		t.Fatalf("EvaluateNext() error: %v", err)
 	}
@@ -219,22 +242,193 @@ func TestEvaluateNext_AllMode_WaitsWhenOnlyInProgressRemains(t *testing.T) {
 
 func TestEvaluateNext_AllMode_CompleteWhenEmpty(t *testing.T) {
 	withStubbedND(t, map[string]string{
-		"ready --json":                               `[]`,
-		"list --status in_progress --json":           `[]`,
-		"list --status open --label rejected --json": `[]`,
-		"blocked --json":                             `[]`,
-		"list --status !closed --json":               `[]`,
-		"list --status in_progress --label delivered --sort priority --json": `[]`,
-		"list --status open --label rejected --sort priority --json":         `[]`,
-		"ready --sort priority --json":                                       `[]`,
+		"ready --json": `[]`,
+		"list --status in_progress --limit 0 --json":           `[]`,
+		"list --status open --label rejected --limit 0 --json": `[]`,
+		"blocked --json":                         `[]`,
+		"list --status !closed --limit 0 --json": `[]`,
+		"list --status in_progress --label delivered --sort priority --limit 0 --json": `[]`,
+		"list --status open --label rejected --sort priority --limit 0 --json":         `[]`,
+		"ready --sort priority --json":                                                 `[]`,
 	})
 
-	result, err := EvaluateNext(t.TempDir(), "all", "")
+	result, err := EvaluateNext(t.TempDir(), "all", "", 1)
 	if err != nil {
 		t.Fatalf("EvaluateNext() error: %v", err)
 	}
 	if result.Decision != "complete" {
 		t.Fatalf("expected complete, got %s: %s", result.Decision, result.Reason)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Wave selection (--n)
+// ---------------------------------------------------------------------------
+
+func TestChooseNextActions_DistinctStoriesUpToN(t *testing.T) {
+	queues := queueSnapshot{
+		Ready: []ndIssue{
+			{ID: "PROJ-s1", Title: "One", Status: "open"},
+			{ID: "PROJ-s2", Title: "Two", Status: "open"},
+			{ID: "PROJ-s3", Title: "Three", Status: "open"},
+		},
+	}
+
+	actions := chooseNextActions(queues, "epic", 3)
+	if len(actions) != 3 {
+		t.Fatalf("expected 3 actions, got %d", len(actions))
+	}
+	seen := map[string]bool{}
+	for _, a := range actions {
+		if seen[a.StoryID] {
+			t.Fatalf("duplicate story ID in wave: %s", a.StoryID)
+		}
+		seen[a.StoryID] = true
+		if a.Kind != "developer_new" {
+			t.Fatalf("expected developer_new, got %s", a.Kind)
+		}
+	}
+}
+
+func TestChooseNextActions_RespectsN(t *testing.T) {
+	queues := queueSnapshot{
+		Ready: []ndIssue{
+			{ID: "PROJ-s1"}, {ID: "PROJ-s2"}, {ID: "PROJ-s3"}, {ID: "PROJ-s4"},
+		},
+	}
+
+	actions := chooseNextActions(queues, "backlog", 2)
+	if len(actions) != 2 {
+		t.Fatalf("expected 2 actions, got %d", len(actions))
+	}
+}
+
+func TestChooseNextActions_MaxOnePMReviewPerWave(t *testing.T) {
+	queues := queueSnapshot{
+		Delivered: []ndIssue{
+			{ID: "PROJ-d1", Labels: []string{"delivered"}},
+			{ID: "PROJ-d2", Labels: []string{"delivered"}},
+		},
+		Ready: []ndIssue{
+			{ID: "PROJ-s1"}, {ID: "PROJ-s2"},
+		},
+	}
+
+	actions := chooseNextActions(queues, "epic", 3)
+	if len(actions) != 3 {
+		t.Fatalf("expected 3 actions, got %d", len(actions))
+	}
+	pmCount := 0
+	for _, a := range actions {
+		if a.Kind == "pm_review" {
+			pmCount++
+		}
+	}
+	if pmCount != 1 {
+		t.Fatalf("expected exactly 1 pm_review per wave, got %d", pmCount)
+	}
+	if actions[0].Kind != "pm_review" || actions[0].StoryID != "PROJ-d1" {
+		t.Fatalf("expected pm_review first, got %#v", actions[0])
+	}
+}
+
+func TestChooseNextActions_RejectedBeforeReady(t *testing.T) {
+	queues := queueSnapshot{
+		Rejected: []ndIssue{{ID: "PROJ-r1", Labels: []string{"rejected"}}},
+		Ready:    []ndIssue{{ID: "PROJ-s1"}},
+	}
+
+	actions := chooseNextActions(queues, "epic", 2)
+	if len(actions) != 2 {
+		t.Fatalf("expected 2 actions, got %d", len(actions))
+	}
+	if actions[0].Kind != "developer_rework" || actions[0].StoryID != "PROJ-r1" {
+		t.Fatalf("expected rework first, got %#v", actions[0])
+	}
+	if actions[1].Kind != "developer_new" || actions[1].StoryID != "PROJ-s1" {
+		t.Fatalf("expected new work second, got %#v", actions[1])
+	}
+}
+
+func TestChooseNextActions_SkipsDuplicateStoryAcrossQueues(t *testing.T) {
+	// A story appearing in both rejected and ready (nd race) must not be
+	// dispatched twice in one wave.
+	queues := queueSnapshot{
+		Rejected: []ndIssue{{ID: "PROJ-r1", Labels: []string{"rejected"}}},
+		Ready:    []ndIssue{{ID: "PROJ-r1", Labels: []string{"rejected"}}, {ID: "PROJ-s1"}},
+	}
+
+	actions := chooseNextActions(queues, "epic", 3)
+	if len(actions) != 2 {
+		t.Fatalf("expected 2 actions (dedup), got %d", len(actions))
+	}
+}
+
+func TestChooseNextActions_ClampsWaveSize(t *testing.T) {
+	var ready []ndIssue
+	for _, id := range []string{"a", "b", "c", "d", "e", "f", "g", "h"} {
+		ready = append(ready, ndIssue{ID: "PROJ-" + id})
+	}
+	queues := queueSnapshot{Ready: ready}
+
+	if got := len(chooseNextActions(queues, "epic", 99)); got != MaxWaveSize {
+		t.Fatalf("expected wave capped at %d, got %d", MaxWaveSize, got)
+	}
+	if got := len(chooseNextActions(queues, "epic", 0)); got != 1 {
+		t.Fatalf("expected wave of 1 for n=0, got %d", got)
+	}
+}
+
+func TestEvaluateNext_EpicMode_WavePopulatesActionsAndNext(t *testing.T) {
+	withStubbedND(t, epicModeStubs(map[string]string{
+		"list --status in_progress --label delivered --sort priority --limit 0 --json --parent PROJ-epic": `[{"ID":"PROJ-d1","Title":"Done","Status":"in_progress","Labels":["delivered"]}]`,
+		"list --status open --label rejected --sort priority --limit 0 --json --parent PROJ-epic":         `[]`,
+		"ready --sort priority --json --parent PROJ-epic":                                                 `[{"ID":"PROJ-s1","Title":"One","Status":"open"},{"ID":"PROJ-s2","Title":"Two","Status":"open"}]`,
+		"children PROJ-epic --json": `[{"ID":"PROJ-d1","Status":"in_progress","Labels":["delivered"]},{"ID":"PROJ-s1","Status":"open","Labels":[]},{"ID":"PROJ-s2","Status":"open","Labels":[]}]`,
+	}))
+
+	result, err := EvaluateNext(t.TempDir(), "epic", "PROJ-epic", 3)
+	if err != nil {
+		t.Fatalf("EvaluateNext() error: %v", err)
+	}
+	if result.Decision != "act" {
+		t.Fatalf("expected act, got %s: %s", result.Decision, result.Reason)
+	}
+	if len(result.Actions) != 3 {
+		t.Fatalf("expected wave of 3, got %d: %#v", len(result.Actions), result.Actions)
+	}
+	if result.Next == nil || result.Next.StoryID != result.Actions[0].StoryID {
+		t.Fatalf("expected Next to mirror first wave action, got %#v", result.Next)
+	}
+	if result.Actions[0].Kind != "pm_review" {
+		t.Fatalf("expected pm_review first in wave, got %s", result.Actions[0].Kind)
+	}
+}
+
+func TestEvaluateNext_AllMode_WaveSelectsDistinctStories(t *testing.T) {
+	withStubbedND(t, map[string]string{
+		"ready --json": `[{"ID":"PROJ-s1","Status":"open"},{"ID":"PROJ-s2","Status":"open"}]`,
+		"list --status in_progress --limit 0 --json":           `[]`,
+		"list --status open --label rejected --limit 0 --json": `[]`,
+		"blocked --json":                         `[]`,
+		"list --status !closed --limit 0 --json": `[]`,
+		"list --status in_progress --label delivered --sort priority --limit 0 --json": `[]`,
+		"list --status open --label rejected --sort priority --limit 0 --json":         `[]`,
+		"ready --sort priority --json":                                                 `[{"ID":"PROJ-s1","Title":"One","Status":"open"},{"ID":"PROJ-s2","Title":"Two","Status":"open"}]`,
+	})
+
+	result, err := EvaluateNext(t.TempDir(), "all", "", 2)
+	if err != nil {
+		t.Fatalf("EvaluateNext() error: %v", err)
+	}
+	if result.Decision != "act" {
+		t.Fatalf("expected act, got %s: %s", result.Decision, result.Reason)
+	}
+	if len(result.Actions) != 2 {
+		t.Fatalf("expected 2 actions, got %d", len(result.Actions))
+	}
+	if result.Actions[0].StoryID == result.Actions[1].StoryID {
+		t.Fatal("expected distinct story IDs in wave")
 	}
 }
 
@@ -247,11 +441,11 @@ func TestEvaluateNext_AllMode_CompleteWhenEmpty(t *testing.T) {
 func epicModeStubs(epicStubs map[string]string) map[string]string {
 	base := map[string]string{
 		// Global counts (always queried by QueryWorkCounts)
-		"ready --json":                               `[]`,
-		"list --status in_progress --json":           `[]`,
-		"list --status open --label rejected --json": `[]`,
-		"blocked --json":                             `[]`,
-		"list --status !closed --json":               `[]`,
+		"ready --json": `[]`,
+		"list --status in_progress --limit 0 --json":           `[]`,
+		"list --status open --label rejected --limit 0 --json": `[]`,
+		"blocked --json":                         `[]`,
+		"list --status !closed --limit 0 --json": `[]`,
 	}
 	for k, v := range epicStubs {
 		base[k] = v

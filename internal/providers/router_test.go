@@ -58,7 +58,7 @@ func (r *recordingBacklog) Update(_ context.Context, _ string, _ UpdateIssueInpu
 	r.record("Update")
 	return r.createOut, r.failOn["Update"]
 }
-func (r *recordingBacklog) Close(_ context.Context, _ string) error {
+func (r *recordingBacklog) Close(_ context.Context, _, _ string) error {
 	r.record("Close")
 	return r.failOn["Close"]
 }
@@ -151,7 +151,7 @@ func TestBacklogRouter_WritesFanOutToMirror(t *testing.T) {
 	if _, err := r.Create(context.Background(), CreateIssueInput{Title: "x"}); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if err := r.Close(context.Background(), "X-1"); err != nil {
+	if err := r.Close(context.Background(), "X-1", ""); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
 	if err := r.Link(context.Background(), "X-1", "X-2", LinkBlocks); err != nil {
@@ -406,8 +406,8 @@ func (p *panickingBacklog) List(context.Context, ListFilter) ([]Issue, error) { 
 func (p *panickingBacklog) Update(context.Context, string, UpdateIssueInput) (Issue, error) {
 	panic("nope")
 }
-func (p *panickingBacklog) Close(context.Context, string) error  { panic("nope") }
-func (p *panickingBacklog) Reopen(context.Context, string) error { panic("nope") }
+func (p *panickingBacklog) Close(context.Context, string, string) error { panic("nope") }
+func (p *panickingBacklog) Reopen(context.Context, string) error        { panic("nope") }
 func (p *panickingBacklog) AddComment(context.Context, string, string) (Comment, error) {
 	panic("nope")
 }
@@ -436,8 +436,8 @@ func (s *slowBacklog) List(context.Context, ListFilter) ([]Issue, error) { retur
 func (s *slowBacklog) Update(context.Context, string, UpdateIssueInput) (Issue, error) {
 	return Issue{}, nil
 }
-func (s *slowBacklog) Close(context.Context, string) error  { return nil }
-func (s *slowBacklog) Reopen(context.Context, string) error { return nil }
+func (s *slowBacklog) Close(context.Context, string, string) error { return nil }
+func (s *slowBacklog) Reopen(context.Context, string) error        { return nil }
 func (s *slowBacklog) AddComment(context.Context, string, string) (Comment, error) {
 	return Comment{}, nil
 }

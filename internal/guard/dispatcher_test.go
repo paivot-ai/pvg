@@ -361,6 +361,133 @@ func TestCheckDispatcher_BashAllowsDependencyMutationFromSrPMWorktree(t *testing
 	}
 }
 
+// writeIssueFile writes an nd issue file with the given type into the
+// project-local vault so ReadIssueType can resolve it.
+func writeIssueFile(t *testing.T, root, issueID, issueType, status string) {
+	t.Helper()
+	issuesDir := filepath.Join(root, ".vault", "issues")
+	if err := os.MkdirAll(issuesDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	content := "---\ntitle: Test\ntype: " + issueType + "\nstatus: " + status + "\n---\nBody"
+	if err := os.WriteFile(filepath.Join(issuesDir, issueID+".md"), []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCheckDispatcher_BashBlocksPvgWrappedNDMutationFromCoordinator(t *testing.T) {
+	root, _ := setupDispatcher(t)
+	tests := []string{
+		`pvg nd close PROJ-a1b2`,
+		`pvg nd update PROJ-a1b2 --status=in_progress`,
+		`pvg nd labels add PROJ-a1b2 delivered`,
+		`pvg nd dep add PROJ-a1b2 PROJ-c3d4`,
+		`echo done && pvg nd close PROJ-a1b2`,
+	}
+	for _, command := range tests {
+		t.Run(command, func(t *testing.T) {
+			input := HookInput{ToolName: "Bash", ToolInput: ToolInput{Command: command}}
+			if result := CheckDispatcher(root, input); result.Allowed {
+				t.Fatalf("expected coordinator %q to be blocked in dispatcher mode", command)
+			}
+		})
+	}
+}
+
+func TestCheckDispatcher_BashBlocksPvgIssuesMutationFromCoordinator(t *testing.T) {
+	root, _ := setupDispatcher(t)
+	writeIssueFile(t, root, "PROJ-a1b2", "story", "in_progress")
+	tests := []string{
+		`pvg issues create "New story" --parent PROJ-epic`,
+		`pvg issues update PROJ-a1b2 --status=closed`,
+		`pvg issues close PROJ-a1b2`,
+		`pvg issues reopen PROJ-a1b2`,
+		`pvg issues comment PROJ-a1b2 --body "note"`,
+		`pvg issues link PROJ-a1b2 --blocks PROJ-c3d4`,
+		`pvg issues unlink PROJ-a1b2 --blocks PROJ-c3d4`,
+	}
+	for _, command := range tests {
+		t.Run(command, func(t *testing.T) {
+			input := HookInput{ToolName: "Bash", ToolInput: ToolInput{Command: command}}
+			if result := CheckDispatcher(root, input); result.Allowed {
+				t.Fatalf("expected coordinator %q to be blocked in dispatcher mode", command)
+			}
+		})
+	}
+}
+
+func TestCheckDispatcher_BashAllowsPvgIssuesReads(t *testing.T) {
+	root, _ := setupDispatcher(t)
+	tests := []string{
+		`pvg issues list --status open --json`,
+		`pvg issues show PROJ-a1b2 --json`,
+		`pvg issues ready --json`,
+		`pvg issues blocked --json`,
+		`pvg issues comments PROJ-a1b2`,
+		`pvg loop next --json`,
+	}
+	for _, command := range tests {
+		t.Run(command, func(t *testing.T) {
+			input := HookInput{ToolName: "Bash", ToolInput: ToolInput{Command: command}}
+			if result := CheckDispatcher(root, input); !result.Allowed {
+				t.Fatalf("expected coordinator read %q allowed, got blocked: %s", command, result.Reason)
+			}
+		})
+	}
+}
+
+func TestCheckDispatcher_EpicCompletionGateExemption(t *testing.T) {
+	root, _ := setupDispatcher(t)
+	writeIssueFile(t, root, "EPIC-1", "epic", "in_progress")
+	writeIssueFile(t, root, "STORY-1", "story", "in_progress")
+
+	allowed := []string{
+		`pvg issues update EPIC-1 --status closed`,
+		`pvg issues update EPIC-1 --add-label accepted`,
+		`pvg nd close EPIC-1`,
+		`nd close EPIC-1`,
+	}
+	for _, command := range allowed {
+		t.Run("allow "+command, func(t *testing.T) {
+			input := HookInput{ToolName: "Bash", ToolInput: ToolInput{Command: command}}
+			if result := CheckDispatcher(root, input); !result.Allowed {
+				t.Fatalf("expected epic gate command %q allowed, got blocked: %s", command, result.Reason)
+			}
+		})
+	}
+
+	blocked := []string{
+		`pvg issues update STORY-1 --status closed`,
+		`pvg nd close STORY-1`,
+		`pvg nd close EPIC-1 STORY-1`, // mixed targets: not all epics
+		`pvg issues close UNKNOWN-99`, // unknown type: not exempt
+	}
+	for _, command := range blocked {
+		t.Run("block "+command, func(t *testing.T) {
+			input := HookInput{ToolName: "Bash", ToolInput: ToolInput{Command: command}}
+			if result := CheckDispatcher(root, input); result.Allowed {
+				t.Fatalf("expected non-epic command %q to stay blocked", command)
+			}
+		})
+	}
+}
+
+func TestCheckDispatcher_BashAllowsPvgIssuesMutationFromDeveloperWorktree(t *testing.T) {
+	_, worktree := setupDispatcher(t)
+	if err := dispatcher.TrackAgent(worktree, "agent-1", "paivot-graph:developer"); err != nil {
+		t.Fatal(err)
+	}
+
+	input := HookInput{
+		ToolName:  "Bash",
+		ToolInput: ToolInput{Command: `pvg issues update PROJ-a1b2 --add-label delivered`},
+	}
+	result := CheckDispatcher(worktree, input)
+	if !result.Allowed {
+		t.Fatalf("expected developer worktree pvg issues mutation allowed, got blocked: %s", result.Reason)
+	}
+}
+
 func TestCheckDispatcher_BlockReasonContainsInstructions(t *testing.T) {
 	dir, _ := setupDispatcher(t)
 	input := HookInput{

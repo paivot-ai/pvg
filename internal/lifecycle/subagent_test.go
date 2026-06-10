@@ -126,11 +126,23 @@ func TestSubagentStop_LeavesDeveloperWorktreeInPlaceAndWarns(t *testing.T) {
 		t.Fatalf("expected tracked worktrees to be cleared, got %#v", state.AgentWorktrees)
 	}
 
-	output := out.String()
-	if !strings.Contains(output, "[CWD-RESET MANDATORY] paivot-graph:developer agent completed.") {
-		t.Fatalf("expected reset warning, got %q", output)
+	// SubagentStop stdout is transcript-only (never reaches the model), so
+	// the warning must be a single-line {"systemMessage": ...} JSON payload
+	// that at least surfaces to the user.
+	output := strings.TrimSpace(out.String())
+	var warning struct {
+		SystemMessage string `json:"systemMessage"`
 	}
-	if !strings.Contains(output, "Only after that reset should the dispatcher remove the dev worktree.") {
-		t.Fatalf("expected cleanup ordering guidance, got %q", output)
+	if err := json.Unmarshal([]byte(output), &warning); err != nil {
+		t.Fatalf("expected JSON systemMessage payload, got %q: %v", output, err)
+	}
+	if !strings.Contains(warning.SystemMessage, "[CWD-RESET MANDATORY] paivot-graph:developer agent completed.") {
+		t.Fatalf("expected reset warning, got %q", warning.SystemMessage)
+	}
+	if !strings.Contains(warning.SystemMessage, "remove the dev worktree") {
+		t.Fatalf("expected cleanup ordering guidance, got %q", warning.SystemMessage)
+	}
+	if strings.Count(output, "\n") != 0 {
+		t.Fatalf("expected single-line JSON output, got %q", output)
 	}
 }

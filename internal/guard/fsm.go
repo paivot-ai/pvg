@@ -127,26 +127,48 @@ func ValidateTransition(wc WorkflowConfig, issueID, currentStatus, newStatus str
 	}
 }
 
-// ndUpdateRe matches: nd [global-flags] update <id> --status=<val> or --status <val>
-// Global flags like --vault <val> or --json may appear between nd and the subcommand.
-var ndUpdateRe = regexp.MustCompile(`(?:^|[;&|]\s*)(?:\S*/)?nd\s+(?:--\S+(?:\s+\S+)?\s+)*update\s+(\S+)\s+.*?--status[= ](\S+)`)
+// ndCmdPrefix anchors an nd invocation at the start of a command (or after
+// ;|&), with an optional path prefix and an optional `pvg ` wrapper -- the
+// agent prompts mandate `pvg nd ...`, which must hit the same checks as bare
+// nd. Global flags like --vault <val> or --json may appear between nd and
+// the subcommand.
+const ndCmdPrefix = `(?:^|[;&|]\s*)(?:(?:\S*/)?pvg\s+)?(?:\S*/)?nd\s+(?:--\S+(?:\s+\S+)?\s+)*`
 
-// ndCloseRe matches: nd [global-flags] close <id> [<id>...]
-var ndCloseRe = regexp.MustCompile(`(?:^|[;&|]\s*)(?:\S*/)?nd\s+(?:--\S+(?:\s+\S+)?\s+)*close\s+(.+?)(?:\s*[;&|]|$)`)
+// pvgIssuesPrefix anchors a `pvg issues` invocation the same way.
+const pvgIssuesPrefix = `(?:^|[;&|]\s*)(?:\S*/)?pvg\s+issues\s+`
 
-// ndLabelsAddRe matches: nd [global-flags] labels add <id> <label> [label...]
-var ndLabelsAddRe = regexp.MustCompile(`(?:^|[;&|]\s*)(?:\S*/)?nd\s+(?:--\S+(?:\s+\S+)?\s+)*labels\s+add\s+(\S+)\s+(.+?)(?:\s*[;&|]|$)`)
+// ndUpdateRe matches: [pvg] nd [global-flags] update <id> --status=<val> or --status <val>
+var ndUpdateRe = regexp.MustCompile(ndCmdPrefix + `update\s+(\S+)\s+.*?--status[= ](\S+)`)
 
-// ndUpdateAddLabelRe matches: nd [global-flags] update <id> ... --add-label=<label> or --add-label <label>
-var ndUpdateAddLabelRe = regexp.MustCompile(`(?:^|[;&|]\s*)(?:\S*/)?nd\s+(?:--\S+(?:\s+\S+)?\s+)*update\s+(\S+)\s+.*?--add-label(?:=| )(\S+)`)
-var ndDeferRe = regexp.MustCompile(`(?:^|[;&|]\s*)(?:\S*/)?nd\s+(?:--\S+(?:\s+\S+)?\s+)*defer\s+(\S+)(?:\s|$)`)
-var ndUndeferRe = regexp.MustCompile(`(?:^|[;&|]\s*)(?:\S*/)?nd\s+(?:--\S+(?:\s+\S+)?\s+)*undefer\s+(\S+)(?:\s|$)`)
+// ndCloseRe matches: [pvg] nd [global-flags] close <id> [<id>...]
+var ndCloseRe = regexp.MustCompile(ndCmdPrefix + `close\s+(.+?)(?:\s*[;&|]|$)`)
 
-// parseNdStatusChange extracts issue IDs and new status from an nd command.
-// Returns multiple IDs for "nd close id1 id2 ...".
+// ndLabelsAddRe matches: [pvg] nd [global-flags] labels add <id> <label> [label...]
+var ndLabelsAddRe = regexp.MustCompile(ndCmdPrefix + `labels\s+add\s+(\S+)\s+(.+?)(?:\s*[;&|]|$)`)
+
+// ndUpdateAddLabelRe matches: [pvg] nd [global-flags] update <id> ... --add-label=<label> or --add-label <label>
+var ndUpdateAddLabelRe = regexp.MustCompile(ndCmdPrefix + `update\s+(\S+)\s+.*?--add-label(?:=| )(\S+)`)
+var ndDeferRe = regexp.MustCompile(ndCmdPrefix + `defer\s+(\S+)(?:\s|$)`)
+var ndUndeferRe = regexp.MustCompile(ndCmdPrefix + `undefer\s+(\S+)(?:\s|$)`)
+
+// pvg issues forms (the normalized provider CLI the prompts mandate).
+var pvgIssuesUpdateStatusRe = regexp.MustCompile(pvgIssuesPrefix + `update\s+(\S+)\s+.*?--status[= ](\S+)`)
+var pvgIssuesUpdateAddLabelRe = regexp.MustCompile(pvgIssuesPrefix + `update\s+(\S+)\s+.*?--add-label[= ](\S+)`)
+var pvgIssuesCloseRe = regexp.MustCompile(pvgIssuesPrefix + `close\s+(\S+)`)
+var pvgIssuesReopenRe = regexp.MustCompile(pvgIssuesPrefix + `reopen\s+(\S+)`)
+
+// parseNdStatusChange extracts issue IDs and new status from an nd or
+// pvg issues command. Returns multiple IDs for "nd close id1 id2 ...".
 func parseNdStatusChange(command string) (ids []string, newStatus string, found bool) {
 	// Check for nd update with --status
 	if matches := ndUpdateRe.FindStringSubmatch(command); len(matches) == 3 {
+		id := strings.Trim(matches[1], `"'`)
+		status := strings.Trim(matches[2], `"'`)
+		return []string{id}, status, true
+	}
+
+	// Check for pvg issues update with --status
+	if matches := pvgIssuesUpdateStatusRe.FindStringSubmatch(command); len(matches) == 3 {
 		id := strings.Trim(matches[1], `"'`)
 		status := strings.Trim(matches[2], `"'`)
 		return []string{id}, status, true
@@ -171,11 +193,35 @@ func parseNdStatusChange(command string) (ids []string, newStatus string, found 
 		}
 	}
 
+	// Check for pvg issues close (takes a single ID)
+	if matches := pvgIssuesCloseRe.FindStringSubmatch(command); len(matches) == 2 {
+		id := strings.Trim(matches[1], `"'`)
+		if id != "" && !strings.HasPrefix(id, "-") {
+			return []string{id}, "closed", true
+		}
+	}
+
+	// Check for pvg issues reopen (reopen -> status open)
+	if matches := pvgIssuesReopenRe.FindStringSubmatch(command); len(matches) == 2 {
+		id := strings.Trim(matches[1], `"'`)
+		if id != "" && !strings.HasPrefix(id, "-") {
+			return []string{id}, "open", true
+		}
+	}
+
 	return nil, "", false
 }
 
 func parseNdContractLabelAdd(command string) (issueID string, labels []string, found bool) {
 	if matches := ndUpdateAddLabelRe.FindStringSubmatch(command); len(matches) == 3 {
+		id := strings.Trim(matches[1], `"'`)
+		label := strings.Trim(matches[2], `"'`)
+		if id != "" && label != "" {
+			return id, strings.Split(label, ","), true
+		}
+	}
+
+	if matches := pvgIssuesUpdateAddLabelRe.FindStringSubmatch(command); len(matches) == 3 {
 		id := strings.Trim(matches[1], `"'`)
 		label := strings.Trim(matches[2], `"'`)
 		if id != "" && label != "" {
@@ -253,7 +299,9 @@ func ReadIssueStatus(projectRoot, issueID string) string {
 
 const settingsPath = ".vault/knowledge/.settings.yaml"
 
-// CheckFSM is the entry point for FSM validation, called from guard.Check().
+// CheckFSM validates status-transition sequences, called from guard.Check().
+// Gated by workflow.fsm. Contract-label enforcement lives in
+// CheckLabelContract, which is active for any Paivot-managed repo.
 func CheckFSM(projectRoot, command string) Result {
 	if projectRoot == "" {
 		return Result{Allowed: true}
@@ -300,19 +348,56 @@ func CheckFSM(projectRoot, command string) Result {
 		}
 	}
 
-	if issueID, labels, found := parseNdContractLabelAdd(command); found {
-		currentStatus := ReadIssueStatus(projectRoot, issueID)
-		if currentStatus == "" {
-			return Result{Allowed: true}
-		}
-		for _, label := range labels {
-			if r := validateContractLabel(issueID, currentStatus, label); !r.Allowed {
-				return r
-			}
+	return Result{Allowed: true}
+}
+
+// CheckLabelContract enforces the contract labels (delivered requires
+// in_progress, accepted requires closed, rejected requires open) whenever the
+// repo is Paivot-managed -- independent of workflow.fsm, which gates only the
+// status-transition sequence checks. Reuses the same enablement logic as
+// CheckMergeGate.
+func CheckLabelContract(projectRoot, command string) Result {
+	if projectRoot == "" || command == "" {
+		return Result{Allowed: true}
+	}
+
+	if !mergeGateEnabled(projectRoot) {
+		return Result{Allowed: true}
+	}
+
+	issueID, labels, found := parseNdContractLabelAdd(command)
+	if !found {
+		return Result{Allowed: true}
+	}
+
+	currentStatus := effectiveStatusForLabelCheck(projectRoot, command, issueID)
+	if currentStatus == "" {
+		// Fail-open: can't determine the status
+		return Result{Allowed: true}
+	}
+	for _, label := range labels {
+		if r := validateContractLabel(issueID, currentStatus, label); !r.Allowed {
+			return r
 		}
 	}
 
 	return Result{Allowed: true}
+}
+
+// effectiveStatusForLabelCheck returns the status the contract label must be
+// validated against. When a single command both changes --status and adds a
+// label (e.g. the PM reject command `pvg issues update X --status=open
+// --add-label rejected`), both apply atomically -- so the label is validated
+// against the NEW status from the same command, not the pre-update status.
+func effectiveStatusForLabelCheck(projectRoot, command, issueID string) string {
+	if ids, newStatus, found := parseNdStatusChange(command); found {
+		for _, id := range ids {
+			if id == issueID {
+				return newStatus
+			}
+		}
+	}
+	return ReadIssueStatus(projectRoot, issueID)
 }
 
 func resumeStatusFromDeferred(wc WorkflowConfig) string {

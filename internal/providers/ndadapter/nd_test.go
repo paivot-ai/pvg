@@ -215,6 +215,67 @@ func TestAppendListFilter_NoStatusIncludesAll(t *testing.T) {
 	}
 }
 
+func TestAppendListFilter_TypeAndSort(t *testing.T) {
+	args := appendListFilter([]string{"list", "--json"}, providers.ListFilter{
+		Type: "epic",
+		Sort: "priority",
+	})
+	got := strings.Join(args, " ")
+	for _, fragment := range []string{"--type epic", "--sort priority"} {
+		if !strings.Contains(got, fragment) {
+			t.Errorf("args missing %q: %s", fragment, got)
+		}
+	}
+}
+
+func TestAppendListFilter_OmitsTypeAndSortWhenEmpty(t *testing.T) {
+	args := appendListFilter(nil, providers.ListFilter{})
+	got := strings.Join(args, " ")
+	if strings.Contains(got, "--type") || strings.Contains(got, "--sort") {
+		t.Errorf("empty Type/Sort must not emit flags: %s", got)
+	}
+}
+
+func TestClose_PassesReasonFlag(t *testing.T) {
+	var calls [][]string
+	old := execCommandContext
+	execCommandContext = func(_ context.Context, name string, args ...string) *exec.Cmd {
+		calls = append(calls, append([]string{name}, args...))
+		return exec.Command("true")
+	}
+	defer func() { execCommandContext = old }()
+
+	a, _ := New(map[string]interface{}{"vault": "/tmp/v"})
+	if err := a.Close(context.Background(), "VP-1", "duplicate of VP-2"); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	want := []string{"nd", "--vault", "/tmp/v", "close", "VP-1", "--reason", "duplicate of VP-2"}
+	if len(calls) != 1 || strings.Join(calls[0], "\x00") != strings.Join(want, "\x00") {
+		t.Fatalf("unexpected nd call: got %#v want %#v", calls, want)
+	}
+}
+
+func TestClose_OmitsReasonFlagWhenEmpty(t *testing.T) {
+	var calls [][]string
+	old := execCommandContext
+	execCommandContext = func(_ context.Context, name string, args ...string) *exec.Cmd {
+		calls = append(calls, append([]string{name}, args...))
+		return exec.Command("true")
+	}
+	defer func() { execCommandContext = old }()
+
+	a, _ := New(map[string]interface{}{"vault": "/tmp/v"})
+	if err := a.Close(context.Background(), "VP-1", ""); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	want := []string{"nd", "--vault", "/tmp/v", "close", "VP-1"}
+	if len(calls) != 1 || strings.Join(calls[0], "\x00") != strings.Join(want, "\x00") {
+		t.Fatalf("unexpected nd call: got %#v want %#v", calls, want)
+	}
+}
+
 // --- Integration: requires nd binary ---
 
 func TestIntegration_CreateShowUpdateClose(t *testing.T) {
@@ -261,7 +322,7 @@ func TestIntegration_CreateShowUpdateClose(t *testing.T) {
 		t.Errorf("after Update Title = %q, want %q", updated.Title, newTitle)
 	}
 
-	if err := a.Close(ctx, created.ID); err != nil {
+	if err := a.Close(ctx, created.ID, ""); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
 	closed, _ := a.Show(ctx, created.ID)

@@ -286,7 +286,7 @@ func TestResolveStateID_HonorsStatusOverride(t *testing.T) {
 			"in_progress": "Started",
 		},
 	})
-	if err := a.(*Adapter).Close(context.Background(), "PRO-1"); err != nil {
+	if err := a.(*Adapter).Close(context.Background(), "PRO-1", ""); err != nil {
 		// Close uses StatusClosed -> first-by-type; Override is for InProgress.
 		// We just need the call path; verifying override below.
 		_ = err
@@ -695,7 +695,7 @@ func TestIntegration_LiveLinearFullCycle(t *testing.T) {
 	}
 
 	// --- Close primary, then Reopen ---
-	if err := a.Close(ctx, primary.ID); err != nil {
+	if err := a.Close(ctx, primary.ID, ""); err != nil {
 		t.Fatalf("Close primary: %v", err)
 	}
 	closedPrim, _ := a.Show(ctx, primary.ID)

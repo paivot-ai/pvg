@@ -149,8 +149,12 @@ func (a *Adapter) Update(ctx context.Context, id string, in providers.UpdateIssu
 	return a.Show(ctx, id)
 }
 
-func (a *Adapter) Close(ctx context.Context, id string) error {
-	_, err := a.run(ctx, "close", id)
+func (a *Adapter) Close(ctx context.Context, id, reason string) error {
+	args := []string{"close", id}
+	if reason != "" {
+		args = append(args, "--reason", reason)
+	}
+	_, err := a.run(ctx, args...)
 	return err
 }
 
@@ -413,6 +417,12 @@ func appendListFilter(args []string, f providers.ListFilter) []string {
 	}
 	if f.Parent != "" {
 		args = append(args, "--parent", f.Parent)
+	}
+	if f.Type != "" {
+		args = append(args, "--type", f.Type)
+	}
+	if f.Sort != "" {
+		args = append(args, "--sort", f.Sort)
 	}
 	if len(f.Status) == 1 {
 		// nd accepts a single --status value

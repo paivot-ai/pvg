@@ -54,7 +54,7 @@ func RunIssues(args []string) error {
 	case "ready":
 		return issuesReady(ctx, router, rest)
 	case "blocked":
-		return issuesBlocked(ctx, router)
+		return issuesBlocked(ctx, router, rest)
 	case "prime":
 		return issuesPrime(ctx, router)
 	case "help", "-h", "--help":
@@ -72,9 +72,9 @@ func issuesUsage(w io.Writer) {
 Subcommands:
   create [title] [--body B] [--labels x,y] [--parent ID] [--assignee A] [--blocked-by IDs] [--project P] [--milestone M]
   show <id> [--json]
-  list [--status S] [--label L] [--parent ID] [--project P] [--milestone M] [--limit N] [--json]
+  list [--status S] [--label L] [--parent ID] [--project P] [--milestone M] [--type T] [--sort F] [--limit N] [--json]
   update <id> [--title T] [--body B] [--status S] [--add-label x] [--remove-label x]
-  close <id>
+  close <id> [--reason R]
   reopen <id>
   comment <id> --body B
   comments <id> [--json]
@@ -175,13 +175,15 @@ func issuesList(ctx context.Context, r *providers.BacklogRouter, args []string) 
 	parent := fs.String("parent", "", "filter by parent ID")
 	project := fs.String("project", "", "filter by project name or ID")
 	milestone := fs.String("milestone", "", "filter by milestone name or ID")
+	issueType := fs.String("type", "", "filter by type (epic|story|bug|task)")
+	sortBy := fs.String("sort", "", "sort by field (priority|created|updated|id)")
 	limit := fs.Int("limit", 0, "max results (0 = unlimited)")
 	jsonOut := fs.Bool("json", false, "emit JSON")
-	known := map[string]bool{"status": true, "label": true, "parent": true, "project": true, "milestone": true, "limit": true}
+	known := map[string]bool{"status": true, "label": true, "parent": true, "project": true, "milestone": true, "type": true, "sort": true, "limit": true}
 	if err := fs.Parse(reorderArgs(known, args)); err != nil {
 		return err
 	}
-	f := providers.ListFilter{Parent: *parent, Project: *project, Milestone: *milestone, Limit: *limit}
+	f := providers.ListFilter{Parent: *parent, Project: *project, Milestone: *milestone, Type: *issueType, Sort: *sortBy, Limit: *limit}
 	if *status != "" {
 		f.Status = []providers.Status{providers.Status(*status)}
 	}
@@ -235,10 +237,16 @@ func issuesUpdate(ctx context.Context, r *providers.BacklogRouter, args []string
 }
 
 func issuesClose(ctx context.Context, r *providers.BacklogRouter, args []string) error {
-	if len(args) < 1 {
+	fs := flag.NewFlagSet("close", flag.ContinueOnError)
+	reason := fs.String("reason", "", "close reason")
+	known := map[string]bool{"reason": true}
+	if err := fs.Parse(reorderArgs(known, args)); err != nil {
+		return err
+	}
+	if fs.NArg() < 1 {
 		return fmt.Errorf("close requires an issue ID")
 	}
-	return r.Close(ctx, args[0])
+	return r.Close(ctx, fs.Arg(0), *reason)
 }
 
 func issuesReopen(ctx context.Context, r *providers.BacklogRouter, args []string) error {
@@ -336,12 +344,17 @@ func issuesReady(ctx context.Context, r *providers.BacklogRouter, args []string)
 	return printIssues(got, *jsonOut)
 }
 
-func issuesBlocked(ctx context.Context, r *providers.BacklogRouter) error {
+func issuesBlocked(ctx context.Context, r *providers.BacklogRouter, args []string) error {
+	fs := flag.NewFlagSet("blocked", flag.ContinueOnError)
+	jsonOut := fs.Bool("json", false, "emit JSON")
+	if err := fs.Parse(reorderArgs(nil, args)); err != nil {
+		return err
+	}
 	got, err := r.Blocked(ctx)
 	if err != nil {
 		return err
 	}
-	return printIssues(got, false)
+	return printIssues(got, *jsonOut)
 }
 
 func issuesPrime(ctx context.Context, r *providers.BacklogRouter) error {

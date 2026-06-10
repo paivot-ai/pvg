@@ -263,8 +263,132 @@ func TestRunSingleKey_PrintsDefaultValue(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if got := strings.TrimSpace(buf.String()); got != "false" {
-		t.Fatalf("expected default single-key output false, got %q", got)
+	if got := strings.TrimSpace(buf.String()); got != "true" {
+		t.Fatalf("expected default single-key output true (loop.persist_across_sessions defaults to true), got %q", got)
+	}
+}
+
+func TestDefaults_LintKeys(t *testing.T) {
+	val, ok := defaults["lint.quality_gates"]
+	if !ok {
+		t.Fatal("lint.quality_gates missing from defaults")
+	}
+	if val != "" {
+		t.Fatalf("expected lint.quality_gates default to be empty, got %q", val)
+	}
+
+	val, ok = defaults["lint.brownfield"]
+	if !ok {
+		t.Fatal("lint.brownfield missing from defaults")
+	}
+	if val != "false" {
+		t.Fatalf("expected lint.brownfield default 'false', got %q", val)
+	}
+}
+
+// captureStdout runs fn with os.Stdout redirected to a pipe and returns
+// everything fn printed plus fn's error.
+func captureStdout(t *testing.T, fn func() error) (string, error) {
+	t.Helper()
+
+	oldStdout := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stdout = w
+
+	fnErr := fn()
+
+	_ = w.Close()
+	os.Stdout = oldStdout
+
+	var buf bytes.Buffer
+	if _, err := buf.ReadFrom(r); err != nil {
+		t.Fatal(err)
+	}
+	return buf.String(), fnErr
+}
+
+func TestRunSingleKey_LintDefaults(t *testing.T) {
+	dir := t.TempDir()
+
+	oldWD, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Chdir(oldWD) }()
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+
+	out, runErr := captureStdout(t, func() error { return Run([]string{"lint.brownfield"}) })
+	if runErr != nil {
+		t.Fatalf("Run get lint.brownfield: %v", runErr)
+	}
+	if got := strings.TrimSpace(out); got != "false" {
+		t.Fatalf("expected lint.brownfield default output 'false', got %q", got)
+	}
+
+	out, runErr = captureStdout(t, func() error { return Run([]string{"lint.quality_gates"}) })
+	if runErr != nil {
+		t.Fatalf("Run get lint.quality_gates: %v", runErr)
+	}
+	if got := strings.TrimSpace(out); got != "" {
+		t.Fatalf("expected lint.quality_gates default output to be empty, got %q", got)
+	}
+}
+
+func TestRunSetThenGet_LintKeys(t *testing.T) {
+	dir := t.TempDir()
+
+	oldWD, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Chdir(oldWD) }()
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+
+	gates := `custom.?gate|tenant.?isolation`
+	out, runErr := captureStdout(t, func() error {
+		return Run([]string{"lint.quality_gates=" + gates, "lint.brownfield=true"})
+	})
+	if runErr != nil {
+		t.Fatalf("Run set: %v", runErr)
+	}
+	if !strings.Contains(out, "set lint.quality_gates = "+gates) {
+		t.Errorf("set output missing lint.quality_gates confirmation, got %q", out)
+	}
+	if !strings.Contains(out, "set lint.brownfield = true") {
+		t.Errorf("set output missing lint.brownfield confirmation, got %q", out)
+	}
+
+	// Values must persist to the settings file read by settings.LoadFile
+	// (the same path internal/lint uses).
+	loaded := LoadFile(filepath.Join(dir, ".vault", "knowledge", ".settings.yaml"))
+	if loaded["lint.quality_gates"] != gates {
+		t.Errorf("persisted lint.quality_gates: expected %q, got %q", gates, loaded["lint.quality_gates"])
+	}
+	if loaded["lint.brownfield"] != "true" {
+		t.Errorf("persisted lint.brownfield: expected 'true', got %q", loaded["lint.brownfield"])
+	}
+
+	out, runErr = captureStdout(t, func() error { return Run([]string{"lint.quality_gates"}) })
+	if runErr != nil {
+		t.Fatalf("Run get lint.quality_gates after set: %v", runErr)
+	}
+	if got := strings.TrimSpace(out); got != gates {
+		t.Fatalf("expected lint.quality_gates output %q, got %q", gates, got)
+	}
+
+	out, runErr = captureStdout(t, func() error { return Run([]string{"lint.brownfield"}) })
+	if runErr != nil {
+		t.Fatalf("Run get lint.brownfield after set: %v", runErr)
+	}
+	if got := strings.TrimSpace(out); got != "true" {
+		t.Fatalf("expected lint.brownfield output 'true', got %q", got)
 	}
 }
 

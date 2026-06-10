@@ -14,6 +14,8 @@
 //	pvg guard                    # PreToolUse scope guard (stdin: JSON)
 //	pvg nd root --ensure         # Resolve/init shared nd vault
 //	pvg nd ready --json          # Run nd against shared live vault
+//	pvg nd sync                  # Export live vault to .vault/backlog-snapshot/
+//	pvg nd restore [--force]     # Restore live vault from the snapshot
 //	pvg seed [--force]           # Seed vault with agent prompts
 //	pvg story verify-delivery ID # Check delivery-proof completeness
 //	pvg story merge ID           # Merge an accepted story branch
@@ -48,6 +50,7 @@ import (
 	"github.com/paivot-ai/pvg/internal/lifecycle"
 	plint "github.com/paivot-ai/pvg/internal/lint"
 	"github.com/paivot-ai/pvg/internal/loop"
+	"github.com/paivot-ai/pvg/internal/ndsync"
 	"github.com/paivot-ai/pvg/internal/ndvault"
 	"github.com/paivot-ai/pvg/internal/paivotcfg"
 	"github.com/paivot-ai/pvg/internal/providercli"
@@ -192,6 +195,8 @@ Commands:
   loop recover           Clean up after context loss
   dispatcher on|off|status  Manage dispatcher mode
   nd root [--ensure]       Print (and optionally initialize) the shared live nd vault
+  nd sync                  Export the live nd vault to .vault/backlog-snapshot/ (git durability)
+  nd restore [--force]     Restore the live nd vault from .vault/backlog-snapshot/
   nd <args...>             Run nd against the shared live vault
   issues <subcommand>      Backlog operations via configured adapter (nd, linear, ...)
   notes <subcommand>       Notes operations via configured adapter (vlt, confluence, ...)
@@ -199,7 +204,7 @@ Commands:
   seed [--force]         Seed vault with agent prompts and conventions
   settings [key|key=value]  View, read, or set project settings
   story <subcommand>        Shared story workflow helpers
-  lint [--json]             Check backlog for artifact collisions (PRODUCES)
+  lint [--backlog] [--json] [--epic ID]  Backlog quality checks (collisions + structure)
   rtm [check] [--json]      Requirement Traceability Matrix (D&F coverage check)
   verify [path...] [flags]  Scan source files for stubs, thin files, TODOs
   worktree remove <path>   Safely remove a worktree (CWD-independent) [alias: wt]
@@ -349,7 +354,7 @@ func runDispatcher(args []string) error {
 
 func runND(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: pvg nd root [--ensure] | pvg nd <nd-args...>")
+		return fmt.Errorf("usage: pvg nd root [--ensure] | pvg nd sync | pvg nd restore [--force] | pvg nd <nd-args...>")
 	}
 
 	// resolveRoot returns the project root, preferring the main repo root
@@ -390,6 +395,57 @@ func runND(args []string) error {
 			return err
 		}
 		fmt.Println(vaultDir)
+		return nil
+	}
+
+	if args[0] == "sync" {
+		if len(args) > 1 {
+			return fmt.Errorf("pvg nd sync takes no arguments")
+		}
+		projectRoot, err := resolveRoot()
+		if err != nil {
+			return err
+		}
+		vaultDir, err := ndvault.Resolve(projectRoot)
+		if err != nil {
+			return fmt.Errorf("resolve nd vault: %w", err)
+		}
+		res, err := ndsync.Sync(projectRoot, vaultDir)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("[ND SYNC] %d issue(s) exported to %s\n", res.Issues, res.SnapshotDir)
+		return nil
+	}
+
+	if args[0] == "restore" {
+		force := false
+		for _, arg := range args[1:] {
+			if arg == "--force" {
+				force = true
+				continue
+			}
+			return fmt.Errorf("unknown flag %q (usage: pvg nd restore [--force])", arg)
+		}
+		projectRoot, err := resolveRoot()
+		if err != nil {
+			return err
+		}
+		vaultDir, err := ndvault.Resolve(projectRoot)
+		if err != nil {
+			return fmt.Errorf("resolve nd vault: %w", err)
+		}
+		res, err := ndsync.Restore(projectRoot, vaultDir, force)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("[ND RESTORE] %d issue(s) restored to %s\n", res.Issues, res.VaultDir)
+		if res.Replaced > 0 {
+			fmt.Printf("  Replaced %d pre-existing issue(s) (--force)\n", res.Replaced)
+		}
+		if res.ConfigRestored {
+			fmt.Println("  .nd.yaml restored from snapshot")
+		}
 		return nil
 	}
 
@@ -654,7 +710,7 @@ Subcommands:
 	setup [flags]   Start an execution loop
 	cancel          Cancel active execution loop
 	status          Show execution loop state
-  next            Select the next orchestration action
+  next [--json] [--n N]  Select the next orchestration action(s) (N = wave size, default 1, max 6)
 	rotate EPIC_ID  Rotate loop to the next epic after completion gate
 	snapshot        Checkpoint active agent/worktree state
 	recover         Clean up after context loss
@@ -674,6 +730,7 @@ Snapshot flags:
 Next flags:
   --all                    Resolve next action against the whole backlog
   --epic EPIC_ID           Prefer a priority epic, then fall back to the backlog
+  --n N                    Select up to N distinct-story actions (wave; default 1, max 6)
   --json                   Output as JSON
 
 Recover flags:
@@ -858,6 +915,7 @@ func loopNext(cwd string, args []string) error {
 	scopeSource := "default"
 	activeLoop := false
 	scopeRoot := cwd
+	waveSize := 1
 
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
@@ -878,6 +936,19 @@ func loopNext(cwd string, args []string) error {
 			mode = "epic"
 			targetEpic = args[i]
 			scopeSource = "flag"
+		case "--n":
+			if i+1 >= len(args) {
+				return fmt.Errorf("--n requires an argument")
+			}
+			i++
+			n, err := strconv.Atoi(args[i])
+			if err != nil || n < 1 {
+				return fmt.Errorf("--n must be a positive integer")
+			}
+			if n > loop.MaxWaveSize {
+				n = loop.MaxWaveSize
+			}
+			waveSize = n
 		default:
 			if len(args[i]) > 1 && args[i][0] == '-' {
 				return fmt.Errorf("unknown flag %q", args[i])
@@ -898,7 +969,7 @@ func loopNext(cwd string, args []string) error {
 		}
 	}
 
-	result, err := loop.EvaluateNext(scopeRoot, mode, targetEpic)
+	result, err := loop.EvaluateNext(scopeRoot, mode, targetEpic, waveSize)
 	if err != nil {
 		return err
 	}
@@ -932,6 +1003,12 @@ func loopNext(cwd string, args []string) error {
 			fmt.Print(", hard-tdd")
 		}
 		fmt.Println(")")
+	}
+	if len(result.Actions) > 1 {
+		fmt.Printf("  Wave (%d actions):\n", len(result.Actions))
+		for _, action := range result.Actions {
+			fmt.Printf("    %s %s (%s)\n", action.Role, action.StoryID, action.Queue)
+		}
 	}
 	if result.NextEpic != "" {
 		fmt.Printf("  Rotate to: %s", result.NextEpic)
@@ -1082,10 +1159,16 @@ func loopRecover(cwd string, args []string) error {
 		fmt.Println("[RECOVER] Recovery complete.")
 		fmt.Printf("  Worktrees removed: %d\n", plan.Summary.WorktreesRemoved)
 		fmt.Printf("  Branches deleted:  %d\n", plan.Summary.BranchesDeleted)
+		fmt.Printf("  Branches preserved: %d (delivered/accepted, not merged)\n", plan.Summary.BranchesPreserved)
 		fmt.Printf("  Stale branches:    %d\n", plan.Summary.StaleBranchesDeleted)
 		fmt.Printf("  Stories reset:     %d\n", plan.Summary.StoriesReset)
 		fmt.Printf("  Stories delivered:  %d (needs PM review)\n", plan.Summary.StoriesDelivered)
 		fmt.Printf("  Orphan worktrees:  %d\n", plan.Summary.OrphanWorktrees)
+		for _, action := range plan.Actions {
+			if action.Kind == loop.ActionPreserveBranch {
+				fmt.Printf("    preserved: %s (%s)\n", action.BranchName, action.StoryID)
+			}
+		}
 		if len(cfg.Warnings) > 0 {
 			fmt.Printf("  Warnings: %d\n", len(cfg.Warnings))
 			for _, w := range cfg.Warnings {
@@ -1105,23 +1188,49 @@ func loopRecover(cwd string, args []string) error {
 
 func runLint(args []string) error {
 	jsonOutput := false
-	for _, arg := range args {
-		switch arg {
+	backlogMode := false
+	epicID := ""
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
 		case "--json":
 			jsonOutput = true
+		case "--backlog":
+			backlogMode = true
+		case "--epic":
+			if i+1 >= len(args) {
+				return fmt.Errorf("--epic requires an argument")
+			}
+			i++
+			epicID = args[i]
 		case "--help", "-h":
-			fmt.Fprintln(os.Stderr, `pvg lint -- check backlog for artifact collisions
+			fmt.Fprintln(os.Stderr, `pvg lint -- deterministic backlog quality checks
 
-Scans all non-closed stories for PRODUCES blocks and flags any artifact
-(file path) claimed by more than one story.
+Default mode scans all non-closed stories for PRODUCES blocks and flags any
+artifact (file path) claimed by more than one story.
+
+--backlog runs the artifact-collision check PLUS all backlog structure
+checks: walking-skeleton, capstone, mandatory-skills, consumes-signature,
+consumes-produces, stale-refs, external-integration, atomicity,
+vertical-slice, dep-cycles, release-gate, and paths-exist (brownfield only).
+Findings are 'error' (must fix; exit 1) or 'review' (judgment flag; exit 0).
+
+Usage:
+  pvg lint [--json]
+  pvg lint --backlog [--json] [--epic EPIC_ID]
 
 Flags:
-  --json    Output as JSON
-  --help    Show this help`)
+  --backlog        Run the full backlog structure check suite
+  --epic EPIC_ID   Scope story-level checks to one epic's children
+  --json           Output as JSON
+  --help           Show this help`)
 			return nil
 		default:
-			return fmt.Errorf("unknown flag %q", arg)
+			return fmt.Errorf("unknown flag %q", args[i])
 		}
+	}
+
+	if epicID != "" && !backlogMode {
+		return fmt.Errorf("--epic requires --backlog")
 	}
 
 	cwd, err := os.Getwd()
@@ -1132,6 +1241,37 @@ Flags:
 	vaultDir, err := ndvault.Resolve(cwd)
 	if err != nil {
 		return fmt.Errorf("resolve nd vault: %w", err)
+	}
+
+	if backlogMode {
+		projectRoot, err := resolveGitRoot()
+		if err != nil {
+			projectRoot = cwd
+		}
+
+		result, err := plint.CheckBacklog(plint.BacklogOptions{
+			VaultDir:    vaultDir,
+			ProjectRoot: projectRoot,
+			EpicID:      epicID,
+		})
+		if err != nil {
+			return err
+		}
+
+		if jsonOutput {
+			out, err := plint.FormatBacklogJSON(result)
+			if err != nil {
+				return err
+			}
+			fmt.Println(out)
+		} else {
+			fmt.Print(plint.FormatBacklogText(result))
+		}
+
+		if result.Errors > 0 {
+			return cliExit{code: 1}
+		}
+		return nil
 	}
 
 	result, err := plint.CheckArtifactCollisions(vaultDir)
