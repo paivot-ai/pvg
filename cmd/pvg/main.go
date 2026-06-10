@@ -28,6 +28,7 @@
 //	pvg loop recover             # Clean up after context loss
 //	pvg worktree remove <path>   # Safely remove a worktree (CWD-independent)
 //	pvg fetch-vlt-skill [--force] # Download and install vlt skill
+//	pvg fetch-tools [--force]    # Install/update vlt + nd binaries and skills
 //	pvg verify [path...] [flags] # Scan for stubs, thin files, TODOs
 //	pvg doctor [--json] [--fix]  # Run diagnostic checks
 //	pvg version                  # Print version
@@ -153,6 +154,9 @@ func main() {
 	case "fetch-vlt-skill":
 		force := len(args) > 0 && (args[0] == "--force" || args[0] == "-f")
 		err = lifecycle.FetchVltSkill(force)
+	case "fetch-tools":
+		force := len(args) > 0 && (args[0] == "--force" || args[0] == "-f")
+		err = lifecycle.FetchTools(force)
 	case "version", "--version", "-V":
 		fmt.Printf("pvg %s\n", resolvedVersion())
 	case "help", "--help", "-h":
@@ -210,6 +214,7 @@ Commands:
   worktree remove <path>   Safely remove a worktree (CWD-independent) [alias: wt]
   doctor [--json] [--fix]  Run diagnostic checks on vault configuration
   fetch-vlt-skill [--force]  Download and install the vlt skill from GitHub
+  fetch-tools [--force]    Install/update vlt + nd binaries and their skills from latest releases
   version                Print version
 	help                   Show this help`)
 }
