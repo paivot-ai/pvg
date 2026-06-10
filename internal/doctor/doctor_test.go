@@ -98,14 +98,31 @@ func TestCheckSharedConfigConsistency_NoConfig(t *testing.T) {
 
 func TestCheckSharedConfigConsistency_PaivotManagedNoShared(t *testing.T) {
 	root := t.TempDir()
-	// Create paivot markers but no .nd-shared.yaml -- local vault mode is expected.
+	// Paivot markers but no git repo -- local vault mode is acceptable.
 	if err := os.MkdirAll(filepath.Join(root, ".vault", "knowledge"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 
 	f := checkSharedConfigConsistency(root)
 	if f.Status != StatusPass {
-		t.Fatalf("expected pass (local vault mode is default), got %s: %s", f.Status, f.Message)
+		t.Fatalf("expected pass (local vault mode for non-git project), got %s: %s", f.Status, f.Message)
+	}
+}
+
+func TestCheckSharedConfigConsistency_GitPaivotManagedNoShared(t *testing.T) {
+	root := t.TempDir()
+	// Paivot-managed git repo without .nd-shared.yaml -- worktree nd writes
+	// would diverge, so the doctor must warn.
+	if err := os.MkdirAll(filepath.Join(root, ".vault", "knowledge"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	f := checkSharedConfigConsistency(root)
+	if f.Status != StatusWarn {
+		t.Fatalf("expected warn (git repo without shared vault config), got %s: %s", f.Status, f.Message)
 	}
 }
 

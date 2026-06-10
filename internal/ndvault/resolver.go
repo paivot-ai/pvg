@@ -48,6 +48,18 @@ func SharedConfigPath(projectRoot string) string {
 	return filepath.Join(filepath.Clean(projectRoot), sharedConfigRelPath)
 }
 
+// SharedConfigured reports whether projectRoot or an ancestor carries a
+// shared-vault config.
+func SharedConfigured(projectRoot string) bool {
+	_, _, err := findSharedConfig(filepath.Clean(projectRoot))
+	return err == nil
+}
+
+// FindRepoRoot returns the nearest ancestor of start containing .git.
+func FindRepoRoot(start string) (string, error) {
+	return findRepoRoot(start)
+}
+
 // DefaultSharedConfig returns the tracked config that points to the default
 // shared worktree nd vault used by paivot-graph.
 func DefaultSharedConfig() string {

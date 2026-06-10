@@ -134,10 +134,18 @@ func checkNDReachable() Finding {
 }
 
 func checkSharedConfigConsistency(projectRoot string) Finding {
-	configPath := ndvault.SharedConfigPath(projectRoot)
-	if _, err := os.Stat(configPath); err != nil {
-		// No shared config -- local .vault/ mode is the default and expected.
-		return Finding{Name: "shared-config-consistency", Status: StatusPass, Message: "local vault mode (default)"}
+	if !ndvault.SharedConfigured(projectRoot) {
+		// Paivot-managed git repos must share the live vault across
+		// worktrees; without the config every worktree resolves its own
+		// vault view and nd writes diverge.
+		if _, err := ndvault.FindRepoRoot(projectRoot); err == nil && ndvault.IsPaivotManaged(projectRoot) {
+			return Finding{
+				Name:    "shared-config-consistency",
+				Status:  StatusWarn,
+				Message: "no .vault/.nd-shared.yaml -- worktree nd writes will diverge; run 'pvg nd root --ensure' and commit the file",
+			}
+		}
+		return Finding{Name: "shared-config-consistency", Status: StatusPass, Message: "local vault mode (non-git project)"}
 	}
 
 	// Shared config exists -- verify target path exists.

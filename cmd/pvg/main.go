@@ -387,7 +387,15 @@ func runND(args []string) error {
 		}
 		var vaultDir string
 		if ensure {
+			sharedConfig := ndvault.SharedConfigPath(projectRoot)
+			_, statErr := os.Stat(sharedConfig)
+			hadConfig := statErr == nil
 			vaultDir, err = ndvault.Ensure(projectRoot)
+			if err == nil && !hadConfig {
+				if _, statErr := os.Stat(sharedConfig); statErr == nil {
+					fmt.Fprintf(os.Stderr, "created %s -- commit it so all worktrees share the live nd vault\n", sharedConfig)
+				}
+			}
 		} else {
 			vaultDir, err = ndvault.Resolve(projectRoot)
 		}
