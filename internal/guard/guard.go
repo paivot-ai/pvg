@@ -90,6 +90,9 @@ func Check(vaultDir, projectRoot string, input HookInput) Result {
 		if r := CheckWorktreeAgentCheckout(projectRoot, input.ToolInput.Command); !r.Allowed {
 			return r
 		}
+		if r := CheckStoryCheckoutAtRoot(projectRoot, input.ToolInput.Command); !r.Allowed {
+			return r
+		}
 		if r := checkBashCommand(vaultDir, input.ToolInput.Command); !r.Allowed {
 			return r
 		}
