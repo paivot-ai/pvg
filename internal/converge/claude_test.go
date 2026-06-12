@@ -150,9 +150,12 @@ func TestConvergePlugins_ReplacesDirectoryMarketplaceAndVerifies(t *testing.T) {
 	withFakeClaude(t, f)
 
 	var lines []string
-	ok := convergePlugins(pluginManifest(), false, collectReports(&lines))
+	versions, ok := convergePlugins(pluginManifest(), false, collectReports(&lines))
 	if !ok {
 		t.Fatalf("convergePlugins() failed:\n%s", strings.Join(lines, "\n"))
+	}
+	if versions["nd"] != "0.10.20" || versions["paivot-graph"] != "1.55.0" {
+		t.Errorf("installed versions = %+v, want nd=0.10.20 paivot-graph=1.55.0", versions)
 	}
 
 	joined := strings.Join(f.calls, "\n")
@@ -182,7 +185,7 @@ func TestConvergePlugins_AddsMissingMarketplace(t *testing.T) {
 	withFakeClaude(t, f)
 
 	var lines []string
-	if ok := convergePlugins(pluginManifest(), false, collectReports(&lines)); !ok {
+	if _, ok := convergePlugins(pluginManifest(), false, collectReports(&lines)); !ok {
 		t.Fatalf("convergePlugins() failed:\n%s", strings.Join(lines, "\n"))
 	}
 	joined := strings.Join(f.calls, "\n")
@@ -204,7 +207,7 @@ func TestConvergePlugins_ToleratesAlreadyInstalled(t *testing.T) {
 	withFakeClaude(t, f)
 
 	var lines []string
-	if ok := convergePlugins(pluginManifest(), false, collectReports(&lines)); !ok {
+	if _, ok := convergePlugins(pluginManifest(), false, collectReports(&lines)); !ok {
 		t.Fatalf("already-installed must be tolerated:\n%s", strings.Join(lines, "\n"))
 	}
 }
@@ -216,12 +219,16 @@ func TestConvergePlugins_VersionMismatchFails(t *testing.T) {
 	withFakeClaude(t, f)
 
 	var lines []string
-	if ok := convergePlugins(pluginManifest(), false, collectReports(&lines)); ok {
+	versions, ok := convergePlugins(pluginManifest(), false, collectReports(&lines))
+	if ok {
 		t.Fatal("version mismatch must fail the step")
 	}
 	joined := strings.Join(lines, "\n")
 	if !strings.Contains(joined, "1.54.0") || !strings.Contains(joined, "1.55.0") {
 		t.Errorf("failure must show both versions:\n%s", joined)
+	}
+	if versions["paivot-graph"] != "1.54.0" {
+		t.Errorf("installed versions = %+v, want the real installed 1.54.0 for the summary", versions)
 	}
 }
 
@@ -231,7 +238,7 @@ func TestConvergePlugins_MissingClaudeCLIFails(t *testing.T) {
 	t.Cleanup(func() { lookPath = oldLook })
 
 	var lines []string
-	if ok := convergePlugins(pluginManifest(), false, collectReports(&lines)); ok {
+	if _, ok := convergePlugins(pluginManifest(), false, collectReports(&lines)); ok {
 		t.Fatal("missing claude CLI must fail the step")
 	}
 	joined := strings.Join(lines, "\n")
@@ -246,7 +253,7 @@ func TestConvergePlugins_DryRunMutatesNothing(t *testing.T) {
 	withFakeClaude(t, f)
 
 	var lines []string
-	if ok := convergePlugins(pluginManifest(), true, collectReports(&lines)); !ok {
+	if _, ok := convergePlugins(pluginManifest(), true, collectReports(&lines)); !ok {
 		t.Fatalf("dry-run failed:\n%s", strings.Join(lines, "\n"))
 	}
 	for _, call := range f.calls {

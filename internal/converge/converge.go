@@ -148,7 +148,7 @@ func Run(opts Options) (Report, error) {
 	}
 
 	if opts.Plugins {
-		ok := convergePlugins(m, opts.DryRun, report)
+		pluginVersions, ok := convergePlugins(m, opts.DryRun, report)
 		names := make([]string, 0, len(m.Plugins))
 		for name := range m.Plugins {
 			names = append(names, name)
@@ -162,10 +162,11 @@ func Run(opts Options) (Report, error) {
 				state = "failed"
 			}
 			rep.Artifacts = append(rep.Artifacts, Artifact{
-				Name:    name + " (plugin)",
-				Kind:    "plugin",
-				Channel: m.Plugins[name].Version,
-				State:   state,
+				Name:      name + " (plugin)",
+				Kind:      "plugin",
+				Installed: pluginVersions[name],
+				Channel:   m.Plugins[name].Version,
+				State:     state,
 			})
 		}
 	}

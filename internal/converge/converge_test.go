@@ -388,6 +388,93 @@ func TestRun_PluginsConvergedAndSummarized(t *testing.T) {
 	}
 }
 
+// Regression: a real `pvg setup` run printed per-step verification
+// "OK: plugin nd@nd at 0.10.20" but the summary table still showed
+// "(not installed)" for both plugins -- the summary artifacts discarded
+// the post-convergence versions. The summary must reflect the same
+// `claude plugin list` snapshot the verification step used, including
+// when that list holds many plugins from other marketplaces.
+func TestRun_SummaryShowsInstalledPluginVersions(t *testing.T) {
+	home := t.TempDir()
+	withSeams(t, home)
+	withManifest(t, pluginManifest())
+
+	// Realistic multi-marketplace list: U+276F headers, two-space indented
+	// fields, blank-line separated entries, unknown and commit-hash versions.
+	const realisticPluginList = `Installed plugins:
+
+  ❯ codex@openai-codex
+    Version: 1.0.4
+    Scope: user
+    Status: enabled
+
+  ❯ commit-commands@claude-plugins-official
+    Version: unknown
+    Scope: user
+    Status: enabled
+
+  ❯ elixir-phoenix@artistree
+    Version: 3f9ac2e
+    Scope: user
+    Status: enabled
+
+  ❯ nd@nd
+    Version: 0.10.20
+    Scope: user
+    Status: enabled
+
+  ❯ paivot-graph@paivot-graph
+    Version: 1.55.0
+    Scope: user
+    Status: enabled
+
+  ❯ plugin-dev@claude-plugins-official
+    Version: unknown
+    Scope: user
+    Status: enabled
+`
+	f := &fakeClaude{}
+	f.respond("plugin marketplace list", marketplaceListOutput, nil)
+	f.respond("plugin list", realisticPluginList, nil)
+	withFakeClaude(t, f)
+
+	var buf bytes.Buffer
+	rep, err := Run(Options{Tools: []string{"none"}, Plugins: true, Out: &buf})
+	if err != nil || rep.Failed {
+		t.Fatalf("Run() err=%v failed=%v\n%s", err, rep.Failed, buf.String())
+	}
+
+	want := map[string]string{
+		"nd (plugin)":           "0.10.20",
+		"paivot-graph (plugin)": "1.55.0",
+	}
+	for _, a := range rep.Artifacts {
+		if a.Kind != "plugin" {
+			continue
+		}
+		if a.Installed != want[a.Name] {
+			t.Errorf("artifact %s Installed = %q, want %q", a.Name, a.Installed, want[a.Name])
+		}
+		if a.State != "ok" {
+			t.Errorf("artifact %s State = %q, want ok", a.Name, a.State)
+		}
+	}
+
+	out := buf.String()
+	summary := out[strings.Index(out, "Summary:"):]
+	if strings.Contains(summary, "(not installed)") {
+		t.Errorf("summary must not show (not installed) for verified plugins:\n%s", summary)
+	}
+	for _, line := range []string{"nd (plugin)", "paivot-graph (plugin)"} {
+		if !strings.Contains(summary, line) {
+			t.Errorf("summary missing row %q:\n%s", line, summary)
+		}
+	}
+	if !strings.Contains(summary, "0.10.20") || !strings.Contains(summary, "1.55.0") {
+		t.Errorf("summary missing installed versions:\n%s", summary)
+	}
+}
+
 func TestRun_VltSkillDryRunMutatesNothing(t *testing.T) {
 	home := t.TempDir()
 	withSeams(t, home)

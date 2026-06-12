@@ -111,12 +111,15 @@ func parsePluginList(out string) []pluginEntry {
 
 // convergePlugins drives the claude CLI so the channel-pinned plugins are
 // installed from GitHub marketplaces at the pinned versions. Reports each
-// action through report and returns false when any plugin failed to
-// converge or verify (the step keeps going across plugins).
-func convergePlugins(m channel.Manifest, dryRun bool, report func(status, format string, args ...any)) bool {
+// action through report. It returns the post-convergence installed version
+// per pinned plugin (taken from the same `claude plugin list` snapshot used
+// for verification, so the summary reflects reality after convergence) and
+// false when any plugin failed to converge or verify (the step keeps going
+// across plugins).
+func convergePlugins(m channel.Manifest, dryRun bool, report func(status, format string, args ...any)) (map[string]string, bool) {
 	if _, err := lookPath("claude"); err != nil {
 		report("FAIL", "claude CLI not found -- %s", claudeInstallPointer)
-		return false
+		return nil, false
 	}
 
 	names := make([]string, 0, len(m.Plugins))
@@ -128,7 +131,7 @@ func convergePlugins(m channel.Manifest, dryRun bool, report func(status, format
 	mpOut, err := runClaude("plugin", "marketplace", "list")
 	if err != nil {
 		report("FAIL", "claude plugin marketplace list: %v\n%s", err, strings.TrimSpace(mpOut))
-		return false
+		return nil, false
 	}
 	marketplaces := parseMarketplaceList(mpOut)
 
@@ -141,23 +144,41 @@ func convergePlugins(m channel.Manifest, dryRun bool, report func(status, format
 		}
 	}
 	if dryRun {
-		return ok
+		return nil, ok
 	}
 
 	// Verify final versions against the channel pins.
 	listOut, err := runClaude("plugin", "list")
 	if err != nil {
 		report("FAIL", "claude plugin list: %v\n%s", err, strings.TrimSpace(listOut))
-		return false
+		return nil, false
 	}
 	installed := parsePluginList(listOut)
+	versions := installedPluginVersions(names, installed)
 	for _, name := range names {
 		pin := m.Plugins[name]
 		if verifyPluginVersion(name, pin.Version, installed, report) != nil {
 			ok = false
 		}
 	}
-	return ok
+	return versions, ok
+}
+
+// installedPluginVersions extracts the installed version of each pinned
+// plugin from a parsed `claude plugin list`, matching the name@name spec
+// that convergence installs (the list may contain many other plugins from
+// other marketplaces).
+func installedPluginVersions(names []string, installed []pluginEntry) map[string]string {
+	versions := make(map[string]string, len(names))
+	for _, name := range names {
+		for _, e := range installed {
+			if e.Name == name && e.Marketplace == name {
+				versions[name] = e.Version
+				break
+			}
+		}
+	}
+	return versions
 }
 
 func convergeOnePlugin(name string, pin channel.PluginPin, marketplaces []marketplaceEntry, dryRun bool, report func(status, format string, args ...any)) error {
