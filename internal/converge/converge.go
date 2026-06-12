@@ -14,6 +14,7 @@ import (
 	"strings"
 
 	"github.com/paivot-ai/pvg/internal/channel"
+	"github.com/paivot-ai/pvg/internal/gates"
 	"github.com/paivot-ai/pvg/internal/paivotcfg"
 )
 
@@ -47,6 +48,9 @@ type Options struct {
 	Plugins bool
 	// PathWiring appends ~/.local/bin to ~/.profile when needed (setup only).
 	PathWiring bool
+	// RecommendAnalyzers prints the optional code-quality analyzer nudge for
+	// `pvg gates` after the summary (setup only).
+	RecommendAnalyzers bool
 	// Out receives progress lines; defaults to os.Stdout.
 	Out io.Writer
 }
@@ -172,7 +176,37 @@ func Run(opts Options) (Report, error) {
 	}
 
 	printSummary(out, rep)
+	if opts.RecommendAnalyzers {
+		printAnalyzerRecommendation(out, gates.MissingRecommended())
+	}
 	return rep, nil
+}
+
+// printAnalyzerRecommendation prints the optional code-quality analyzer nudge
+// after the convergence summary. When all recommended analyzers are present it
+// prints a single concise line; otherwise it lists the missing ones with exact
+// install commands, the apt caveat, and the single-language fallbacks.
+func printAnalyzerRecommendation(out io.Writer, missing []gates.Analyzer) {
+	if len(missing) == 0 {
+		fmt.Fprintln(out, "\nCode-quality analyzers: lizard, jscpd present.")
+		return
+	}
+	fmt.Fprintln(out, "\nOptional: code-quality analyzers for `pvg gates`")
+	fmt.Fprintln(out, "  The delivered-code quality gate shells out to external analyzers for")
+	fmt.Fprintln(out, "  duplication and complexity. Without them those gates SKIP -- they never")
+	fmt.Fprintln(out, "  block falsely, but you lose the strongest signal against copy-paste and")
+	fmt.Fprintln(out, "  unmaintainable code. Install the missing recommended tools:")
+	fmt.Fprintln(out)
+	for _, a := range missing {
+		fmt.Fprintf(out, "    %-24s # %s  [recommended]\n", a.Install, a.Purpose)
+	}
+	fmt.Fprintln(out)
+	fmt.Fprintln(out, "  Single-language fallbacks (only if you skip lizard):")
+	fmt.Fprintln(out, "    go install github.com/fzipp/gocyclo/cmd/gocyclo@latest   # Go")
+	fmt.Fprintln(out, "    pip install radon                                        # Python (Ubuntu: apt install python3-radon)")
+	fmt.Fprintln(out)
+	fmt.Fprintln(out, "  apt alone is not enough -- only radon ships in the Ubuntu repos. pip and npm")
+	fmt.Fprintln(out, "  (already on most dev machines) get you the multi-language tools.")
 }
 
 func toolSelected(name string, filter []string) bool {

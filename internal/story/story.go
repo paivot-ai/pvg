@@ -376,6 +376,16 @@ func issueContent(projectRoot, storyID string) (string, error) {
 
 var contractStatusRe = regexp.MustCompile(`(?m)^status:\s*(\w+)`)
 
+// ndManagedTrailingSections are the bookkeeping sections nd always emits as the
+// canonical trailing sections of every issue, AFTER the notes/contract area.
+// They are legitimate content and may follow the authoritative delivered
+// contract in any order or subset without disqualifying it as "at EOF".
+var ndManagedTrailingSections = map[string]bool{
+	"## History":  true,
+	"## Links":    true,
+	"## Comments": true,
+}
+
 func validateAuthoritativeContract(content string) (status string, atEOF bool) {
 	start := strings.LastIndex(content, "\n## nd_contract\n")
 	if strings.HasPrefix(content, "## nd_contract\n") {
@@ -399,8 +409,31 @@ func validateAuthoritativeContract(content string) (status string, atEOF bool) {
 	if statusMatch := contractStatusRe.FindStringSubmatch(body); len(statusMatch) == 2 {
 		status = statusMatch[1]
 	}
+
+	// The contract is "at EOF" when it is the literal last block, OR when
+	// everything that follows it consists solely of nd-managed bookkeeping
+	// sections. Any other "## " section after the contract is unexpected
+	// content and keeps the contract from being at EOF.
 	atEOF = strings.TrimSpace(content) == strings.TrimSpace(content[:end])
+	if !atEOF && onlyNDManagedSectionsFollow(content[end:]) {
+		atEOF = true
+	}
 	return status, atEOF
+}
+
+// onlyNDManagedSectionsFollow reports whether every "## " heading in the
+// trailing region is one of nd's managed bookkeeping sections. A region with no
+// "## " heading at all (e.g. blank lines only) trivially qualifies.
+func onlyNDManagedSectionsFollow(trailing string) bool {
+	for _, line := range strings.Split(trailing, "\n") {
+		if !strings.HasPrefix(line, "## ") {
+			continue
+		}
+		if !ndManagedTrailingSections[strings.TrimRight(line, " \t")] {
+			return false
+		}
+	}
+	return true
 }
 
 func hasLabel(labels []string, target string) bool {

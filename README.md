@@ -368,7 +368,24 @@ pvg doctor --json       # Structured output
 pvg doctor --fix        # Auto-repair fixable issues (prune worktrees, nd doctor --fix)
 ```
 
-Checks: vault-resolution, nd-reachable, shared-config-consistency, nd-doctor, loop-state, worktree-hygiene.
+Checks: vault-resolution, nd-reachable, shared-config-consistency, nd-doctor, loop-state, worktree-hygiene, code-quality-analyzers.
+
+### Quality gates
+
+```bash
+pvg gates [path...]     # Metric quality gates on delivered code
+pvg gates --json        # Structured output
+```
+
+Measures cyclomatic complexity, copy-paste duplication, and file size against
+configurable `gates.*` thresholds, returning `[BLOCK]`/`[WARN]`/`[SKIP]` lines
+and a PASS/FAIL summary. Complexity and duplication shell out to external
+analyzers; when an analyzer is absent the gate SKIPs (never blocks falsely).
+Install `lizard` (`pip install lizard`) and `jscpd` (`npm install -g jscpd`) to
+light up the full gate on virtually any stack -- apt alone is not enough, only
+`radon` ships in the Ubuntu repos. See the analyzer matrix and full key
+reference in paivot-graph `docs/QUALITY_GATES.md`. `pvg doctor` reports which
+analyzers are present; `pvg setup` nudges you to install the missing ones.
 
 ### Dispatcher mode
 
@@ -393,7 +410,13 @@ Seeds agent prompts (11 agents: BA, Designer, Architect, the three BLT challenge
 pvg settings                         # Show all settings
 pvg settings stack_detection         # Read one setting
 pvg settings stack_detection=true    # Set a value
+pvg settings model.developer=sonnet  # Per-role model override (empty = agent default)
 ```
+
+Per-role model overrides (`model.developer`, `model.pm`, `model.sr_pm`,
+`model.anchor`, `model.retro`, `model.ba`, `model.designer`, `model.architect`,
+and the `*_challenger` variants) pick the model for each agent without editing
+agent files; an empty value uses the agent's frontmatter default.
 
 ### Toolchain convergence
 

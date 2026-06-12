@@ -39,6 +39,31 @@ var defaults = map[string]string{
 	"lint.quality_gates":           "",
 	"lint.brownfield":              "false",
 	"update.nudge":                 "true",
+	// Per-role model overrides for Paivot agents. Empty = no override
+	// (the agent's frontmatter model wins). See setSettings for validation.
+	"model.developer":            "",
+	"model.pm":                   "",
+	"model.sr_pm":                "",
+	"model.anchor":               "",
+	"model.retro":                "",
+	"model.ba":                   "",
+	"model.designer":             "",
+	"model.architect":            "",
+	"model.ba_challenger":        "",
+	"model.designer_challenger":  "",
+	"model.architect_challenger": "",
+	// Metric quality gates on delivered code (pvg gates). Mode keys take
+	// off|warn|block; absent analyzer tools cause the gate to be skipped and
+	// noted, never silently passed. See setSettings for mode validation.
+	"gates.complexity":            "block",
+	"gates.complexity.warn_cc":    "15",
+	"gates.complexity.block_cc":   "30",
+	"gates.duplication":           "block",
+	"gates.duplication.max_pct":   "10",
+	"gates.duplication.min_lines": "50",
+	"gates.file_loc":              "warn",
+	"gates.file_loc.max":          "400",
+	"gates.exclude":               "vendor/,node_modules/,*.generated.*,*.pb.go,migrations/,*.lock,*.min.*,dist/,build/",
 }
 
 var execCommand = exec.Command
@@ -134,6 +159,18 @@ func setSettings(projectRoot, path string, args []string) error {
 
 		if key == "" {
 			return fmt.Errorf("empty key in %q", arg)
+		}
+
+		if strings.HasPrefix(key, "model.") {
+			if err := validateModelValue(key, value); err != nil {
+				return err
+			}
+		}
+
+		if isGateModeKey(key) {
+			if err := validateGateMode(key, value); err != nil {
+				return err
+			}
 		}
 
 		settings[key] = value
@@ -286,6 +323,41 @@ func runNDConfigSet(vaultDir, key, value string) error {
 		return fmt.Errorf("nd config set %s=%s: %w", key, value, err)
 	}
 	return nil
+}
+
+// validateModelValue checks a model.<role> setting value. Empty means "no
+// override"; the aliases opus/sonnet/haiku/fable/inherit and any full model id
+// (claude-*) are accepted. Everything else is rejected to catch typos.
+func validateModelValue(key, value string) error {
+	switch value {
+	case "", "opus", "sonnet", "haiku", "fable", "inherit":
+		return nil
+	}
+	if strings.HasPrefix(value, "claude-") {
+		return nil
+	}
+	return fmt.Errorf("invalid model %q for %s (allowed: opus, sonnet, haiku, fable, inherit, or a claude-* model id)", value, key)
+}
+
+// isGateModeKey reports whether a key is one of the three gates.* mode keys
+// (those that take off|warn|block). The numeric threshold keys and the
+// exclude list are NOT mode keys.
+func isGateModeKey(key string) bool {
+	switch key {
+	case "gates.complexity", "gates.duplication", "gates.file_loc":
+		return true
+	}
+	return false
+}
+
+// validateGateMode checks a gates.* mode setting value. Only off|warn|block
+// are accepted; everything else is rejected to catch typos.
+func validateGateMode(key, value string) error {
+	switch value {
+	case "off", "warn", "block":
+		return nil
+	}
+	return fmt.Errorf("invalid mode %q for %s (allowed: off, warn, block)", value, key)
 }
 
 func settingOrDefault(settings map[string]string, key string) string {

@@ -17,8 +17,43 @@ import (
 	"testing"
 
 	"github.com/paivot-ai/pvg/internal/channel"
+	"github.com/paivot-ai/pvg/internal/gates"
 	"github.com/paivot-ai/pvg/internal/paivotcfg"
 )
+
+func TestPrintAnalyzerRecommendation_ListsMissing(t *testing.T) {
+	var buf bytes.Buffer
+	printAnalyzerRecommendation(&buf, []gates.Analyzer{
+		{Name: "lizard", Purpose: "cyclomatic complexity (multi-language)", Install: "pip install lizard", Recommended: true},
+		{Name: "jscpd", Purpose: "duplication detection (multi-language)", Install: "npm install -g jscpd", Recommended: true},
+	})
+	out := buf.String()
+	for _, want := range []string{
+		"Optional: code-quality analyzers for `pvg gates`",
+		"pip install lizard",
+		"npm install -g jscpd",
+		"go install github.com/fzipp/gocyclo/cmd/gocyclo@latest",
+		"pip install radon",
+		"apt install python3-radon",
+		"apt alone is not enough",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("recommendation missing %q in:\n%s", want, out)
+		}
+	}
+}
+
+func TestPrintAnalyzerRecommendation_AllPresent(t *testing.T) {
+	var buf bytes.Buffer
+	printAnalyzerRecommendation(&buf, nil)
+	out := buf.String()
+	if !strings.Contains(out, "lizard, jscpd present") {
+		t.Errorf("expected concise present line, got: %q", out)
+	}
+	if strings.Contains(out, "Optional:") {
+		t.Errorf("should not print the full nudge when nothing is missing: %q", out)
+	}
+}
 
 func makeTarGz(t *testing.T, files map[string]string) []byte {
 	t.Helper()

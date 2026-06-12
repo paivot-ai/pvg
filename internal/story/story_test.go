@@ -135,6 +135,135 @@ Trailing note
 	}
 }
 
+func TestValidateAuthoritativeContractEOF(t *testing.T) {
+	const contractBlock = `## nd_contract
+status: delivered
+
+### evidence
+- tests passed
+
+### proof
+- [x] AC #1: done
+`
+	const ndHistory = `## History
+- 2026-06-12: delivered
+`
+	const ndLinks = `## Links
+- parent: PROJ-epic
+`
+	const ndComments = `## Comments
+- looks good
+`
+
+	cases := []struct {
+		name      string
+		trailing  string
+		wantEOF   bool
+		wantState string
+	}{
+		{
+			name:      "literal last block",
+			trailing:  "",
+			wantEOF:   true,
+			wantState: "delivered",
+		},
+		{
+			name:      "nd managed sections follow",
+			trailing:  "\n" + ndHistory + "\n" + ndLinks + "\n" + ndComments,
+			wantEOF:   true,
+			wantState: "delivered",
+		},
+		{
+			name:      "only comments follow",
+			trailing:  "\n" + ndComments,
+			wantEOF:   true,
+			wantState: "delivered",
+		},
+		{
+			name:      "links then history reordered",
+			trailing:  "\n" + ndLinks + "\n" + ndHistory,
+			wantEOF:   true,
+			wantState: "delivered",
+		},
+		{
+			name:      "rogue section follows",
+			trailing:  "\n## Rogue\n- appended after contract\n",
+			wantEOF:   false,
+			wantState: "delivered",
+		},
+		{
+			name:      "second notes section follows",
+			trailing:  "\n## Notes\n- appended after contract\n",
+			wantEOF:   false,
+			wantState: "delivered",
+		},
+		{
+			name:      "managed sections then rogue section",
+			trailing:  "\n" + ndHistory + "\n## Rogue\n- still bad\n",
+			wantEOF:   false,
+			wantState: "delivered",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			content := "## Implementation Evidence\nSummary: shipped\n\n" + contractBlock + tc.trailing
+			status, atEOF := validateAuthoritativeContract(content)
+			if status != tc.wantState {
+				t.Fatalf("status = %q, want %q", status, tc.wantState)
+			}
+			if atEOF != tc.wantEOF {
+				t.Fatalf("atEOF = %v, want %v\ncontent:\n%s", atEOF, tc.wantEOF, content)
+			}
+		})
+	}
+}
+
+func TestVerifyDeliveryPassesWithNDManagedTrailingSections(t *testing.T) {
+	repo := t.TempDir()
+	vault := filepath.Join(t.TempDir(), "nd-vault")
+	setupIssueEnv(t, vault)
+	writeIssue(t, vault, "PROJ-a1b2", `---
+title: Test
+status: in_progress
+labels: [delivered]
+---
+
+## Implementation Evidence
+### CI/Test Results
+Commands run:
+Summary: shipped
+SHA: abcdef1
+### AC Verification
+
+## nd_contract
+status: delivered
+
+### evidence
+- tests passed
+
+### proof
+- [x] AC #1: done
+
+## History
+- 2026-06-12: delivered via pvg story deliver
+
+## Links
+- parent: PROJ-epic
+
+## Comments
+- ready for review
+`)
+
+	report, err := VerifyDelivery(repo, "PROJ-a1b2")
+	if err != nil {
+		t.Fatalf("VerifyDelivery() error: %v", err)
+	}
+	if report.Failed != 0 {
+		t.Fatalf("VerifyDelivery() failed checks = %d\n%s", report.Failed, report.FormatText())
+	}
+}
+
 func TestTransitionAcceptWarnsWhenNextStoryCannotStart(t *testing.T) {
 	repo := t.TempDir()
 	vault := filepath.Join(t.TempDir(), "nd-vault")

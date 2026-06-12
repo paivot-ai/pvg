@@ -1,6 +1,7 @@
 package loop
 
 import (
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -434,6 +435,134 @@ func TestEvaluateNext_AllMode_WaveSelectsDistinctStories(t *testing.T) {
 	}
 	if result.Actions[0].StoryID == result.Actions[1].StoryID {
 		t.Fatal("expected distinct story IDs in wave")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Per-role model overrides
+// ---------------------------------------------------------------------------
+
+// writeSettingsFile writes a .settings.yaml under projectRoot so that
+// applyModelOverrides can resolve model.<role> keys.
+func writeSettingsFile(t *testing.T, projectRoot string, lines ...string) {
+	t.Helper()
+	dir := filepath.Join(projectRoot, ".vault", "knowledge")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	body := strings.Join(lines, "\n") + "\n"
+	if err := os.WriteFile(filepath.Join(dir, ".settings.yaml"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestEvaluateNext_DeveloperActionGetsModelOverride(t *testing.T) {
+	withStubbedND(t, epicModeStubs(map[string]string{
+		"list --status !closed --label delivered --sort priority --limit 0 --json --parent PROJ-epic": `[]`,
+		"list --status open --label rejected --sort priority --limit 0 --json --parent PROJ-epic":     `[]`,
+		"ready --sort priority --json --parent PROJ-epic":                                             `[{"ID":"PROJ-s1","Title":"New work","Status":"open"}]`,
+		"children PROJ-epic --json": `[{"ID":"PROJ-s1","Status":"open","Labels":[]}]`,
+	}))
+
+	projectRoot := t.TempDir()
+	writeSettingsFile(t, projectRoot, "model.developer: sonnet")
+
+	result, err := EvaluateNext(projectRoot, "epic", "PROJ-epic", 1)
+	if err != nil {
+		t.Fatalf("EvaluateNext() error: %v", err)
+	}
+	if result.Next == nil || result.Next.Role != "developer" {
+		t.Fatalf("expected developer action, got %#v", result.Next)
+	}
+	if result.Next.Model != "sonnet" {
+		t.Fatalf("expected model 'sonnet' on developer action, got %q", result.Next.Model)
+	}
+
+	// The override must be present in the JSON encoding too.
+	data, err := json.Marshal(result.Next)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !strings.Contains(string(data), `"model":"sonnet"`) {
+		t.Fatalf("expected \"model\":\"sonnet\" in JSON, got %s", data)
+	}
+}
+
+func TestEvaluateNext_NoModelSettingOmitsField(t *testing.T) {
+	withStubbedND(t, epicModeStubs(map[string]string{
+		"list --status !closed --label delivered --sort priority --limit 0 --json --parent PROJ-epic": `[]`,
+		"list --status open --label rejected --sort priority --limit 0 --json --parent PROJ-epic":     `[]`,
+		"ready --sort priority --json --parent PROJ-epic":                                             `[{"ID":"PROJ-s1","Title":"New work","Status":"open"}]`,
+		"children PROJ-epic --json": `[{"ID":"PROJ-s1","Status":"open","Labels":[]}]`,
+	}))
+
+	// No settings file under this projectRoot -> no override.
+	result, err := EvaluateNext(t.TempDir(), "epic", "PROJ-epic", 1)
+	if err != nil {
+		t.Fatalf("EvaluateNext() error: %v", err)
+	}
+	if result.Next == nil {
+		t.Fatalf("expected an action, got nil")
+	}
+	if result.Next.Model != "" {
+		t.Fatalf("expected empty model when unset, got %q", result.Next.Model)
+	}
+
+	// omitempty must drop the field entirely from JSON.
+	data, err := json.Marshal(result.Next)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if strings.Contains(string(data), `"model"`) {
+		t.Fatalf("expected model field to be omitted, got %s", data)
+	}
+}
+
+func TestEvaluateNext_PMReviewActionResolvesModelPM(t *testing.T) {
+	withStubbedND(t, epicModeStubs(map[string]string{
+		"list --status !closed --label delivered --sort priority --limit 0 --json --parent PROJ-epic": `[{"ID":"PROJ-s1","Title":"Delivered","Status":"in_progress","Labels":["delivered"]}]`,
+		"list --status open --label rejected --sort priority --limit 0 --json --parent PROJ-epic":     `[]`,
+		"ready --sort priority --json --parent PROJ-epic":                                             `[]`,
+		"children PROJ-epic --json": `[{"ID":"PROJ-s1","Status":"in_progress","Labels":["delivered"]}]`,
+	}))
+
+	projectRoot := t.TempDir()
+	writeSettingsFile(t, projectRoot, "model.pm: opus", "model.developer: sonnet")
+
+	result, err := EvaluateNext(projectRoot, "epic", "PROJ-epic", 1)
+	if err != nil {
+		t.Fatalf("EvaluateNext() error: %v", err)
+	}
+	if result.Next == nil || result.Next.Role != "pm_acceptor" {
+		t.Fatalf("expected pm_acceptor action, got %#v", result.Next)
+	}
+	if result.Next.Model != "opus" {
+		t.Fatalf("expected pm_acceptor to resolve model.pm=opus, got %q", result.Next.Model)
+	}
+}
+
+func TestEvaluateNext_WaveAppliesModelToEveryAction(t *testing.T) {
+	withStubbedND(t, epicModeStubs(map[string]string{
+		"list --status !closed --label delivered --sort priority --limit 0 --json --parent PROJ-epic": `[]`,
+		"list --status open --label rejected --sort priority --limit 0 --json --parent PROJ-epic":     `[]`,
+		"ready --sort priority --json --parent PROJ-epic":                                             `[{"ID":"PROJ-s1","Title":"One","Status":"open"},{"ID":"PROJ-s2","Title":"Two","Status":"open"}]`,
+		"children PROJ-epic --json": `[{"ID":"PROJ-s1","Status":"open","Labels":[]},{"ID":"PROJ-s2","Status":"open","Labels":[]}]`,
+	}))
+
+	projectRoot := t.TempDir()
+	writeSettingsFile(t, projectRoot, "model.developer: haiku")
+
+	result, err := EvaluateNext(projectRoot, "epic", "PROJ-epic", 2)
+	if err != nil {
+		t.Fatalf("EvaluateNext() error: %v", err)
+	}
+	if len(result.Actions) != 2 {
+		t.Fatalf("expected wave of 2, got %d", len(result.Actions))
+	}
+	for i, a := range result.Actions {
+		if a.Model != "haiku" {
+			t.Fatalf("action %d: expected model 'haiku', got %q", i, a.Model)
+		}
 	}
 }
 

@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/paivot-ai/pvg/internal/gates"
 	"github.com/paivot-ai/pvg/internal/loop"
 	"github.com/paivot-ai/pvg/internal/ndvault"
 )
@@ -41,6 +42,9 @@ type Report struct {
 // For testing: allow mocking exec.Command.
 var execCommand = exec.Command
 
+// For testing: allow stubbing analyzer discovery without touching PATH.
+var analyzersMissing = gates.MissingRecommended
+
 // RunAll executes all diagnostic checks and returns a Report.
 func RunAll(projectRoot string) Report {
 	var r Report
@@ -52,6 +56,7 @@ func RunAll(projectRoot string) Report {
 	r.Findings = append(r.Findings, checkNDDoctor(projectRoot))
 	r.Findings = append(r.Findings, checkLoopState(projectRoot))
 	r.Findings = append(r.Findings, checkWorktreeHygiene(projectRoot))
+	r.Findings = append(r.Findings, checkAnalyzers())
 
 	r.Passed = true
 	for _, f := range r.Findings {
@@ -325,6 +330,28 @@ func checkWorktreeHygiene(projectRoot string) Finding {
 		}
 	}
 	return Finding{Name: "worktree-hygiene", Status: StatusPass, Message: fmt.Sprintf("%d worktree(s), all valid", len(worktrees))}
+}
+
+// checkAnalyzers reports whether the recommended code-quality analyzers used
+// by `pvg gates` (lizard, jscpd) are on PATH. Missing analyzers are a WARN,
+// never a FAIL: the gates SKIP gracefully when a tool is absent, so doctor must
+// not break its pass over optional tooling.
+func checkAnalyzers() Finding {
+	missing := analyzersMissing()
+	if len(missing) == 0 {
+		return Finding{
+			Name:    "code-quality-analyzers",
+			Status:  StatusPass,
+			Message: "code-quality analyzers present (lizard, jscpd)",
+		}
+	}
+	var parts []string
+	for _, a := range missing {
+		parts = append(parts, fmt.Sprintf("%s (%s)", a.Name, a.Install))
+	}
+	msg := "pvg gates will SKIP some metrics -- install: " + strings.Join(parts, ", ") +
+		". apt alone is not enough (only radon ships in the Ubuntu repos); pip and npm get the multi-language tools."
+	return Finding{Name: "code-quality-analyzers", Status: StatusWarn, Message: msg}
 }
 
 // --- fix implementations ---

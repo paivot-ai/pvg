@@ -392,6 +392,138 @@ func TestRunSetThenGet_LintKeys(t *testing.T) {
 	}
 }
 
+func TestDefaults_ModelKeys(t *testing.T) {
+	modelKeys := []string{
+		"model.developer", "model.pm", "model.sr_pm", "model.anchor",
+		"model.retro", "model.ba", "model.designer", "model.architect",
+		"model.ba_challenger", "model.designer_challenger", "model.architect_challenger",
+	}
+	for _, k := range modelKeys {
+		val, ok := defaults[k]
+		if !ok {
+			t.Errorf("%s missing from defaults", k)
+			continue
+		}
+		if val != "" {
+			t.Errorf("expected %s default to be empty, got %q", k, val)
+		}
+	}
+}
+
+func TestValidateModelValue(t *testing.T) {
+	cases := []struct {
+		value string
+		valid bool
+	}{
+		{"", true},
+		{"opus", true},
+		{"sonnet", true},
+		{"haiku", true},
+		{"fable", true},
+		{"inherit", true},
+		{"claude-opus-4-8", true},
+		{"claude-sonnet-4-5-20250101", true},
+		{"sonet", false},
+		{"gpt-4", false},
+		{"OPUS", false},
+		{"claude", false},
+	}
+	for _, c := range cases {
+		err := validateModelValue("model.developer", c.value)
+		if c.valid && err != nil {
+			t.Errorf("validateModelValue(%q): expected valid, got %v", c.value, err)
+		}
+		if !c.valid && err == nil {
+			t.Errorf("validateModelValue(%q): expected error, got nil", c.value)
+		}
+	}
+}
+
+func TestRunSetModel_AcceptsAndRoundTrips(t *testing.T) {
+	dir := t.TempDir()
+
+	oldWD, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Chdir(oldWD) }()
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+
+	out, runErr := captureStdout(t, func() error { return Run([]string{"model.developer=sonnet"}) })
+	if runErr != nil {
+		t.Fatalf("Run set model.developer=sonnet: %v", runErr)
+	}
+	if !strings.Contains(out, "set model.developer = sonnet") {
+		t.Errorf("set output missing model.developer confirmation, got %q", out)
+	}
+
+	loaded := LoadFile(filepath.Join(dir, ".vault", "knowledge", ".settings.yaml"))
+	if loaded["model.developer"] != "sonnet" {
+		t.Errorf("persisted model.developer: expected 'sonnet', got %q", loaded["model.developer"])
+	}
+
+	out, runErr = captureStdout(t, func() error { return Run([]string{"model.developer"}) })
+	if runErr != nil {
+		t.Fatalf("Run get model.developer after set: %v", runErr)
+	}
+	if got := strings.TrimSpace(out); got != "sonnet" {
+		t.Fatalf("expected model.developer output 'sonnet', got %q", got)
+	}
+}
+
+func TestRunSetModel_RejectsInvalidValue(t *testing.T) {
+	dir := t.TempDir()
+
+	oldWD, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Chdir(oldWD) }()
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+
+	_, runErr := captureStdout(t, func() error { return Run([]string{"model.developer=sonet"}) })
+	if runErr == nil {
+		t.Fatal("expected Run to reject model.developer=sonet")
+	}
+	if !strings.Contains(runErr.Error(), "invalid model") {
+		t.Fatalf("unexpected error: %v", runErr)
+	}
+
+	// The invalid value must NOT have been persisted.
+	loaded := LoadFile(filepath.Join(dir, ".vault", "knowledge", ".settings.yaml"))
+	if _, ok := loaded["model.developer"]; ok {
+		t.Errorf("rejected value should not persist, got %q", loaded["model.developer"])
+	}
+}
+
+func TestRunSet_NonModelKeyUnaffectedByModelValidation(t *testing.T) {
+	dir := t.TempDir()
+
+	oldWD, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Chdir(oldWD) }()
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+
+	// "sonet" would be rejected for a model.* key, but staleness_days is not a
+	// model key, so an arbitrary value passes through untouched.
+	_, runErr := captureStdout(t, func() error { return Run([]string{"staleness_days=sonet"}) })
+	if runErr != nil {
+		t.Fatalf("non-model key should not be validated, got %v", runErr)
+	}
+	loaded := LoadFile(filepath.Join(dir, ".vault", "knowledge", ".settings.yaml"))
+	if loaded["staleness_days"] != "sonet" {
+		t.Errorf("expected staleness_days 'sonet', got %q", loaded["staleness_days"])
+	}
+}
+
 func TestSyncNdConfig_UsesNdConfigSetArgsInOrder(t *testing.T) {
 	var calls [][]string
 	oldExec := execCommand
@@ -506,5 +638,96 @@ func TestRunRestoresSettingsFileWhenNdSyncFails(t *testing.T) {
 	}
 	if got := string(data); got != original {
 		t.Fatalf("settings file not restored after sync failure:\n got: %q\nwant: %q", got, original)
+	}
+}
+
+func TestDefaultGatesKeys(t *testing.T) {
+	want := map[string]string{
+		"gates.complexity":            "block",
+		"gates.complexity.warn_cc":    "15",
+		"gates.complexity.block_cc":   "30",
+		"gates.duplication":           "block",
+		"gates.duplication.max_pct":   "10",
+		"gates.duplication.min_lines": "50",
+		"gates.file_loc":              "warn",
+		"gates.file_loc.max":          "400",
+		"gates.exclude":               "vendor/,node_modules/,*.generated.*,*.pb.go,migrations/,*.lock,*.min.*,dist/,build/",
+	}
+	for k, v := range want {
+		got, ok := defaults[k]
+		if !ok {
+			t.Errorf("%s missing from defaults", k)
+			continue
+		}
+		if got != v {
+			t.Errorf("default %s = %q, want %q", k, got, v)
+		}
+	}
+}
+
+func TestRunSetGateMode_AcceptsValidModes(t *testing.T) {
+	dir := t.TempDir()
+	oldWD, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Chdir(oldWD) }()
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, val := range []string{"off", "warn", "block"} {
+		if _, runErr := captureStdout(t, func() error { return Run([]string{"gates.duplication=" + val}) }); runErr != nil {
+			t.Fatalf("gates.duplication=%s rejected: %v", val, runErr)
+		}
+	}
+	loaded := LoadFile(filepath.Join(dir, ".vault", "knowledge", ".settings.yaml"))
+	if loaded["gates.duplication"] != "block" {
+		t.Errorf("expected gates.duplication 'block', got %q", loaded["gates.duplication"])
+	}
+}
+
+func TestRunSetGateMode_RejectsTypo(t *testing.T) {
+	dir := t.TempDir()
+	oldWD, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Chdir(oldWD) }()
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+
+	_, runErr := captureStdout(t, func() error { return Run([]string{"gates.complexity=blok"}) })
+	if runErr == nil {
+		t.Fatal("expected gates.complexity=blok to be rejected")
+	}
+	if !strings.Contains(runErr.Error(), "invalid mode") {
+		t.Fatalf("unexpected error: %v", runErr)
+	}
+	loaded := LoadFile(filepath.Join(dir, ".vault", "knowledge", ".settings.yaml"))
+	if _, ok := loaded["gates.complexity"]; ok {
+		t.Errorf("rejected value should not persist, got %q", loaded["gates.complexity"])
+	}
+}
+
+func TestGateNumericKeysNotModeValidated(t *testing.T) {
+	dir := t.TempDir()
+	oldWD, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Chdir(oldWD) }()
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+
+	// A numeric threshold key is not a mode key, so an arbitrary value passes.
+	if _, runErr := captureStdout(t, func() error { return Run([]string{"gates.file_loc.max=250"}) }); runErr != nil {
+		t.Fatalf("gates.file_loc.max=250 should pass, got %v", runErr)
+	}
+	loaded := LoadFile(filepath.Join(dir, ".vault", "knowledge", ".settings.yaml"))
+	if loaded["gates.file_loc.max"] != "250" {
+		t.Errorf("expected gates.file_loc.max '250', got %q", loaded["gates.file_loc.max"])
 	}
 }

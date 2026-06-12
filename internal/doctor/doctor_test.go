@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/paivot-ai/pvg/internal/gates"
 	"github.com/paivot-ai/pvg/internal/loop"
 )
 
@@ -283,6 +284,43 @@ func TestCheckWorktreeHygiene_NoWorktrees(t *testing.T) {
 	}
 }
 
+// --- code-quality-analyzers ---
+
+func TestCheckAnalyzers_AllPresent(t *testing.T) {
+	orig := analyzersMissing
+	defer func() { analyzersMissing = orig }()
+	analyzersMissing = func() []gates.Analyzer { return nil }
+
+	f := checkAnalyzers()
+	if f.Status != StatusPass {
+		t.Fatalf("expected pass when analyzers present, got %s: %s", f.Status, f.Message)
+	}
+	if !strings.Contains(f.Message, "lizard") || !strings.Contains(f.Message, "jscpd") {
+		t.Errorf("pass message should name the analyzers, got %q", f.Message)
+	}
+}
+
+func TestCheckAnalyzers_MissingWarnsNeverFails(t *testing.T) {
+	orig := analyzersMissing
+	defer func() { analyzersMissing = orig }()
+	analyzersMissing = func() []gates.Analyzer {
+		return []gates.Analyzer{
+			{Name: "lizard", Install: "pip install lizard", Recommended: true},
+			{Name: "jscpd", Install: "npm install -g jscpd", Recommended: true},
+		}
+	}
+
+	f := checkAnalyzers()
+	if f.Status != StatusWarn {
+		t.Fatalf("expected warn (never fail) when analyzers missing, got %s", f.Status)
+	}
+	for _, want := range []string{"pip install lizard", "npm install -g jscpd", "apt alone is not enough", "only radon ships"} {
+		if !strings.Contains(f.Message, want) {
+			t.Errorf("warn message missing %q in %q", want, f.Message)
+		}
+	}
+}
+
 // --- formatting ---
 
 func TestFormatText(t *testing.T) {
@@ -329,6 +367,10 @@ func TestRunAll_ProducesReport(t *testing.T) {
 	orig := execCommand
 	defer func() { execCommand = orig }()
 
+	origAnalyzers := analyzersMissing
+	defer func() { analyzersMissing = origAnalyzers }()
+	analyzersMissing = func() []gates.Analyzer { return nil } // pretend all present
+
 	execCommand = func(name string, args ...string) *exec.Cmd {
 		switch name {
 		case "nd":
@@ -354,8 +396,8 @@ func TestRunAll_ProducesReport(t *testing.T) {
 	}
 
 	r := RunAll(root)
-	if len(r.Findings) != 7 {
-		t.Fatalf("expected 7 findings, got %d", len(r.Findings))
+	if len(r.Findings) != 8 {
+		t.Fatalf("expected 8 findings, got %d", len(r.Findings))
 	}
 
 	names := make(map[string]bool)
@@ -370,7 +412,7 @@ func TestRunAll_ProducesReport(t *testing.T) {
 		t.Logf("[%s] %s: %s", f.Status, f.Name, f.Message)
 	}
 
-	for _, expected := range []string{"vault-resolution", "nd-reachable", "shared-config-consistency", "nd-doctor", "loop-state", "worktree-hygiene"} {
+	for _, expected := range []string{"vault-resolution", "nd-reachable", "shared-config-consistency", "nd-doctor", "loop-state", "worktree-hygiene", "code-quality-analyzers"} {
 		if !names[expected] {
 			t.Errorf("missing check %q", expected)
 		}

@@ -2,7 +2,10 @@ package loop
 
 import (
 	"fmt"
+	"path/filepath"
 	"strconv"
+
+	"github.com/paivot-ai/pvg/internal/settings"
 )
 
 type queueSnapshot struct {
@@ -22,6 +25,10 @@ type NextAction struct {
 	HardTDD  bool   `json:"hard_tdd"`
 	Phase    string `json:"phase,omitempty"`
 	Priority string `json:"priority,omitempty"`
+	// Model is the per-role spawn-time model override resolved from
+	// `pvg settings model.<role>`. Empty (omitted) means "no override" --
+	// the agent's frontmatter default wins. See applyModelOverrides.
+	Model string `json:"model,omitempty"`
 }
 
 // NextResult is the host-agnostic orchestration decision derived from nd state.
@@ -80,6 +87,43 @@ func EvaluateNext(projectRoot, mode, targetEpic string, n int) (NextResult, erro
 	return evaluateAllMode(projectRoot, result, n)
 }
 
+// roleSettingKey maps an action's agent role to its model.<role> setting key.
+// Roles without a configurable override return "".
+func roleSettingKey(role string) string {
+	switch role {
+	case "developer":
+		return "model.developer"
+	case "pm_acceptor":
+		return "model.pm"
+	default:
+		return ""
+	}
+}
+
+// applyModelOverrides loads the project's settings once and stamps each
+// action's Model field with the per-role override (if any). An empty override
+// leaves Model empty, so JSON output is byte-for-byte unchanged when no
+// model.<role> setting is present.
+func applyModelOverrides(projectRoot string, actions []NextAction) {
+	if len(actions) == 0 {
+		return
+	}
+	s := settings.LoadFile(filepath.Join(projectRoot, ".vault", "knowledge", ".settings.yaml"))
+	cache := make(map[string]string)
+	for i := range actions {
+		key := roleSettingKey(actions[i].Role)
+		if key == "" {
+			continue
+		}
+		model, ok := cache[key]
+		if !ok {
+			model = s[key]
+			cache[key] = model
+		}
+		actions[i].Model = model
+	}
+}
+
 func clampWaveSize(n int) int {
 	if n < 1 {
 		return 1
@@ -106,6 +150,7 @@ func evaluateEpicMode(projectRoot string, result NextResult, n int) (NextResult,
 
 	// If the epic has actionable work, do it.
 	if actions := chooseNextActions(epicQueues, "epic", n); len(actions) > 0 {
+		applyModelOverrides(projectRoot, actions)
 		result.Decision = "act"
 		result.Reason = fmt.Sprintf("Epic %s has actionable work", result.TargetEpic)
 		result.Next = &actions[0]
@@ -180,6 +225,7 @@ func evaluateAllMode(projectRoot string, result NextResult, n int) (NextResult, 
 	result.Counts.Ready = len(globalQueues.Ready)
 
 	if actions := chooseNextActions(globalQueues, "backlog", n); len(actions) > 0 {
+		applyModelOverrides(projectRoot, actions)
 		result.Decision = "act"
 		result.Reason = reasonForAction(&actions[0])
 		result.Next = &actions[0]

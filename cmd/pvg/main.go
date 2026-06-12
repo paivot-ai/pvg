@@ -32,6 +32,7 @@
 //	pvg fetch-vlt-skill [--force] # Download and install vlt skill
 //	pvg fetch-tools [--force]    # Deprecated alias: channel-pinned nd+vlt convergence
 //	pvg verify [path...] [flags] # Scan for stubs, thin files, TODOs
+//	pvg gates [path...] [flags]  # Metric quality gates on delivered code
 //	pvg doctor [--json] [--fix]  # Run diagnostic checks
 //	pvg version                  # Print version
 package main
@@ -42,6 +43,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime/debug"
 	"strconv"
 	"strings"
@@ -49,6 +51,7 @@ import (
 	"github.com/paivot-ai/pvg/internal/converge"
 	"github.com/paivot-ai/pvg/internal/dispatcher"
 	"github.com/paivot-ai/pvg/internal/doctor"
+	"github.com/paivot-ai/pvg/internal/gates"
 	"github.com/paivot-ai/pvg/internal/governance"
 	"github.com/paivot-ai/pvg/internal/guard"
 	"github.com/paivot-ai/pvg/internal/lifecycle"
@@ -154,6 +157,8 @@ func main() {
 		err = runRTM(args)
 	case "verify":
 		err = runVerify(args)
+	case "gates":
+		err = runGates(args)
 	case "worktree", "wt":
 		err = runWorktree(args)
 	case "doctor":
@@ -222,6 +227,7 @@ Commands:
   lint [--backlog] [--json] [--epic ID]  Backlog quality checks (collisions + structure)
   rtm [check] [--json]      Requirement Traceability Matrix (D&F coverage check)
   verify [path...] [flags]  Scan source files for stubs, thin files, TODOs
+  gates [path...] [flags]   Metric quality gates (complexity, duplication, file size)
   worktree remove <path>   Safely remove a worktree (CWD-independent) [alias: wt]
   doctor [--json] [--fix]  Run diagnostic checks on vault configuration
   setup [--force]          One-command machine bootstrap: converge pvg/nd/vlt binaries,
@@ -1585,6 +1591,148 @@ Exit code 0 if clean, 1 if issues found.`)
 	return nil
 }
 
+func runGates(args []string) error {
+	format := "text"
+	changedRef := ""
+	var paths []string
+
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--help", "-h":
+			fmt.Fprintln(os.Stderr, `pvg gates -- metric quality gates on delivered code
+
+Usage: pvg gates [path...] [flags]
+
+Computes code metrics by shelling out to real analyzers, compares them to
+configurable thresholds, and returns PASS/FAIL. Complements pvg verify.
+
+Metrics (configure via pvg settings gates.*):
+  complexity   cyclomatic complexity per function (lizard, gocyclo, radon)
+  duplication  copy-paste duplication (jscpd)
+  file_loc     non-blank lines per file (built-in)
+
+Flags:
+  --changed <ref>       Scope to files changed in git diff <ref>...HEAD
+  --format text|json    Output format (default: text)
+  --help, -h            Show this help
+
+If no paths and no --changed are given, scans the current directory.
+When an analyzer tool is absent, its gate is SKIPPED and noted -- never a
+silent pass. Exit code 0 unless a BLOCK finding fired (then 1).`)
+			return nil
+		case "--format":
+			if i+1 >= len(args) {
+				return fmt.Errorf("--format requires an argument (text or json)")
+			}
+			i++
+			format = args[i]
+			if format != "text" && format != "json" {
+				return fmt.Errorf("--format must be text or json")
+			}
+		case "--changed":
+			if i+1 >= len(args) {
+				return fmt.Errorf("--changed requires a git ref argument")
+			}
+			i++
+			changedRef = args[i]
+		default:
+			if len(args[i]) > 1 && args[i][0] == '-' {
+				return fmt.Errorf("unknown flag %q (see pvg gates --help)", args[i])
+			}
+			paths = append(paths, args[i])
+		}
+	}
+
+	// Resolve project root for settings; fall back to CWD.
+	cwd, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("cannot determine working directory: %w", err)
+	}
+	projectRoot := cwd
+	if root, rerr := resolveGitRoot(); rerr == nil {
+		projectRoot = root
+	}
+	settingsPath := filepath.Join(projectRoot, ".vault", "knowledge", ".settings.yaml")
+	sett := settings.LoadFile(settingsPath)
+
+	// --changed derives the file list from the git diff against <ref>...HEAD.
+	if changedRef != "" {
+		if len(paths) > 0 {
+			return fmt.Errorf("--changed cannot be combined with explicit paths")
+		}
+		changed, derr := changedFiles(changedRef)
+		if derr != nil {
+			return derr
+		}
+		if len(changed) == 0 {
+			fmt.Println("GATES: PASS (no changed files to scan)")
+			return nil
+		}
+		paths = changed
+	}
+
+	report, err := gates.Run(paths, sett)
+	if err != nil {
+		return err
+	}
+
+	switch format {
+	case "json":
+		out, jerr := gates.FormatJSON(report)
+		if jerr != nil {
+			return jerr
+		}
+		fmt.Println(out)
+	default:
+		fmt.Print(gates.FormatText(report))
+	}
+
+	if report.Blocked {
+		return cliExit{code: 1}
+	}
+	return nil
+}
+
+// changedRefPattern allowlists the characters permitted in a user-supplied git
+// ref/revision: letters, digits, and the set . _ / - ~ ^ (the latter two for
+// revision syntax like HEAD~1 or main^). A leading '-' is forbidden so the ref
+// can never be parsed by git as an option (e.g. --upload-pack=...).
+var changedRefPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._/~^-]*$`)
+
+// validateGitRef rejects refs that could be misread by git as options or that
+// contain shell/path metacharacters, before the value is passed to exec.
+func validateGitRef(ref string) error {
+	if !changedRefPattern.MatchString(ref) {
+		return fmt.Errorf("invalid --changed ref %q (allowed: letters, digits, and . _ / - ~ ^, not starting with -)", ref)
+	}
+	return nil
+}
+
+// changedFiles returns the existing files changed in `git diff --name-only
+// <ref>...HEAD`. Deleted files (absent on disk) are filtered out.
+func changedFiles(ref string) ([]string, error) {
+	if err := validateGitRef(ref); err != nil {
+		return nil, err
+	}
+	// #nosec G702 -- ref validated against the ref-pattern allowlist above; exec.Command does not use a shell
+	cmd := exec.Command("git", "diff", "--name-only", ref+"...HEAD", "--")
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("git diff against %s: %w", ref, err)
+	}
+	var files []string
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if info, statErr := os.Stat(line); statErr == nil && !info.IsDir() {
+			files = append(files, line)
+		}
+	}
+	return files, nil
+}
+
 func runWorktree(args []string) error {
 	if len(args) < 1 {
 		fmt.Fprintln(os.Stderr, `pvg worktree -- safe worktree operations
@@ -1679,6 +1827,7 @@ Checks:
   nd-doctor                 Run nd doctor and report findings
   loop-state                Verify loop state file is valid
   worktree-hygiene          Check for stale git worktrees
+  code-quality-analyzers    Check pvg gates analyzers (lizard, jscpd) on PATH
 
 Flags:
   --json    Output as JSON
@@ -1750,10 +1899,11 @@ Flags:
 	}
 
 	rep, err := converge.Run(converge.Options{
-		Force:      force,
-		VltSkill:   true,
-		Plugins:    true,
-		PathWiring: true,
+		Force:              force,
+		VltSkill:           true,
+		Plugins:            true,
+		PathWiring:         true,
+		RecommendAnalyzers: true,
 	})
 	if err != nil {
 		return err
