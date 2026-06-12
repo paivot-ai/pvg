@@ -38,6 +38,7 @@ var defaults = map[string]string{
 	"loop.persist_across_sessions": "true",
 	"lint.quality_gates":           "",
 	"lint.brownfield":              "false",
+	"update.nudge":                 "true",
 }
 
 var execCommand = exec.Command

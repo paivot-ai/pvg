@@ -31,8 +31,19 @@ const (
 
 // Config is the loaded shape of .paivot/config.yaml.
 type Config struct {
-	Backlog Section `yaml:"backlog"`
-	Notes   Section `yaml:"notes"`
+	Backlog   Section    `yaml:"backlog"`
+	Notes     Section    `yaml:"notes"`
+	Toolchain *Toolchain `yaml:"toolchain,omitempty"`
+}
+
+// Toolchain is the optional per-project toolchain pin written by
+// `pvg update --pin`. The session-start hook warns (never blocks) when
+// installed tool versions drift from these pins.
+type Toolchain struct {
+	Channel string `yaml:"channel,omitempty"`
+	Pvg     string `yaml:"pvg,omitempty"`
+	Nd      string `yaml:"nd,omitempty"`
+	Vlt     string `yaml:"vlt,omitempty"`
 }
 
 // Section configures one provider boundary (backlog or notes) with a primary

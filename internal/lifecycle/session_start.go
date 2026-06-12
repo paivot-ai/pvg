@@ -57,6 +57,9 @@ func SessionStart() error {
 	// 2. Detect project name
 	project := detectProject(input.CWD)
 
+	// 2a. Toolchain pin warnings + channel update nudge (advisory, never block)
+	emitUpdateChecks(input.CWD)
+
 	// 2b. Stack detection (opt-in)
 	if readStackDetectionSetting(input.CWD) {
 		if stacks := detectStack(input.CWD); len(stacks) > 0 {

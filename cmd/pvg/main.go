@@ -27,8 +27,10 @@
 //	pvg loop snapshot            # Checkpoint agent/worktree state
 //	pvg loop recover             # Clean up after context loss
 //	pvg worktree remove <path>   # Safely remove a worktree (CWD-independent)
+//	pvg setup                    # One-command machine bootstrap (channel-pinned)
+//	pvg update [--to REF] [--pin] [--dry-run] # Converge toolchain to the channel manifest
 //	pvg fetch-vlt-skill [--force] # Download and install vlt skill
-//	pvg fetch-tools [--force]    # Install/update vlt + nd binaries and skills
+//	pvg fetch-tools [--force]    # Deprecated alias: channel-pinned nd+vlt convergence
 //	pvg verify [path...] [flags] # Scan for stubs, thin files, TODOs
 //	pvg doctor [--json] [--fix]  # Run diagnostic checks
 //	pvg version                  # Print version
@@ -44,6 +46,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/paivot-ai/pvg/internal/converge"
 	"github.com/paivot-ai/pvg/internal/dispatcher"
 	"github.com/paivot-ai/pvg/internal/doctor"
 	"github.com/paivot-ai/pvg/internal/governance"
@@ -112,6 +115,10 @@ func main() {
 	cmd := os.Args[1]
 	args := os.Args[2:]
 
+	// The convergence engine compares its own pinned version without
+	// shelling out to pvg.
+	converge.SelfVersion = resolvedVersion()
+
 	var err error
 	switch cmd {
 	case "hook":
@@ -151,6 +158,10 @@ func main() {
 		err = runWorktree(args)
 	case "doctor":
 		err = runDoctor(args)
+	case "setup":
+		err = runSetup(args)
+	case "update":
+		err = runUpdate(args)
 	case "fetch-vlt-skill":
 		force := len(args) > 0 && (args[0] == "--force" || args[0] == "-f")
 		err = lifecycle.FetchVltSkill(force)
@@ -213,8 +224,14 @@ Commands:
   verify [path...] [flags]  Scan source files for stubs, thin files, TODOs
   worktree remove <path>   Safely remove a worktree (CWD-independent) [alias: wt]
   doctor [--json] [--fix]  Run diagnostic checks on vault configuration
+  setup [--force]          One-command machine bootstrap: converge pvg/nd/vlt binaries,
+                           the vlt skill, and the Claude plugins to the channel manifest
+  update [--to REF] [--pin] [--dry-run]  Converge the toolchain to the channel manifest
+                           (--to: manifest at a paivot-graph git ref, enables rollback;
+                            --pin: write the converged versions into .paivot/config.yaml;
+                            --dry-run: report what would change, mutate nothing)
   fetch-vlt-skill [--force]  Download and install the vlt skill from GitHub
-  fetch-tools [--force]    Install/update vlt + nd binaries and their skills from latest releases
+  fetch-tools [--force]    Deprecated alias for the nd+vlt part of pvg update
   version                Print version
 	help                   Show this help`)
 }
@@ -1701,6 +1718,130 @@ Flags:
 
 	if !report.Passed {
 		return cliExit{code: 1}
+	}
+	return nil
+}
+
+// runSetup is the idempotent machine bootstrap: converge all tool binaries,
+// the vlt skill, and the Claude plugins to the channel manifest, plus PATH
+// wiring for fresh ~/.local/bin installs.
+func runSetup(args []string) error {
+	force := false
+	for _, a := range args {
+		switch a {
+		case "--force", "-f":
+			force = true
+		case "--help", "-h":
+			fmt.Fprintln(os.Stdout, `pvg setup [--force]
+
+Idempotent machine bootstrap driven by the channel manifest:
+  1. fetch the channel manifest (paivot-graph channel/stable.json)
+  2. converge pvg, nd, and vlt binaries to the pinned versions
+  3. wire ~/.local/bin into PATH when needed
+  4. install/update the vlt skill at the pinned tag
+  5. converge the paivot-graph and nd Claude plugins via the claude CLI
+
+Flags:
+  --force, -f    reinstall artifacts even when already at the pinned version`)
+			return nil
+		default:
+			return fmt.Errorf("setup: unknown flag %q (try --help)", a)
+		}
+	}
+
+	rep, err := converge.Run(converge.Options{
+		Force:      force,
+		VltSkill:   true,
+		Plugins:    true,
+		PathWiring: true,
+	})
+	if err != nil {
+		return err
+	}
+	if rep.Failed {
+		return cliExit{code: 1}
+	}
+	return nil
+}
+
+// runUpdate converges the toolchain to the channel manifest. --to fetches
+// the manifest at a paivot-graph git ref (rollback), --pin writes the
+// converged versions into the project's .paivot/config.yaml, --dry-run
+// reports without mutating.
+func runUpdate(args []string) error {
+	var ref string
+	pin := false
+	dryRun := false
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--to":
+			i++
+			if i >= len(args) {
+				return fmt.Errorf("--to requires a git ref")
+			}
+			ref = args[i]
+		case "--pin":
+			pin = true
+		case "--dry-run":
+			dryRun = true
+		case "--help", "-h":
+			fmt.Fprintln(os.Stdout, `pvg update [--to REF] [--pin] [--dry-run]
+
+Converge pvg, nd, and vlt binaries, the vlt skill, and the Claude plugins
+to the channel manifest pins.
+
+Flags:
+  --to REF     fetch the manifest at this paivot-graph git ref (rollback)
+  --pin        write the converged versions into .paivot/config.yaml
+  --dry-run    report what would change; mutate nothing`)
+			return nil
+		default:
+			return fmt.Errorf("update: unknown flag %q (try --help)", args[i])
+		}
+	}
+
+	rep, err := converge.Run(converge.Options{
+		Ref:      ref,
+		DryRun:   dryRun,
+		VltSkill: true,
+		Plugins:  true,
+	})
+	if err != nil {
+		return err
+	}
+	if rep.Failed {
+		return cliExit{code: 1}
+	}
+
+	if pin {
+		m := rep.Manifest
+		chName := m.Channel
+		if chName == "" {
+			chName = "stable"
+		}
+		tc := paivotcfg.Toolchain{
+			Channel: chName,
+			Pvg:     m.Tools["pvg"].Version,
+			Nd:      m.Tools["nd"].Version,
+			Vlt:     m.Tools["vlt"].Version,
+		}
+		cwd, err := os.Getwd()
+		if err != nil {
+			return fmt.Errorf("cannot determine working directory: %w", err)
+		}
+		root, err := paivotcfg.LocateProjectRoot(cwd)
+		if err != nil {
+			return fmt.Errorf("--pin: %w", err)
+		}
+		if dryRun {
+			fmt.Printf("OK: would pin toolchain (pvg %s, nd %s, vlt %s) in %s\n",
+				tc.Pvg, tc.Nd, tc.Vlt, filepath.Join(root, paivotcfg.ConfigDir, paivotcfg.ConfigFile))
+			return nil
+		}
+		if err := paivotcfg.WriteToolchain(root, tc); err != nil {
+			return fmt.Errorf("--pin: %w", err)
+		}
+		fmt.Printf("OK: toolchain pinned in %s\n", filepath.Join(root, paivotcfg.ConfigDir, paivotcfg.ConfigFile))
 	}
 	return nil
 }

@@ -22,6 +22,8 @@ pvg loop setup --all         # Start unattended execution loop
 pvg loop snapshot            # Checkpoint active agent/worktree state
 pvg loop recover             # Clean up after context loss
 pvg worktree remove <path>   # Safely remove a worktree (CWD-independent)
+pvg setup                    # One-command machine bootstrap (channel-pinned)
+pvg update [--to REF] [--pin] [--dry-run]  # Converge toolchain to the channel manifest
 pvg version                  # Print version
 ```
 
@@ -56,37 +58,77 @@ Today the split is:
 
 ## Installation
 
-### Pre-built binaries
-
-Download from [Releases](https://github.com/paivot-ai/pvg/releases):
+One command bootstraps a machine (linux/darwin, amd64/arm64):
 
 ```bash
-# macOS (Apple Silicon)
-gh release download -R paivot-ai/pvg -p '*darwin_arm64*' -D /tmp
-tar xzf /tmp/pvg_*_darwin_arm64.tar.gz -C ~/go/bin
-
-# macOS (Intel)
-gh release download -R paivot-ai/pvg -p '*darwin_amd64*' -D /tmp
-tar xzf /tmp/pvg_*_darwin_amd64.tar.gz -C ~/go/bin
-
-# Linux (amd64)
-gh release download -R paivot-ai/pvg -p '*linux_amd64*' -D /tmp
-tar xzf /tmp/pvg_*_linux_amd64.tar.gz -C ~/go/bin
-
-# Linux (arm64)
-gh release download -R paivot-ai/pvg -p '*linux_arm64*' -D /tmp
-tar xzf /tmp/pvg_*_linux_arm64.tar.gz -C ~/go/bin
-
-# Windows (amd64)
-gh release download -R paivot-ai/pvg -p '*windows_amd64*' -D %TEMP%
-tar xzf %TEMP%/pvg_*_windows_amd64.zip -C $env:GOPATH\bin
-
-# Windows (arm64)
-gh release download -R paivot-ai/pvg -p '*windows_arm64*' -D %TEMP%
-tar xzf %TEMP%/pvg_*_windows_arm64.zip -C $env:GOPATH\bin
+curl -fsSL https://raw.githubusercontent.com/paivot-ai/pvg/main/install.sh | sh
 ```
 
-### From source (requires Go 1.24+)
+The script downloads the channel-pinned pvg binary, verifies its SHA256
+against the release checksums, installs it (`/usr/local/bin` when writable
+or passwordless sudo is available, else `~/.local/bin`), and hands off to
+`pvg setup`, which converges the rest of the toolchain:
+
+- `pvg`, `nd`, and `vlt` binaries at the pinned versions
+- the vlt skill in `~/.claude/skills/vlt-skill` at the pinned tag
+- the `paivot-graph` and `nd` Claude plugins via the `claude` CLI
+- PATH wiring in `~/.profile` when `~/.local/bin` was used
+
+`GITHUB_TOKEN` is honored for all GitHub fetches. Re-running is safe:
+every step is a no-op when already converged.
+
+### The channel
+
+All artifact versions come from one CI-published channel manifest,
+`channel/stable.json` in the [paivot-graph](https://github.com/paivot-ai/paivot-graph)
+repo. It pins the tool binaries (`pvg`, `nd`, `vlt`), the Claude plugins
+(`paivot-graph`, `nd`), and the skills (`vlt-skill`) that are tested
+together. Nothing updates silently: pvg only moves versions when you run
+`pvg setup` or `pvg update`.
+
+## Updating
+
+```bash
+pvg update                  # converge everything to the current channel pins
+pvg update --dry-run        # report what would change; mutate nothing
+pvg update --to v1.54.0     # manifest at a paivot-graph git ref (rollback)
+pvg update --pin            # also pin the converged versions in this project
+```
+
+`--to` fetches the manifest at any paivot-graph git ref, so rolling back is
+just updating to an older ref. Binaries already installed are replaced in
+place at their current location (with `sudo -n` when needed); pvg replaces
+its own binary with an atomic same-directory rename.
+
+### Project pinning
+
+`pvg update --pin` writes a `toolchain:` block into the project's
+`.paivot/config.yaml`:
+
+```yaml
+toolchain:
+  channel: stable
+  pvg: v1.55.0
+  nd: v0.10.20
+  vlt: v0.11.0
+```
+
+The session-start hook compares installed versions against the pin and
+emits a WARNING line on drift. It never blocks.
+
+### The nudge
+
+Once a day the session-start hook refreshes a cached copy of the channel
+manifest (`~/.cache/paivot/`, short timeout, silently skipped offline) and
+prints one line when the channel has a newer pvg than the one installed:
+
+```
+paivot: channel stable has pvg v1.55.0 (installed 1.54.0) -- run pvg update
+```
+
+Opt out per project with `pvg settings update.nudge=false`.
+
+### From source (development)
 
 ```bash
 git clone https://github.com/paivot-ai/pvg.git
@@ -353,6 +395,20 @@ pvg settings stack_detection         # Read one setting
 pvg settings stack_detection=true    # Set a value
 ```
 
+### Toolchain convergence
+
+```bash
+pvg setup                   # idempotent machine bootstrap (binaries, skill, plugins, PATH)
+pvg update                  # same engine, sans first-time PATH wiring
+pvg update --to <git-ref>   # converge to the manifest at a paivot-graph ref (rollback)
+pvg update --pin            # write the converged versions into .paivot/config.yaml
+pvg update --dry-run        # plan only
+pvg fetch-tools [--force]   # deprecated alias: nd+vlt binaries and the vlt skill only
+```
+
+Both commands fetch the channel manifest fresh, print one OK/FAIL/SKIP line
+per step, end with a summary table, and exit non-zero when any step failed.
+
 ### Other
 
 | Command | Description |
@@ -367,6 +423,8 @@ cmd/pvg/
   main.go              CLI entry point, argument parsing, command dispatch
 
 internal/
+  channel/             Channel manifest fetch, validation, and the 24h nudge cache
+  converge/            Convergence engine behind pvg setup / pvg update
   dispatcher/          Dispatcher mode state management (D&F + execution agent tracking)
   governance/          Vault seeding with vlt lock
   guard/               Scope guard (system vault, project vault, dispatcher, FSM)

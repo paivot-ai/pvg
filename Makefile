@@ -1,4 +1,4 @@
-.PHONY: help build install test vet clean
+.PHONY: help build install test vet shellcheck clean
 
 VERSION := $(shell git describe --tags --always 2>/dev/null || echo dev)
 LDFLAGS := -X main.version=$(VERSION)
@@ -18,6 +18,9 @@ test: ## Run tests
 
 vet: ## Run go vet
 	go vet ./...
+
+shellcheck: ## Lint install.sh (skipped when shellcheck is missing)
+	@if command -v shellcheck >/dev/null 2>&1; then shellcheck install.sh; else echo "shellcheck not installed; skipping"; fi
 
 clean: ## Remove build artifacts
 	rm -f pvg
