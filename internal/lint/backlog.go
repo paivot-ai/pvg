@@ -94,9 +94,10 @@ var checkRank = map[string]int{
 	"external-integration": 7,
 	"atomicity":            8,
 	"vertical-slice":       9,
-	"dep-cycles":           10,
-	"release-gate":         11,
-	"paths-exist":          12,
+	"duplicate-sections":   10,
+	"dep-cycles":           11,
+	"release-gate":         12,
+	"paths-exist":          13,
 }
 
 // scope restricts story-level and epic-level checks when --epic is given.
@@ -146,6 +147,7 @@ func CheckBacklog(opts BacklogOptions) (BacklogResult, error) {
 	findings = append(findings, checkExternalIntegration(b, sc)...)
 	findings = append(findings, checkAtomicity(b, sc)...)
 	findings = append(findings, checkVerticalSlice(b, sc)...)
+	findings = append(findings, checkDuplicateSections(b, sc)...)
 	// Graph-level checks stay global even under --epic: a cycle or a
 	// mis-pointed release gate breaks dispatch regardless of which epic
 	// is being fixed.
@@ -947,6 +949,58 @@ func checkVerticalSlice(b *Backlog, sc scope) []Finding {
 				IssueID:  issue.ID,
 				Message:  "story body has no observable-outcome verb (returns/displays/redirects/stores/emits/user can...)",
 			})
+		}
+	}
+	return findings
+}
+
+// --- check: duplicate-sections ---------------------------------------------------------
+
+// canonicalSectionHeadings are the body sections nd owns and targets with
+// heading-scoped writes (comments, history appends, AC updates).
+var canonicalSectionHeadings = []string{
+	"Description",
+	"Acceptance Criteria",
+	"Design",
+	"Notes",
+	"History",
+	"Links",
+	"Comments",
+}
+
+// checkDuplicateSections flags issues whose body contains more than one
+// occurrence of the same canonical nd section heading. Agents authoring
+// story bodies sometimes embed their own "## <Name>" headings inside the
+// description; the resulting duplicates corrupt nd's heading-targeted writes
+// (nd >= 0.10.20 resolves them deterministically, older nd aborts with an
+// ambiguity error). Authored content must use non-canonical headings instead.
+func checkDuplicateSections(b *Backlog, sc scope) []Finding {
+	var findings []Finding
+	for _, issue := range b.ordered {
+		if isClosed(issue) || !sc.storyInScope(issue.ID) {
+			continue
+		}
+
+		counts := make(map[string]int, len(canonicalSectionHeadings))
+		for _, line := range strings.Split(issue.Body, "\n") {
+			trimmed := strings.TrimSpace(line)
+			for _, name := range canonicalSectionHeadings {
+				if trimmed == "## "+name {
+					counts[name]++
+				}
+			}
+		}
+
+		for _, name := range canonicalSectionHeadings {
+			if counts[name] > 1 {
+				findings = append(findings, Finding{
+					Check:    "duplicate-sections",
+					Severity: SeverityReview,
+					IssueID:  issue.ID,
+					Message: fmt.Sprintf("issue %s: canonical heading %q appears %d times; authored bodies must not use nd-managed section headings",
+						issue.ID, "## "+name, counts[name]),
+				})
+			}
 		}
 	}
 	return findings

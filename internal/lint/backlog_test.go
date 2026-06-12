@@ -543,6 +543,98 @@ func TestCheckVerticalSlice(t *testing.T) {
 	}
 }
 
+func TestCheckDuplicateSections(t *testing.T) {
+	tests := []struct {
+		name         string
+		body         string
+		status       string
+		wantFindings int
+		wantContains string
+	}{
+		{
+			name:   "single occurrence of each canonical heading is clean",
+			body:   "## Description\ntext\n\n## Acceptance Criteria\n1. ok\n\n## Notes\nn\n\n## History\nh\n\n## Links\nl\n\n## Comments\nc\n\n## Design\nd\n",
+			status: "open",
+		},
+		{
+			name:         "duplicate acceptance criteria heading flagged",
+			body:         "## Description\ntext\n\n## Acceptance Criteria\n1. real AC\n\n## Acceptance Criteria\nauthored duplicate\n",
+			status:       "open",
+			wantFindings: 1,
+			wantContains: `"## Acceptance Criteria" appears 2 times`,
+		},
+		{
+			name:         "multiple distinct duplicated headings each flagged",
+			body:         "## Description\na\n## Description\nb\n## Notes\nc\n## Notes\nd\n",
+			status:       "open",
+			wantFindings: 2,
+		},
+		{
+			name:   "non-canonical duplicate heading is not flagged",
+			body:   "## Implementation\na\n## Implementation\nb\n",
+			status: "open",
+		},
+		{
+			name:   "deeper heading level does not collide with canonical section",
+			body:   "## Description\ntext\n### Description\nnested authored heading\n",
+			status: "open",
+		},
+		{
+			name:   "heading with trailing text is not a canonical match",
+			body:   "## Description\ntext\n## Description of the rollout\nmore\n",
+			status: "open",
+		},
+		{
+			name:   "closed issue is skipped",
+			body:   "## Description\na\n## Description\nb\n",
+			status: "closed",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			b := buildBacklog(t, map[string]string{
+				"PROJ-s1.md": "---\nid: PROJ-s1\nstatus: " + tt.status + "\ntype: task\n---\n" + tt.body,
+			})
+			findings := checkDuplicateSections(b, scope{})
+			if len(findings) != tt.wantFindings {
+				t.Fatalf("findings = %+v, want %d", findings, tt.wantFindings)
+			}
+			for _, f := range findings {
+				if f.Severity != SeverityReview {
+					t.Errorf("severity = %s, want review", f.Severity)
+				}
+				if f.IssueID != "PROJ-s1" || !strings.Contains(f.Message, "PROJ-s1") {
+					t.Errorf("finding must name the issue ID: %+v", f)
+				}
+				if !strings.Contains(f.Message, "nd-managed section headings") {
+					t.Errorf("message missing guidance: %s", f.Message)
+				}
+			}
+			if tt.wantContains != "" && !strings.Contains(findings[0].Message, tt.wantContains) {
+				t.Errorf("message = %q, want it to contain %q", findings[0].Message, tt.wantContains)
+			}
+		})
+	}
+}
+
+func TestCheckDuplicateSections_EpicScope(t *testing.T) {
+	dupBody := "## Description\na\n## Description\nb\n"
+	b := buildBacklog(t, map[string]string{
+		"PROJ-e1.md": "---\nid: PROJ-e1\nstatus: open\ntype: epic\n---\n",
+		"PROJ-s1.md": "---\nid: PROJ-s1\nstatus: open\ntype: task\nparent: PROJ-e1\n---\n" + dupBody,
+		"PROJ-s2.md": "---\nid: PROJ-s2\nstatus: open\ntype: task\nparent: PROJ-e2\n---\n" + dupBody,
+	})
+
+	findings := checkDuplicateSections(b, scope{
+		epicIDs:  map[string]bool{"PROJ-e1": true},
+		storyIDs: map[string]bool{"PROJ-s1": true},
+	})
+	if len(findings) != 1 || findings[0].IssueID != "PROJ-s1" {
+		t.Fatalf("expected only in-scope PROJ-s1 flagged, got %+v", findings)
+	}
+}
+
 func TestCheckDepCycles(t *testing.T) {
 	t.Run("two-node cycle reported once", func(t *testing.T) {
 		b := buildBacklog(t, map[string]string{
