@@ -1,6 +1,7 @@
 package providercli
 
 import (
+	"encoding/json"
 	"flag"
 	"io"
 	"os"
@@ -330,6 +331,88 @@ func TestRunIssuesBlocked_TextOutputWithoutFlag(t *testing.T) {
 	if !strings.Contains(trimmed, "VP-9") {
 		t.Errorf("expected blocked issue in text output, got %q", out)
 	}
+}
+
+func TestRunIssuesShow_JSONIncludesAllBlockedBy(t *testing.T) {
+	// nd's show --json surfaces an archived blocker in WasBlockedBy. The CLI's
+	// --json output must expose was_blocked_by plus the lifetime union under
+	// all_blocked_by so downstream consumers stop rediscovering it.
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "bin")
+	if err := os.MkdirAll(bin, 0o755); err != nil {
+		t.Fatalf("mkdir bin: %v", err)
+	}
+	script := `#!/bin/sh
+case "$*" in
+  *"show VP-1 --json"*)
+    printf '{"ID":"VP-1","Title":"Union story","Status":"open","BlockedBy":["VP-3"],"WasBlockedBy":["VP-2","VP-3"],"FilePath":"issues/VP-1.md"}'
+    exit 0
+    ;;
+esac
+echo "unexpected nd args: $*" >&2
+exit 42
+`
+	if err := os.WriteFile(filepath.Join(bin, "nd"), []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake nd: %v", err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	project := filepath.Join(dir, "project")
+	if err := os.MkdirAll(filepath.Join(project, ".paivot"), 0o755); err != nil {
+		t.Fatalf("mkdir project: %v", err)
+	}
+	config := "backlog:\n" +
+		"  primary:\n" +
+		"    adapter: nd\n" +
+		"    config:\n" +
+		"      vault: " + strconv.Quote(filepath.Join(dir, "vault")) + "\n"
+	if err := os.WriteFile(filepath.Join(project, ".paivot", "config.yaml"), []byte(config), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	// Keep the adapter pointed at the configured vault so the fake nd answers.
+	oldEnsure := ensureNDVault
+	ensureNDVault = func(string) (string, error) { return filepath.Join(dir, "vault"), nil }
+	t.Cleanup(func() { ensureNDVault = oldEnsure })
+
+	oldWD, _ := os.Getwd()
+	t.Cleanup(func() { _ = os.Chdir(oldWD) })
+	if err := os.Chdir(project); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+
+	out, err := captureStdout(t, func() error {
+		return RunIssues([]string{"show", "VP-1", "--json"})
+	})
+	if err != nil {
+		t.Fatalf("RunIssues show: %v", err)
+	}
+
+	var got struct {
+		WasBlockedBy []string `json:"was_blocked_by"`
+		AllBlockedBy []string `json:"all_blocked_by"`
+	}
+	if uerr := json.Unmarshal([]byte(out), &got); uerr != nil {
+		t.Fatalf("unmarshal show --json output %q: %v", out, uerr)
+	}
+	if want := []string{"VP-2", "VP-3"}; !equalStrings(got.WasBlockedBy, want) {
+		t.Errorf("was_blocked_by = %v, want %v", got.WasBlockedBy, want)
+	}
+	if want := []string{"VP-2", "VP-3"}; !equalStrings(got.AllBlockedBy, want) {
+		t.Errorf("all_blocked_by = %v, want %v (deduped + sorted union)", got.AllBlockedBy, want)
+	}
+}
+
+func equalStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func TestOpenBacklog_LoadsConfigOrDefaults(t *testing.T) {

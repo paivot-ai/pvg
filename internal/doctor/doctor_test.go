@@ -224,6 +224,160 @@ func TestCheckVaultDivergence_LocalModePasses(t *testing.T) {
 	}
 }
 
+// --- snapshot-drift ---
+
+func TestSnapshotDrift(t *testing.T) {
+	cases := []struct {
+		name        string
+		live        []string
+		snapshot    []string
+		wantMissing []string
+		wantExtra   []string
+	}{
+		{
+			name:     "in sync",
+			live:     []string{"TIX-1", "TIX-2"},
+			snapshot: []string{"TIX-2", "TIX-1"}, // order-independent
+		},
+		{
+			name:        "live has extra (mid-epic additions)",
+			live:        []string{"TIX-1", "TIX-2", "TIX-3"},
+			snapshot:    []string{"TIX-1"},
+			wantMissing: []string{"TIX-2", "TIX-3"},
+		},
+		{
+			name:      "snapshot has extra (deletions)",
+			live:      []string{"TIX-1"},
+			snapshot:  []string{"TIX-1", "TIX-2"},
+			wantExtra: []string{"TIX-2"},
+		},
+		{
+			name:        "both diverge",
+			live:        []string{"TIX-1", "TIX-3"},
+			snapshot:    []string{"TIX-1", "TIX-2"},
+			wantMissing: []string{"TIX-3"},
+			wantExtra:   []string{"TIX-2"},
+		},
+		{
+			name: "both empty",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			missing, extra := snapshotDrift(tc.live, tc.snapshot)
+			if !equalStrings(missing, tc.wantMissing) {
+				t.Errorf("missingFromSnapshot = %v, want %v", missing, tc.wantMissing)
+			}
+			if !equalStrings(extra, tc.wantExtra) {
+				t.Errorf("extraInSnapshot = %v, want %v", extra, tc.wantExtra)
+			}
+		})
+	}
+}
+
+// writeIssues creates issuesDir and an empty <id>.md for each id.
+func writeIssues(t *testing.T, issuesDir string, ids ...string) {
+	t.Helper()
+	if err := os.MkdirAll(issuesDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range ids {
+		if err := os.WriteFile(filepath.Join(issuesDir, id+".md"), []byte("status: open\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestCheckSnapshotDrift_DriftWarns(t *testing.T) {
+	root := t.TempDir()
+	// Live vault with 3 issues, snapshot with 2 of them -> 1 missing.
+	vaultDir := filepath.Join(root, ".vault")
+	if err := os.WriteFile(filepath.Join(mkdir(t, vaultDir), ".nd.yaml"), []byte("prefix: TIX\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeIssues(t, filepath.Join(vaultDir, "issues"), "TIX-1", "TIX-2", "TIX-3")
+	writeIssues(t, filepath.Join(root, ".vault", "backlog-snapshot", "issues"), "TIX-1", "TIX-2")
+
+	f := checkSnapshotDrift(root)
+	if f.Status != StatusWarn {
+		t.Fatalf("expected warn, got %s: %s", f.Status, f.Message)
+	}
+	for _, want := range []string{"1 live issue(s) not in .vault/backlog-snapshot", "created since last export", "pvg nd sync --commit"} {
+		if !strings.Contains(f.Message, want) {
+			t.Errorf("warn message missing %q in %q", want, f.Message)
+		}
+	}
+}
+
+func TestCheckSnapshotDrift_InSyncPasses(t *testing.T) {
+	root := t.TempDir()
+	vaultDir := filepath.Join(root, ".vault")
+	if err := os.WriteFile(filepath.Join(mkdir(t, vaultDir), ".nd.yaml"), []byte("prefix: TIX\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeIssues(t, filepath.Join(vaultDir, "issues"), "TIX-1", "TIX-2")
+	writeIssues(t, filepath.Join(root, ".vault", "backlog-snapshot", "issues"), "TIX-1", "TIX-2")
+
+	f := checkSnapshotDrift(root)
+	if f.Status != StatusPass {
+		t.Fatalf("expected pass, got %s: %s", f.Status, f.Message)
+	}
+}
+
+func TestCheckSnapshotDrift_NeverExportedWarns(t *testing.T) {
+	root := t.TempDir()
+	// Live vault populated, no snapshot dir at all.
+	vaultDir := filepath.Join(root, ".vault")
+	if err := os.WriteFile(filepath.Join(mkdir(t, vaultDir), ".nd.yaml"), []byte("prefix: TIX\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeIssues(t, filepath.Join(vaultDir, "issues"), "TIX-1")
+
+	f := checkSnapshotDrift(root)
+	if f.Status != StatusWarn {
+		t.Fatalf("expected warn, got %s: %s", f.Status, f.Message)
+	}
+	for _, want := range []string{"never been exported", "pvg nd sync --commit"} {
+		if !strings.Contains(f.Message, want) {
+			t.Errorf("warn message missing %q in %q", want, f.Message)
+		}
+	}
+}
+
+func TestCheckSnapshotDrift_NoSnapshotNoLiveSkips(t *testing.T) {
+	root := t.TempDir()
+	// .vault exists but is not initialized (no .nd.yaml) and no snapshot dir.
+	if err := os.MkdirAll(filepath.Join(root, ".vault"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	f := checkSnapshotDrift(root)
+	if f.Status != StatusSkip {
+		t.Fatalf("expected skip, got %s: %s", f.Status, f.Message)
+	}
+}
+
+// mkdir creates dir (and parents) and returns it for fluent chaining.
+func mkdir(t *testing.T, dir string) string {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+func equalStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
 // --- loop-state ---
 
 func TestCheckLoopState_NoState(t *testing.T) {
@@ -396,8 +550,8 @@ func TestRunAll_ProducesReport(t *testing.T) {
 	}
 
 	r := RunAll(root)
-	if len(r.Findings) != 8 {
-		t.Fatalf("expected 8 findings, got %d", len(r.Findings))
+	if len(r.Findings) != 9 {
+		t.Fatalf("expected 9 findings, got %d", len(r.Findings))
 	}
 
 	names := make(map[string]bool)
@@ -412,7 +566,7 @@ func TestRunAll_ProducesReport(t *testing.T) {
 		t.Logf("[%s] %s: %s", f.Status, f.Name, f.Message)
 	}
 
-	for _, expected := range []string{"vault-resolution", "nd-reachable", "shared-config-consistency", "nd-doctor", "loop-state", "worktree-hygiene", "code-quality-analyzers"} {
+	for _, expected := range []string{"vault-resolution", "nd-reachable", "shared-config-consistency", "snapshot-drift", "nd-doctor", "loop-state", "worktree-hygiene", "code-quality-analyzers"} {
 		if !names[expected] {
 			t.Errorf("missing check %q", expected)
 		}

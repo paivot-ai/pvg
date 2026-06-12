@@ -82,13 +82,21 @@ type Issue struct {
 	Parent    string   // parent epic / issue ID, "" if none
 	Children  []string // child issue IDs (set on read; ignored on write)
 	Blocks    []string // IDs that this issue blocks
-	BlockedBy []string // IDs that block this issue
-	Assignee  string
-	Project   string // project name or key (Linear/Jira/Asana have first-class projects)
-	Milestone string // milestone or sprint name within the project
-	CreatedAt time.Time
-	UpdatedAt time.Time
-	Extras    map[string]interface{} // adapter-native fields, opaque to callers
+	BlockedBy []string // IDs that currently block this issue (live edges)
+	// WasBlockedBy holds blockers nd archived out of BlockedBy when the blocking
+	// issue closed. nd records these as a distinct frontmatter key so the
+	// satisfied edge is not lost.
+	WasBlockedBy []string `json:"was_blocked_by"`
+	// AllBlockedBy is the lifetime union of BlockedBy and WasBlockedBy -- a
+	// satisfied blocker is still an edge of the planned DAG; consume this in
+	// lints/gates instead of rediscovering the union.
+	AllBlockedBy []string `json:"all_blocked_by"`
+	Assignee     string
+	Project      string // project name or key (Linear/Jira/Asana have first-class projects)
+	Milestone    string // milestone or sprint name within the project
+	CreatedAt    time.Time
+	UpdatedAt    time.Time
+	Extras       map[string]interface{} // adapter-native fields, opaque to callers
 }
 
 // Comment is a normalized comment on an issue.

@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os/exec"
+	"sort"
 	"strings"
 	"time"
 
@@ -470,22 +471,26 @@ func (f *flexTime) UnmarshalJSON(b []byte) error {
 
 // ndIssue mirrors the JSON shape emitted by `nd show --json` and `nd list --json`.
 type ndIssue struct {
-	ID         string   `json:"ID"`
-	Title      string   `json:"Title"`
-	Status     string   `json:"Status"`
-	Priority   int      `json:"Priority"`
-	Type       string   `json:"Type"`
-	Assignee   string   `json:"Assignee"`
-	Labels     []string `json:"Labels"`
-	Parent     string   `json:"Parent"`
-	Blocks     []string `json:"Blocks"`
-	BlockedBy  []string `json:"BlockedBy"`
-	Body       string   `json:"Body"`
-	CreatedAt  flexTime `json:"CreatedAt"`
-	UpdatedAt  flexTime `json:"UpdatedAt"`
-	ClosedAt   flexTime `json:"ClosedAt"`
-	DeferUntil string   `json:"DeferUntil"`
-	FilePath   string   `json:"FilePath"`
+	ID        string   `json:"ID"`
+	Title     string   `json:"Title"`
+	Status    string   `json:"Status"`
+	Priority  int      `json:"Priority"`
+	Type      string   `json:"Type"`
+	Assignee  string   `json:"Assignee"`
+	Labels    []string `json:"Labels"`
+	Parent    string   `json:"Parent"`
+	Blocks    []string `json:"Blocks"`
+	BlockedBy []string `json:"BlockedBy"`
+	// WasBlockedBy holds dependencies nd archived out of BlockedBy when the
+	// blocking issue closed. nd's --json surfaces this directly (verified
+	// against `nd show --json`), so no frontmatter fallback is needed.
+	WasBlockedBy []string `json:"WasBlockedBy"`
+	Body         string   `json:"Body"`
+	CreatedAt    flexTime `json:"CreatedAt"`
+	UpdatedAt    flexTime `json:"UpdatedAt"`
+	ClosedAt     flexTime `json:"ClosedAt"`
+	DeferUntil   string   `json:"DeferUntil"`
+	FilePath     string   `json:"FilePath"`
 }
 
 func decodeIssue(raw []byte) (providers.Issue, error) {
@@ -513,17 +518,19 @@ func decodeIssueList(raw []byte) ([]providers.Issue, error) {
 
 func ndToProvider(n ndIssue) providers.Issue {
 	return providers.Issue{
-		ID:        n.ID,
-		Title:     n.Title,
-		Body:      n.Body,
-		Status:    fromNdStatus(n.Status),
-		Labels:    n.Labels,
-		Parent:    n.Parent,
-		Blocks:    n.Blocks,
-		BlockedBy: n.BlockedBy,
-		Assignee:  n.Assignee,
-		CreatedAt: n.CreatedAt.Time,
-		UpdatedAt: n.UpdatedAt.Time,
+		ID:           n.ID,
+		Title:        n.Title,
+		Body:         n.Body,
+		Status:       fromNdStatus(n.Status),
+		Labels:       n.Labels,
+		Parent:       n.Parent,
+		Blocks:       n.Blocks,
+		BlockedBy:    n.BlockedBy,
+		WasBlockedBy: n.WasBlockedBy,
+		AllBlockedBy: unionSorted(n.BlockedBy, n.WasBlockedBy),
+		Assignee:     n.Assignee,
+		CreatedAt:    n.CreatedAt.Time,
+		UpdatedAt:    n.UpdatedAt.Time,
 		Extras: map[string]interface{}{
 			"priority":    n.Priority,
 			"type":        n.Type,
@@ -532,6 +539,31 @@ func ndToProvider(n ndIssue) providers.Issue {
 			"closed_at":   n.ClosedAt.Time,
 		},
 	}
+}
+
+// unionSorted returns the de-duplicated, sorted union of the given ID slices.
+// It is used to compute Issue.AllBlockedBy -- the lifetime set of blockers
+// (live BlockedBy plus nd-archived WasBlockedBy). Returns nil when empty so
+// the field round-trips to JSON null/absent like the other slice fields.
+func unionSorted(lists ...[]string) []string {
+	seen := make(map[string]struct{})
+	for _, list := range lists {
+		for _, id := range list {
+			if id == "" {
+				continue
+			}
+			seen[id] = struct{}{}
+		}
+	}
+	if len(seen) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(seen))
+	for id := range seen {
+		out = append(out, id)
+	}
+	sort.Strings(out)
+	return out
 }
 
 func fromNdStatus(s string) providers.Status {

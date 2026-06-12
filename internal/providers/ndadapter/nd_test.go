@@ -104,6 +104,45 @@ func TestDecodeIssue_TypicalShape(t *testing.T) {
 	}
 }
 
+func TestDecodeIssue_SurfacesWasBlockedByAndAllBlockedBy(t *testing.T) {
+	// nd archives a satisfied blocker out of BlockedBy into WasBlockedBy when
+	// the blocker closes. The normalized Issue must keep both, plus a deduped,
+	// sorted lifetime union in AllBlockedBy. VP-003 overlaps both lists.
+	raw := []byte(`{
+		"ID": "VP-001",
+		"Title": "Union issue",
+		"Status": "open",
+		"Blocks": ["VP-100"],
+		"BlockedBy": ["VP-003", "VP-005"],
+		"WasBlockedBy": ["VP-004", "VP-003", "VP-002"],
+		"FilePath": "issues/VP-001.md"
+	}`)
+	got, err := decodeIssue(raw)
+	if err != nil {
+		t.Fatalf("decodeIssue: %v", err)
+	}
+	if want := []string{"VP-003", "VP-005"}; !equalStrings(got.BlockedBy, want) {
+		t.Errorf("BlockedBy = %v, want %v", got.BlockedBy, want)
+	}
+	if want := []string{"VP-004", "VP-003", "VP-002"}; !equalStrings(got.WasBlockedBy, want) {
+		t.Errorf("WasBlockedBy = %v, want %v", got.WasBlockedBy, want)
+	}
+	wantUnion := []string{"VP-002", "VP-003", "VP-004", "VP-005"}
+	if !equalStrings(got.AllBlockedBy, wantUnion) {
+		t.Errorf("AllBlockedBy = %v, want %v (deduped + sorted)", got.AllBlockedBy, wantUnion)
+	}
+}
+
+func TestNdToProvider_AllBlockedByNilWhenNoEdges(t *testing.T) {
+	got := ndToProvider(ndIssue{ID: "VP-1"})
+	if got.AllBlockedBy != nil {
+		t.Errorf("AllBlockedBy = %v, want nil when no blockers", got.AllBlockedBy)
+	}
+	if got.WasBlockedBy != nil {
+		t.Errorf("WasBlockedBy = %v, want nil", got.WasBlockedBy)
+	}
+}
+
 func TestDecodeIssueList_NullIsEmpty(t *testing.T) {
 	got, err := decodeIssueList([]byte("null"))
 	if err != nil {
@@ -406,6 +445,18 @@ func initVault(t *testing.T) string {
 		t.Fatalf("nd init: %v: %s", err, out)
 	}
 	return dir
+}
+
+func equalStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func containsLabel(labels []string, want string) bool {

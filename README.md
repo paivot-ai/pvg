@@ -220,6 +220,27 @@ Backlog adapter is selected from `.paivot/config.yaml`; defaults to `nd` if
 absent. Backend-specific operations (nd cycles, nd stale, nd graph) remain
 under `pvg nd` -- see below.
 
+#### Dependency edges in `--json`
+
+`pvg issues show --json` and `pvg issues list --json` expose the issue's
+dependency edges. nd archives a satisfied dependency: when a blocking issue
+closes, the edge moves from `blocked_by` to `was_blocked_by` (and execution
+order is mirrored in `follows`). A satisfied edge is still an edge of the
+planned DAG, so two derived keys make the full history available:
+
+- `was_blocked_by` -- the archived (already-satisfied) blockers.
+- `all_blocked_by` -- the deduplicated, sorted **lifetime union** of
+  `blocked_by` + `was_blocked_by`. Lints and gates that reconcile a DAG across
+  an epic's lifetime should consume `all_blocked_by` rather than `blocked_by`
+  alone, otherwise they silently lose edges as blockers close (and they avoid
+  each re-deriving the union themselves).
+
+Naming quirk: the pre-existing edge fields serialize in CamelCase (`BlockedBy`,
+`Blocks`) because the legacy struct carried no json tags; the two new fields are
+snake_case (`was_blocked_by`, `all_blocked_by`). pvg's own backlog lints already
+union these internally, so pvg gates do not false-alarm when a blocker closes --
+the new keys are for downstream consumers.
+
 ### Notes abstraction
 
 ```bash
@@ -368,7 +389,14 @@ pvg doctor --json       # Structured output
 pvg doctor --fix        # Auto-repair fixable issues (prune worktrees, nd doctor --fix)
 ```
 
-Checks: vault-resolution, nd-reachable, shared-config-consistency, nd-doctor, loop-state, worktree-hygiene, code-quality-analyzers.
+Checks: vault-resolution, nd-reachable, shared-config-consistency, nd-doctor, loop-state, worktree-hygiene, code-quality-analyzers, snapshot-drift.
+
+`snapshot-drift` warns (never fails) when the live nd vault holds issues not
+present in `.vault/backlog-snapshot/` -- or when a live vault has never been
+exported. The committed snapshot is a point-in-time export, not the source of
+truth, so mid-epic story/bug creations are expected to lag it until the next
+export. Remedy: run `pvg nd sync --commit` on main. Non-snapshot projects are
+skipped, not nagged.
 
 ### Quality gates
 
