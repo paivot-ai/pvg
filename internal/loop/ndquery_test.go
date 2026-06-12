@@ -331,6 +331,74 @@ func TestQueryEpicCounts_AllOpenChildrenGraphBlockedYieldsBlockedOnly(t *testing
 	}
 }
 
+// Regression (double-dispatch hazard): nd ready includes unblocked
+// in_progress issues, so a claimed story (status in_progress, no special
+// labels) still shows up there. QueryReady must exclude it from the
+// dispatchable queue.
+func TestQueryReady_ExcludesClaimedInProgressStory(t *testing.T) {
+	withStubbedND(t, map[string]string{
+		"ready --sort priority --json": `[
+			{"ID":"PROJ-claimed","Title":"Claimed","Status":"in_progress","Labels":[]},
+			{"ID":"PROJ-open","Title":"Unclaimed","Status":"open","Labels":[]}
+		]`,
+	})
+
+	issues, err := QueryReady(t.TempDir())
+	if err != nil {
+		t.Fatalf("QueryReady() error: %v", err)
+	}
+	if len(issues) != 1 || issues[0].ID != "PROJ-open" {
+		t.Fatalf("expected only PROJ-open to remain ready, got %#v", issues)
+	}
+}
+
+// GREEN-path guard: a hard-tdd story whose RED was approved is returned to
+// status open by `pvg story approve-red`, so the in_progress filter must NOT
+// remove it from the ready queue.
+func TestQueryReady_KeepsRedApprovedOpenStory(t *testing.T) {
+	withStubbedND(t, map[string]string{
+		"ready --sort priority --json": `[{"ID":"PROJ-green","Title":"GREEN work","Status":"open","Labels":["hard-tdd","red-approved"]}]`,
+	})
+
+	issues, err := QueryReady(t.TempDir())
+	if err != nil {
+		t.Fatalf("QueryReady() error: %v", err)
+	}
+	if len(issues) != 1 || issues[0].ID != "PROJ-green" {
+		t.Fatalf("expected red-approved open story to stay ready, got %#v", issues)
+	}
+}
+
+// An in_progress story leaking through nd ready must not be double-counted:
+// it belongs in InProgress only, never in Ready.
+func TestQueryAllCounts_InProgressStoryDoesNotCountAsReady(t *testing.T) {
+	withStubbedND(t, map[string]string{
+		"ready --json": `[
+			{"ID":"PROJ-claimed","Status":"in_progress","Labels":[]},
+			{"ID":"PROJ-open","Status":"open","Labels":[]}
+		]`,
+		"list --status !closed --label delivered --limit 0 --json": `[]`,
+		"list --status in_progress --limit 0 --json":               `[{"ID":"PROJ-claimed","Status":"in_progress","Labels":[]}]`,
+		"list --status open --label rejected --limit 0 --json":     `[]`,
+		"blocked --json":                         `[]`,
+		"list --status !closed --limit 0 --json": `[{"ID":"PROJ-claimed","Status":"in_progress","Labels":[]},{"ID":"PROJ-open","Status":"open","Labels":[]}]`,
+	})
+
+	wc, err := queryAllCounts(t.TempDir())
+	if err != nil {
+		t.Fatalf("queryAllCounts() error: %v", err)
+	}
+	if wc.Ready != 1 {
+		t.Fatalf("expected Ready=1 (claimed story excluded), got %+v", wc)
+	}
+	if wc.InProgress != 1 {
+		t.Fatalf("expected InProgress=1, got %+v", wc)
+	}
+	if wc.Other != 0 {
+		t.Fatalf("expected Other=0, got %+v", wc)
+	}
+}
+
 func TestQueryWorkCounts_ReturnsErrorWhenNDQueriesFail(t *testing.T) {
 	oldExec := execCommand
 	execCommand = func(name string, args ...string) *exec.Cmd {

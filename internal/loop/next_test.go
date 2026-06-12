@@ -538,6 +538,33 @@ func TestEvaluateNext_EpicMode_OpenPlusDeliveredRoutesToPMReview(t *testing.T) {
 	}
 }
 
+// Regression (double-dispatch hazard): nd ready returns issues that are
+// "open OR in_progress with no open blockers", so a story the dispatcher just
+// claimed (status in_progress) still appears in nd ready. The loop must
+// filter it out and wait -- NOT return act/developer_new for the same story,
+// which would spawn a second developer onto the same story branch.
+func TestEvaluateNext_EpicMode_ClaimedInProgressStoryIsNotRedispatched(t *testing.T) {
+	withStubbedND(t, epicModeStubs(map[string]string{
+		"list --status !closed --label delivered --sort priority --limit 0 --json --parent PROJ-epic": `[]`,
+		"list --status open --label rejected --sort priority --limit 0 --json --parent PROJ-epic":     `[]`,
+		// Field report shape: a single hard-tdd story, claimed (in_progress),
+		// labels [hard-tdd] only, still present in nd ready output.
+		"ready --sort priority --json --parent PROJ-epic": `[{"ID":"PROJ-s1","Title":"Claimed RED work","Status":"in_progress","Priority":0,"Parent":"PROJ-epic","Labels":["hard-tdd"]}]`,
+		"children PROJ-epic --json":                       `[{"ID":"PROJ-s1","Status":"in_progress","Labels":["hard-tdd"]}]`,
+	}))
+
+	result, err := EvaluateNext(t.TempDir(), "epic", "PROJ-epic", 1)
+	if err != nil {
+		t.Fatalf("EvaluateNext() error: %v", err)
+	}
+	if result.Decision != "wait" {
+		t.Fatalf("expected wait (claimed story must leave the dispatch queue), got %s: %s", result.Decision, result.Reason)
+	}
+	if result.Next != nil {
+		t.Fatalf("expected no action for claimed story, got %#v", result.Next)
+	}
+}
+
 // Regression: after PM approves RED (red-approved label, back in ready), the
 // next developer dispatch must be the GREEN phase, and a GREEN delivery's PM
 // review must carry phase green.

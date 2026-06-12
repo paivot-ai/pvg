@@ -61,7 +61,10 @@ func queryAllCounts(projectRoot string) (WorkCounts, error) {
 	if err != nil {
 		return wc, fmt.Errorf("query ready work: %w", err)
 	}
-	readyIssues = filterOutLabel(readyIssues, "delivered")
+	// nd ready also returns unblocked in_progress issues. A claimed story
+	// (status in_progress) is already counted in InProgress below; leaving it
+	// here would double-count it as Ready.
+	readyIssues = filterOutStatus(filterOutLabel(readyIssues, "delivered"), "in_progress")
 	wc.Ready = len(readyIssues)
 
 	ipIssues, err := runND(projectRoot, "list", "--status", "in_progress", "--limit", "0", "--json")
@@ -256,7 +259,17 @@ func QueryRejected(projectRoot string, filters ...string) ([]ndIssue, error) {
 	return filterOutLabel(issues, "delivered"), nil
 }
 
-// QueryReady returns ready work, excluding rejected stories that must be reworked first.
+// QueryReady returns ready work, excluding rejected stories that must be
+// reworked first and in_progress stories that are already claimed.
+//
+// The in_progress filter exists because nd ready returns issues that are
+// "open OR in_progress with no open blockers": a story the dispatcher just
+// claimed (`pvg story claim` sets status in_progress) would otherwise stay in
+// the dispatch queue and the next `pvg loop next` would spawn a SECOND
+// developer onto the same story branch. Claiming is what closes that
+// double-dispatch window, so a claimed story must leave the ready queue.
+// Hard-TDD GREEN dispatch is unaffected: `pvg story approve-red` returns the
+// story to status open, so it re-enters the queue for the GREEN phase.
 func QueryReady(projectRoot string, filters ...string) ([]ndIssue, error) {
 	args := []string{"ready", "--sort", "priority", "--json"}
 	args = append(args, filters...)
@@ -264,7 +277,8 @@ func QueryReady(projectRoot string, filters ...string) ([]ndIssue, error) {
 	if err != nil {
 		return nil, err
 	}
-	return filterOutLabel(filterOutLabel(issues, "rejected"), "delivered"), nil
+	issues = filterOutLabel(filterOutLabel(issues, "rejected"), "delivered")
+	return filterOutStatus(issues, "in_progress"), nil
 }
 
 // hasLabel checks if a label exists in a slice (case-insensitive).
@@ -320,6 +334,22 @@ func filterOutLabel(issues []ndIssue, label string) []ndIssue {
 	filtered := make([]ndIssue, 0, len(issues))
 	for _, issue := range issues {
 		if hasLabel(issue.Labels, label) {
+			continue
+		}
+		filtered = append(filtered, issue)
+	}
+	return filtered
+}
+
+// filterOutStatus drops issues whose status matches (case-insensitive).
+func filterOutStatus(issues []ndIssue, status string) []ndIssue {
+	if len(issues) == 0 {
+		return nil
+	}
+
+	filtered := make([]ndIssue, 0, len(issues))
+	for _, issue := range issues {
+		if strings.EqualFold(issue.Status, status) {
 			continue
 		}
 		filtered = append(filtered, issue)
