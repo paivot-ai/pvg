@@ -604,6 +604,8 @@ func runStory(args []string) error {
 		return runStoryMerge(cwd, args[1:])
 	case "verify-delivery":
 		return runStoryVerifyDelivery(cwd, args[1:])
+	case "verify-tdd":
+		return runStoryVerifyTDD(cwd, args[1:])
 	case "help", "--help", "-h":
 		storyUsage()
 		return nil
@@ -624,7 +626,9 @@ Subcommands:
                                          Accept and close a story
   reject <story-id> [--feedback TEXT]    Reject a story back to open
   merge <story-id> [--base BRANCH]       Merge an accepted story branch
-  verify-delivery <story-id> [--json]    Check delivery proof completeness`)
+  verify-delivery <story-id> [--json]    Check delivery proof completeness
+  verify-tdd [--range A..B | --base REF] [--json]
+                                         Hard-TDD guard: fail if a non-RED, unauthorized commit edited tests`)
 }
 
 func runStoryAccept(cwd string, args []string) error {
@@ -755,6 +759,78 @@ func runStoryVerifyDelivery(cwd string, args []string) error {
 	}
 
 	if report.Failed > 0 {
+		return cliExit{code: 1}
+	}
+	return nil
+}
+
+func runStoryVerifyTDD(cwd string, args []string) error {
+	opts := story.VerifyTDDOptions{}
+	jsonOutput := false
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--range":
+			i++
+			if i >= len(args) {
+				return fmt.Errorf("--range requires a <base>..<tip> argument")
+			}
+			opts.Range = args[i]
+		case "--base":
+			i++
+			if i >= len(args) {
+				return fmt.Errorf("--base requires a ref argument")
+			}
+			opts.Base = args[i]
+		case "--test-glob":
+			i++
+			if i >= len(args) {
+				return fmt.Errorf("--test-glob requires a path-substring argument")
+			}
+			opts.TestGlobs = append(opts.TestGlobs, args[i])
+		case "--red-marker":
+			i++
+			if i >= len(args) {
+				return fmt.Errorf("--red-marker requires an argument")
+			}
+			opts.RedMarker = args[i]
+		case "--authz-marker":
+			i++
+			if i >= len(args) {
+				return fmt.Errorf("--authz-marker requires an argument")
+			}
+			opts.AuthzMarker = args[i]
+		case "--json":
+			jsonOutput = true
+		case "--help", "-h":
+			storyUsage()
+			return nil
+		default:
+			return fmt.Errorf("unknown flag %q for pvg story verify-tdd", args[i])
+		}
+	}
+	// Fall back to $TDD_BASE so CI can set the base branch via env.
+	if opts.Range == "" && opts.Base == "" {
+		opts.Base = os.Getenv("TDD_BASE")
+	}
+
+	// A resolution or git failure returns an error (loud, with guidance) --
+	// never a silent pass.
+	result, err := story.VerifyTDD(cwd, opts)
+	if err != nil {
+		return err
+	}
+
+	if jsonOutput {
+		data, mErr := json.MarshalIndent(result, "", "  ")
+		if mErr != nil {
+			return fmt.Errorf("marshal verify-tdd result: %w", mErr)
+		}
+		fmt.Println(string(data))
+	} else {
+		fmt.Print(result.FormatText())
+	}
+
+	if len(result.Violations) > 0 {
 		return cliExit{code: 1}
 	}
 	return nil
@@ -1080,7 +1156,22 @@ func loopNext(cwd string, args []string) error {
 			scopeSource = "loop_state"
 			activeLoop = true
 		} else {
-			mode = "all"
+			// No active loop state and no explicit --all/--epic flag. Refuse
+			// rather than silently widening to the global cross-epic queue:
+			// after a session or compaction restart drops the loop state, a
+			// silent fall-through to mode=all breaks epic containment without
+			// warning. The dispatcher must re-establish scope explicitly.
+			return printNextResult(loop.NoActiveLoopResult(scopeRoot), jsonOutput)
+		}
+	}
+
+	// Heal orphaned in_progress claims (dead sessions / cross-machine) before
+	// evaluating, so a mid-loop orphan with no developer worktree does not
+	// shadow real state and block dispatch until the next setup/recover.
+	// Breadcrumbs go to stderr to keep --json stdout clean.
+	if resets, rerr := loop.ReconcileOrphans(scopeRoot); rerr == nil {
+		for _, r := range resets {
+			fmt.Fprintf(os.Stderr, "[NEXT] Reset orphaned story %s to open (%s)\n", r.StoryID, r.Reason)
 		}
 	}
 
@@ -1091,6 +1182,39 @@ func loopNext(cwd string, args []string) error {
 	result.ActiveLoop = activeLoop
 	result.ScopeSource = scopeSource
 
+	// At epic close, refresh the tracked backlog snapshot from the live vault
+	// so the committed snapshot cannot silently drift. Export only (the
+	// dispatcher commits at the gate). Safe here because all stories in the
+	// epic are closed -- no developer worktree is mid-checkout. Best-effort
+	// and breadcrumbed to stderr so it never blocks or corrupts --json stdout.
+	if result.Decision == "epic_complete" {
+		if msg := autoExportSnapshot(scopeRoot); msg != "" {
+			fmt.Fprintln(os.Stderr, msg)
+		}
+	}
+
+	return printNextResult(result, jsonOutput)
+}
+
+// autoExportSnapshot refreshes the in-repo backlog snapshot from the live vault
+// (export only, never commit). Returns a one-line stderr breadcrumb, or "" when
+// the vault cannot be resolved -- best-effort, never fatal to the loop.
+func autoExportSnapshot(projectRoot string) string {
+	vaultDir, err := ndvault.Resolve(projectRoot)
+	if err != nil {
+		return ""
+	}
+	res, err := ndsync.Sync(projectRoot, vaultDir)
+	if err != nil {
+		return fmt.Sprintf("[NEXT] snapshot export skipped: %v", err)
+	}
+	return fmt.Sprintf("[NEXT] epic close: exported %d issue(s) to %s (commit at the gate with `pvg nd sync --commit`)",
+		res.Issues, res.SnapshotDir)
+}
+
+// printNextResult renders a loop-next decision as JSON (for host orchestrators)
+// or human-readable text.
+func printNextResult(result loop.NextResult, jsonOutput bool) error {
 	if jsonOutput {
 		data, err := json.MarshalIndent(result, "", "  ")
 		if err != nil {

@@ -449,6 +449,56 @@ func TestSafeRemove_RefusesCwdInsideRelativePath(t *testing.T) {
 	}
 }
 
+// TestSafeRemove_PermissionDeniedActionableError verifies that when git fails
+// to unlink root-owned container artifacts, SafeRemove returns an actionable
+// error naming the contract and remediation rather than the bare git error.
+func TestSafeRemove_PermissionDeniedActionableError(t *testing.T) {
+	root := t.TempDir()
+	if out, err := exec.Command("git", "init", root).CombinedOutput(); err != nil {
+		t.Skipf("git init failed (git not available?): %s", out)
+	}
+	wtPath := filepath.Join(root, ".claude", "worktrees", "dev-ROOTOWNED")
+	if err := os.MkdirAll(wtPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	origExec := execCommand
+	t.Cleanup(func() { execCommand = origExec })
+	// Mock the `git worktree remove` by re-exec'ing this test binary as a
+	// helper that emits a permission-denied error and exits non-zero. No
+	// shell is involved, so there is no command-injection surface.
+	execCommand = func(name string, args ...string) *exec.Cmd {
+		for i := 0; i+1 < len(args); i++ {
+			if args[i] == "worktree" && args[i+1] == "remove" {
+				c := exec.Command(os.Args[0], "-test.run=TestHelperGitPermDenied")
+				c.Env = append(os.Environ(), "GO_WANT_HELPER_PROCESS=1")
+				return c
+			}
+		}
+		return exec.Command("git", "--version")
+	}
+
+	result := SafeRemove(wtPath)
+	if result.Removed {
+		t.Fatalf("expected Removed=false on permission failure, got: %+v", result)
+	}
+	for _, want := range []string{"Permission denied", "root-owned", "chown", "worktree prune"} {
+		if !contains(result.Error, want) {
+			t.Errorf("error missing %q; got: %s", want, result.Error)
+		}
+	}
+}
+
+// TestHelperGitPermDenied is not a real test: when run as a helper subprocess
+// (GO_WANT_HELPER_PROCESS=1) it mimics git refusing to unlink root-owned files.
+func TestHelperGitPermDenied(t *testing.T) {
+	if os.Getenv("GO_WANT_HELPER_PROCESS") != "1" {
+		return
+	}
+	os.Stderr.WriteString("error: failed to delete: Permission denied\n")
+	os.Exit(1)
+}
+
 func contains(s, sub string) bool {
 	return len(s) >= len(sub) && (s == sub || len(s) > 0 && containsSubstring(s, sub))
 }

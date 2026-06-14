@@ -271,6 +271,56 @@ func TestCheckBash_AllowsProjectVaultVlt(t *testing.T) {
 	}
 }
 
+func TestCheckBash_AllowsProjectVaultGitAdd(t *testing.T) {
+	// Staging a tracked .vault/knowledge file is the sanctioned dispatcher
+	// path. Regression: "git aDD " contains "dd " which used to match the
+	// dd(1) write-pattern and falsely block this command.
+	input := HookInput{
+		ToolName:  "Bash",
+		ToolInput: ToolInput{Command: `git add .vault/knowledge/conventions/testing.md`},
+	}
+	result := Check(testVaultDir, testProjectRoot, input)
+	if !result.Allowed {
+		t.Errorf("expected git add of tracked .vault/knowledge file allowed, got blocked: %s", result.Reason)
+	}
+}
+
+func TestCheckBash_AllowsProjectVaultGitCommit(t *testing.T) {
+	input := HookInput{
+		ToolName:  "Bash",
+		ToolInput: ToolInput{Command: `git commit -m "sync knowledge"`},
+	}
+	result := Check(testVaultDir, testProjectRoot, input)
+	if !result.Allowed {
+		t.Errorf("expected git commit allowed, got blocked: %s", result.Reason)
+	}
+}
+
+func TestCheckBash_BlocksGitRedirectIntoProjectVault(t *testing.T) {
+	// A composed git command that pipes content INTO a vault file is not a
+	// bare invocation and must stay blocked.
+	input := HookInput{
+		ToolName:  "Bash",
+		ToolInput: ToolInput{Command: `git show HEAD:doc.md > .vault/knowledge/conventions/hack.md`},
+	}
+	result := Check(testVaultDir, testProjectRoot, input)
+	if result.Allowed {
+		t.Errorf("expected blocked for git redirect into .vault/knowledge/, got allowed")
+	}
+}
+
+func TestCheckBash_BlocksDdWriteIntoProjectVault(t *testing.T) {
+	// The precise dd(1) write-pattern must still catch a real dd write.
+	input := HookInput{
+		ToolName:  "Bash",
+		ToolInput: ToolInput{Command: `dd if=/dev/zero of=.vault/knowledge/conventions/test.md bs=1 count=1`},
+	}
+	result := Check(testVaultDir, testProjectRoot, input)
+	if result.Allowed {
+		t.Errorf("expected blocked for dd of=.vault/knowledge/, got allowed")
+	}
+}
+
 func TestCheckBash_BlocksProjectVaultRm(t *testing.T) {
 	input := HookInput{
 		ToolName:  "Bash",

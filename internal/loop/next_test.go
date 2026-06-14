@@ -10,6 +10,35 @@ import (
 )
 
 // ---------------------------------------------------------------------------
+// No-active-loop refusal: never silently widen to the global queue
+// ---------------------------------------------------------------------------
+
+func TestNoActiveLoopResult_Refuses(t *testing.T) {
+	// QueryWorkCounts errors on an empty temp dir; counts stay zero
+	// best-effort and the refusal decision is still returned.
+	result := NoActiveLoopResult(t.TempDir())
+
+	if result.Decision != DecisionNoActiveLoop {
+		t.Fatalf("expected decision %q, got %q", DecisionNoActiveLoop, result.Decision)
+	}
+	if result.ActiveLoop {
+		t.Error("expected ActiveLoop=false for a refusal")
+	}
+	if result.ScopeSource != "none" {
+		t.Errorf("expected ScopeSource=none, got %q", result.ScopeSource)
+	}
+	if result.Mode != "none" {
+		t.Errorf("expected Mode=none, got %q", result.Mode)
+	}
+	if result.Next != nil || len(result.Actions) != 0 {
+		t.Errorf("refusal must not select an action: Next=%v Actions=%v", result.Next, result.Actions)
+	}
+	if result.Reason == "" {
+		t.Error("refusal must explain how to re-establish scope")
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Epic mode: containment tests
 // ---------------------------------------------------------------------------
 

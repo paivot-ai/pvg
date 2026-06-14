@@ -50,6 +50,35 @@ type NextResult struct {
 // may select. Matches the light-stack total concurrency limit.
 const MaxWaveSize = 6
 
+// DecisionNoActiveLoop is returned by `pvg loop next` when there is no active
+// loop state and no explicit --all/--epic scope was given. Rather than silently
+// running the global cross-epic queue -- which breaks epic containment after a
+// session or compaction restart drops the loop state -- the loop refuses and
+// asks the dispatcher to re-establish scope explicitly. Silent loss of
+// containment is the dangerous failure mode; this makes it loud.
+const DecisionNoActiveLoop = "no_active_loop"
+
+// NoActiveLoopResult builds the refusal returned when no loop scope can be
+// resolved and none was passed explicitly. Global counts are populated
+// best-effort for situational awareness; no action is selected and the caller
+// is told how to re-establish scope.
+func NoActiveLoopResult(projectRoot string) NextResult {
+	result := NextResult{
+		Mode:        "none",
+		ActiveLoop:  false,
+		ScopeSource: "none",
+		Decision:    DecisionNoActiveLoop,
+		Reason: "No active loop and no explicit scope. Re-establish scope with " +
+			"`pvg loop setup --epic <EPIC_ID> --max <N>` and verify active_loop=true, " +
+			"or pass --all to run the global queue intentionally. Refusing to dispatch " +
+			"unscoped so epic containment cannot break silently.",
+	}
+	if counts, err := QueryWorkCounts(projectRoot, "all", ""); err == nil {
+		result.Counts = counts
+	}
+	return result
+}
+
 // EvaluateNext selects the next orchestration step without mutating state.
 // n is the maximum wave size: up to n distinct-story actions are selected
 // (values < 1 are treated as 1; values above MaxWaveSize are capped).

@@ -119,6 +119,7 @@ func SafeRemove(worktreePath string) RemoveResult {
 	// Remove the worktree using -C to run from the project root.
 	cmd := execCommand("git", "-C", root, "worktree", "remove", "--force", worktreePath)
 	if out, err := cmd.CombinedOutput(); err != nil {
+		outStr := strings.TrimSpace(string(out))
 		// If the directory doesn't exist, try prune instead (stale metadata).
 		if !isDir(worktreePath) {
 			pruneCmd := execCommand("git", "-C", root, "worktree", "prune")
@@ -128,7 +129,27 @@ func SafeRemove(worktreePath string) RemoveResult {
 				return result
 			}
 		}
-		result.Error = fmt.Sprintf("git worktree remove: %s (%v)", strings.TrimSpace(string(out)), err)
+		// A dev/PM toolchain CONTAINER that runs as root commonly leaves
+		// root-owned build artifacts (_build/, deps/, tmp/) inside the
+		// worktree. The unprivileged host process cannot unlink them, so git
+		// fails with a permission error. pvg cannot remove root-owned files
+		// without elevation, so name the contract and the remediation instead
+		// of echoing the bare git error.
+		if isPermissionDenied(outStr) {
+			result.Error = fmt.Sprintf(
+				"git worktree remove failed with a permission error on %q: %s\n"+
+					"Cause: root-owned files inside the worktree (a container running as "+
+					"root left build artifacts the host user cannot delete).\n"+
+					"Fix: re-own the artifacts, then remove and prune, e.g.\n"+
+					"  docker run --rm -v %q:/wt alpine:3 chown -R %d:%d /wt\n"+
+					"  rm -rf %q && git -C %q worktree prune",
+				worktreePath, outStr,
+				worktreePath, os.Getuid(), os.Getgid(),
+				worktreePath, root,
+			)
+			return result
+		}
+		result.Error = fmt.Sprintf("git worktree remove: %s (%v)", outStr, err)
 		return result
 	}
 	result.Removed = true
@@ -173,4 +194,11 @@ func isGitRoot(path string) bool {
 func isDir(path string) bool {
 	info, err := os.Stat(path)
 	return err == nil && info.IsDir()
+}
+
+// isPermissionDenied reports whether git's output indicates an unlink was
+// refused by the OS -- the signature of root-owned files inside the worktree
+// that an unprivileged process cannot delete.
+func isPermissionDenied(output string) bool {
+	return strings.Contains(strings.ToLower(output), "permission denied")
 }

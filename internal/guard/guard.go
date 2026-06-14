@@ -251,6 +251,17 @@ var interpreterPrefixes = []string{
 	"ruby -e", "node -e", "perl -e", "lua -e",
 }
 
+// vaultWritePatterns are command fragments that signal a write to a path. They
+// gate both the project-vault and issue-tracker bash guards. Each pattern must
+// be specific enough not to collide with unrelated tokens: in particular the
+// dd(1) patterns use "dd if="/"dd of=" rather than a bare "dd " because the
+// latter is a substring of "git aDD " and falsely blocks staging a tracked
+// .vault/knowledge file (see checkBashProjectVault's bare-git allowance).
+var vaultWritePatterns = []string{
+	"tee ", "cp ", "mv ", "cat >", "mkdir ", "rm ",
+	"sed -i", "perl -pi", "install ", "rsync ", "dd if=", "dd of=", "patch ",
+}
+
 // containsInterpreterWrite returns true if the command uses a scripting
 // interpreter and references a protected path (likely a file write).
 func containsInterpreterWrite(command, protectedPath string) bool {
@@ -317,6 +328,17 @@ func checkBashProjectVault(projectRoot, command string) Result {
 		return Result{Allowed: true}
 	}
 
+	// Staging or committing an already-written tracked file under
+	// .vault/knowledge/** is the sanctioned dispatcher path (piv-loop commits
+	// the knowledge tree on main at the nd-sync step). git never edits file
+	// CONTENT -- it version-controls bytes that already exist -- so a BARE git
+	// command is safe. isBareToolInvocation rejects shell composition, so a
+	// content-producing redirect like `git show HEAD:x > .vault/knowledge/y`
+	// is NOT bare and still falls through to the write/redirect checks below.
+	if isBareToolInvocation(trimmed, "git") {
+		return Result{Allowed: true}
+	}
+
 	vaultSegments := projectPathPrefixes(projectRoot, ".vault", "knowledge")
 	if !stringsContainAny(command, vaultSegments) && !strings.Contains(command, projectVaultRelPath) {
 		return Result{Allowed: true}
@@ -333,11 +355,7 @@ func checkBashProjectVault(projectRoot, command string) Result {
 	}
 
 	// Check write commands with protected path.
-	writePatterns := []string{
-		"tee ", "cp ", "mv ", "cat >", "mkdir ", "rm ",
-		"sed -i", "perl -pi", "install ", "rsync ", "dd ", "patch ",
-	}
-	for _, pattern := range writePatterns {
+	for _, pattern := range vaultWritePatterns {
 		if strings.Contains(command, pattern) &&
 			(stringsContainAny(command, vaultSegments) || strings.Contains(command, projectVaultRelPath)) {
 			return Result{Allowed: false, Reason: projectVaultBlockMsg}
@@ -406,11 +424,7 @@ func checkBashProjectIssues(projectRoot, command string) Result {
 	}
 
 	// Check write commands with protected path.
-	writePatterns := []string{
-		"tee ", "cp ", "mv ", "cat >", "mkdir ", "rm ",
-		"sed -i", "perl -pi", "install ", "rsync ", "dd ", "patch ",
-	}
-	for _, pattern := range writePatterns {
+	for _, pattern := range vaultWritePatterns {
 		if strings.Contains(command, pattern) &&
 			(stringsContainAny(command, issueSegments) || strings.Contains(command, projectIssuesRelPath)) {
 			return Result{Allowed: false, Reason: projectIssuesBlockMsg}
