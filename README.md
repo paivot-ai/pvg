@@ -8,7 +8,7 @@ Deterministic control plane for Paivot runtimes with external orchestration surf
 
 ```
 pvg init [--force]           # Scaffold .paivot/ provider config in a repo
-pvg issues <subcommand>      # Provider-abstracted backlog CLI (12 verbs)
+pvg issues <subcommand>      # Provider-abstracted backlog CLI (13 verbs)
 pvg notes <subcommand>       # Provider-abstracted notes CLI (7 verbs)
 pvg hook session-start       # Load vault context at session start
 pvg guard                    # PreToolUse scope guard (reads JSON from stdin)
@@ -108,8 +108,8 @@ its own binary with an atomic same-directory rename.
 ```yaml
 toolchain:
   channel: stable
-  pvg: v1.55.0
-  nd: v0.10.20
+  pvg: v1.57.1
+  nd: v0.10.21
   vlt: v0.11.0
 ```
 
@@ -123,7 +123,7 @@ manifest (`~/.cache/paivot/`, short timeout, silently skipped offline) and
 prints one line when the channel has a newer pvg than the one installed:
 
 ```
-paivot: channel stable has pvg v1.55.0 (installed 1.54.0) -- run pvg update
+paivot: channel stable has pvg v1.57.1 (installed 1.57.0) -- run pvg update
 ```
 
 Opt out per project with `pvg settings update.nudge=false`.
@@ -152,6 +152,9 @@ Called by Claude Code via `hooks.json`. Each reads JSON from stdin and writes st
 | `pvg hook user-prompt` | UserPromptSubmit | Auto-detect and manage dispatcher mode |
 | `pvg hook subagent-start` | SubagentStart | Track dispatcher-relevant agent activation (BA, Designer, Architect, Sr PM, Developer, PM) |
 | `pvg hook subagent-stop` | SubagentStop | Track dispatcher-relevant agent deactivation and emit mandatory CWD reset guidance for worktree agents |
+| `pvg hook memory-read` | PostToolUse | Intercept Read on memory files |
+| `pvg hook memory-write` | PostToolUse | Intercept Write on memory files |
+| `pvg hook memory-edit` | PostToolUse | Intercept Edit on memory files |
 
 ### Project scaffolding
 
@@ -268,6 +271,8 @@ pvg nd update PROJ-a1b --status=open     # Any nd command works without remember
 pvg nd dep add <issue> <depends-on>      # <issue> depends on <depends-on>
 pvg nd dep cycles                        # Detect circular dependencies
 pvg nd stale --days=14                   # Surface stale issues
+pvg nd sync [--commit|--out DIR]         # Export the live nd vault snapshot (--commit commits it)
+pvg nd restore [--force]                 # Restore the live nd vault from the committed snapshot
 ```
 
 `pvg nd` is a thin passthrough: it resolves the correct vault path and injects
@@ -293,11 +298,15 @@ Without this file, pvg always uses the local `.vault/` directory. Run `pvg docto
 ### Story helpers
 
 ```bash
+pvg story claim PROJ-a1b                 # Mark in_progress at dispatch (closes the duplicate-dispatch window)
 pvg story deliver PROJ-a1b
-pvg story accept PROJ-a1b --reason "Accepted: tests and AC matched"
+pvg story accept PROJ-a1b --reason "Accepted: tests and AC matched" [--next PROJ-c3d]
 pvg story reject PROJ-a1b --feedback "EXPECTED: ... DELIVERED: ... GAP: ... FIX: ..."
 pvg story verify-delivery PROJ-a1b
-pvg story merge PROJ-a1b
+pvg story merge PROJ-a1b [--base epic/EPIC-1]
+# Hard-TDD stories (label: hard-tdd):
+pvg story approve-red PROJ-a1b           # Approve the RED tests; return the story to the queue for GREEN
+pvg story verify-tdd --base <epic-branch> # Guard: fail if GREEN modified/deleted a RED test (additions allowed)
 ```
 
 These helpers centralize the common Paivot story transitions, delivery-proof checks, and merge path that used to live in shell scripts.
@@ -389,7 +398,7 @@ pvg doctor --json       # Structured output
 pvg doctor --fix        # Auto-repair fixable issues (prune worktrees, nd doctor --fix)
 ```
 
-Checks: vault-resolution, nd-reachable, shared-config-consistency, nd-doctor, loop-state, worktree-hygiene, code-quality-analyzers, snapshot-drift.
+Checks: vault-resolution, nd-reachable, shared-config-consistency, vault-divergence, nd-doctor, loop-state, worktree-hygiene, code-quality-analyzers, snapshot-drift.
 
 `snapshot-drift` warns (never fails) when the live nd vault holds issues not
 present in `.vault/backlog-snapshot/` -- or when a live vault has never been
@@ -401,8 +410,9 @@ skipped, not nagged.
 ### Quality gates
 
 ```bash
-pvg gates [path...]     # Metric quality gates on delivered code
-pvg gates --json        # Structured output
+pvg gates [path...]        # Metric quality gates on delivered code
+pvg gates --format json    # Structured output (default: text)
+pvg gates --changed <ref>  # Scope to files changed vs a git ref
 ```
 
 Measures cyclomatic complexity, copy-paste duplication, and file size against
@@ -414,6 +424,20 @@ light up the full gate on virtually any stack -- apt alone is not enough, only
 `radon` ships in the Ubuntu repos. See the analyzer matrix and full key
 reference in paivot-graph `docs/QUALITY_GATES.md`. `pvg doctor` reports which
 analyzers are present; `pvg setup` nudges you to install the missing ones.
+
+### Backlog, traceability, and source checks
+
+```bash
+pvg lint [--backlog] [--epic ID] [--json]                 # Backlog quality: id/heading collisions + structure
+pvg rtm [check] [--json]                                  # Requirement traceability matrix (D&F coverage)
+pvg verify [path...] [--format text|json] [--check-e2e]   # Scan source for stubs, thin files, TODO markers
+```
+
+`pvg verify` is the deterministic pre-delivery/PM check for incomplete code
+(stubs, `panic("todo")`, thin files, leftover TODOs); the PM-Acceptor runs it
+first, before any LLM review. `pvg lint` and `pvg rtm` validate the backlog
+itself -- id/heading collisions, structural integrity, and D&F requirement
+coverage.
 
 ### Dispatcher mode
 
@@ -454,6 +478,7 @@ pvg update                  # same engine, sans first-time PATH wiring
 pvg update --to <git-ref>   # converge to the manifest at a paivot-graph ref (rollback)
 pvg update --pin            # write the converged versions into .paivot/config.yaml
 pvg update --dry-run        # plan only
+pvg fetch-vlt-skill [--force] # install/update only the vlt skill from GitHub
 pvg fetch-tools [--force]   # deprecated alias: nd+vlt binaries and the vlt skill only
 ```
 
@@ -477,11 +502,21 @@ internal/
   channel/             Channel manifest fetch, validation, and the 24h nudge cache
   converge/            Convergence engine behind pvg setup / pvg update
   dispatcher/          Dispatcher mode state management (D&F + execution agent tracking)
+  doctor/              Diagnostic checks (vault, nd, worktree, analyzers, snapshot drift)
+  gates/               Metric quality gates (complexity, duplication, file size)
   governance/          Vault seeding with vlt lock
   guard/               Scope guard (system vault, project vault, dispatcher, FSM)
-  lifecycle/           Session hooks (start, pre-compact, stop, end, user-prompt, subagent)
+  lifecycle/           Session hooks (start, pre-compact, stop, end, user-prompt, subagent, memory)
+  lint/                Backlog quality checks (id/heading collisions + structure)
   loop/                Execution loop (setup, evaluate, cancel, snapshot, recover)
+  ndsync/              Live nd vault snapshot export / restore
+  ndvault/             Shared live nd vault resolution
+  paivotcfg/           .paivot/config.yaml provider configuration
+  providercli/         Provider-abstracted issues/notes CLI surface
+  providers/           Backlog/notes adapters (nd, linear, vlt, ...)
+  rtm/                 Requirement traceability matrix (D&F coverage)
   story/               Shared story transitions, delivery checks, merge path
+  verify/              Source scan for stubs, thin files, TODO markers
   worktree/            Safe worktree operations (CWD-independent removal)
   settings/            Project settings (YAML read/write)
   vaultcfg/            Vault discovery and configuration
