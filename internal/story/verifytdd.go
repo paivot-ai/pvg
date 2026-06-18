@@ -112,14 +112,23 @@ func VerifyTDD(projectRoot string, opts VerifyTDDOptions) (VerifyTDDResult, erro
 			continue
 		}
 
-		files, err := gitLines(projectRoot, "show", "--no-renames", "--name-only", "--format=", sha)
+		changes, err := gitNameStatus(projectRoot, sha)
 		if err != nil {
 			return result, fmt.Errorf("list files for %s: %w", sha, err)
 		}
 		var touched []string
-		for _, f := range files {
-			if matchesAnyGlob(f, opts.TestGlobs) {
-				touched = append(touched, f)
+		for _, ch := range changes {
+			// A newly ADDED test file is an allowed GREEN addition: it cannot
+			// weaken an existing RED test (which still runs and must pass), so
+			// the hard-TDD rule is "add new tests freely, never touch a RED
+			// test". Only edits and deletes touch the frozen RED set. Renames
+			// are disabled (--no-renames below), so a renamed RED test surfaces
+			// its delete side here and is still caught.
+			if ch.status == "A" {
+				continue
+			}
+			if matchesAnyGlob(ch.path, opts.TestGlobs) {
+				touched = append(touched, ch.path)
 			}
 		}
 		if len(touched) > 0 {
@@ -200,6 +209,38 @@ func gitLines(projectRoot string, args ...string) ([]string, error) {
 		}
 	}
 	return lines, nil
+}
+
+// fileChange pairs a file path with its single-character git change status
+// (A=added, M=modified, D=deleted).
+type fileChange struct {
+	status string
+	path   string
+}
+
+// gitNameStatus returns the per-file change status for a single commit. It uses
+// --no-renames so a rename never collapses into one R row: the old path shows as
+// a delete (a removal from the frozen RED set, which the guard must catch) and
+// the new path as a pure add (which a genuinely new test file also is). Paths
+// are tab-delimited from the status, so spaces in paths survive.
+func gitNameStatus(projectRoot, sha string) ([]fileChange, error) {
+	lines, err := gitLines(projectRoot, "show", "--no-renames", "--name-status", "--format=", sha)
+	if err != nil {
+		return nil, err
+	}
+	var changes []fileChange
+	for _, line := range lines {
+		parts := strings.SplitN(line, "\t", 2)
+		if len(parts) < 2 {
+			continue
+		}
+		status := strings.TrimSpace(parts[0])
+		if status == "" {
+			continue
+		}
+		changes = append(changes, fileChange{status: status[:1], path: parts[1]})
+	}
+	return changes, nil
 }
 
 func firstLine(s string) string {

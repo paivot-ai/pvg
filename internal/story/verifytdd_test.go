@@ -99,6 +99,54 @@ func TestVerifyTDD_AuthorizedTestEditPasses(t *testing.T) {
 	}
 }
 
+func TestVerifyTDD_AllowsNewTestFileInGreen(t *testing.T) {
+	root := tddRepo(t)
+	tddCommit(t, root, "foo.go", "package foo\n", "base")
+	base := tddHead(t, root)
+
+	// RED authors the original tests under the marker.
+	tddCommit(t, root, "foo_test.go", "package foo // red\n", "author failing tests\n\ntdd-red")
+	// GREEN implements...
+	tddCommit(t, root, "foo.go", "package foo\nvar X = 1\n", "implement X")
+	// ...and adds a NEW coverage test file with NO marker. This is an allowed
+	// GREEN addition -- it cannot weaken the frozen RED test, which still runs.
+	tddCommit(t, root, "extra_test.go", "package foo // extra coverage\n", "add coverage for X")
+
+	result, err := VerifyTDD(root, VerifyTDDOptions{Range: base + "..HEAD"})
+	if err != nil {
+		t.Fatalf("VerifyTDD: %v", err)
+	}
+	if len(result.Violations) != 0 {
+		t.Fatalf("adding a new test file in GREEN must pass unmarked, got violations: %+v", result.Violations)
+	}
+}
+
+func TestVerifyTDD_FlagsDeletedRedTest(t *testing.T) {
+	root := tddRepo(t)
+	tddCommit(t, root, "foo.go", "package foo\n", "base")
+	base := tddHead(t, root)
+	tddCommit(t, root, "foo_test.go", "package foo // red\n", "author tests\n\ntdd-red")
+
+	// GREEN deletes the RED test file with no marker -- removing a RED test is
+	// touching the frozen set and must be a violation, unlike a pure addition.
+	if err := os.Remove(filepath.Join(root, "foo_test.go")); err != nil {
+		t.Fatal(err)
+	}
+	tddGitRun(t, root, "add", "-A")
+	tddGitRun(t, root, "commit", "-m", "drop the inconvenient test")
+
+	result, err := VerifyTDD(root, VerifyTDDOptions{Range: base + "..HEAD"})
+	if err != nil {
+		t.Fatalf("VerifyTDD: %v", err)
+	}
+	if len(result.Violations) != 1 {
+		t.Fatalf("deleting a RED test must be a violation, got %d: %+v", len(result.Violations), result.Violations)
+	}
+	if len(result.Violations[0].Files) != 1 || result.Violations[0].Files[0] != "foo_test.go" {
+		t.Errorf("violation files = %v, want [foo_test.go]", result.Violations[0].Files)
+	}
+}
+
 func TestVerifyTDD_FailsLoudOnUnresolvableRange(t *testing.T) {
 	root := tddRepo(t)
 	tddCommit(t, root, "foo.go", "package foo\n", "only commit")
