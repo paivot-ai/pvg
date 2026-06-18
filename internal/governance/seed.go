@@ -97,7 +97,7 @@ func Seed(force bool, pluginDir string) error {
 	// 2. Seed skill content
 	fmt.Println()
 	fmt.Println("Seeding skill content...")
-	seedSkill(vaultDir, pluginDir, today, force, counters)
+	seedSkill(vaultDir, agentSrc, today, force, counters)
 
 	// 3. Seed behavioral notes
 	fmt.Println()
@@ -307,8 +307,11 @@ created: %s
 	writeNote(vaultDir, filepath.Join("methodology", vaultName+".md"), content, force, counters)
 }
 
-func seedSkill(vaultDir, pluginDir, today string, force bool, counters *Counters) {
-	skillSrc := filepath.Join(pluginDir, "skills", "vault-knowledge", "SKILL.md")
+func seedSkill(vaultDir, agentSrc, today string, force bool, counters *Counters) {
+	// Derive skills/ as a sibling of the resolved agents/ dir (agentSrc), not from
+	// the raw pluginDir. Standalone (no CLAUDE_PLUGIN_ROOT), pluginDir falls back to
+	// ~/go, so skills/ would resolve under ~/go instead of the plugin cache and warn.
+	skillSrc := filepath.Join(filepath.Dir(agentSrc), "skills", "vault-knowledge", "SKILL.md")
 	if _, err := os.Stat(skillSrc); err != nil {
 		fmt.Printf("  WARN: %s not found\n", skillSrc)
 		counters.Skipped++
@@ -546,13 +549,9 @@ When D&F is not needed (skip entirely):
 ## Related
 
 - [[paivot-graph]] -- Plugin that reads this note at session start
-- [[Vault as runtime not reference]] -- Why this content lives in the vault
 - [[Vault Knowledge Skill]] -- How to interact with the vault
 - [[Pre-Compact Checklist]] -- Companion checklist before compaction
 - [[Stop Capture Checklist]] -- Companion checklist before stopping
-- [[D&F Sequential With Alignment]] -- Why sequential over parallel
-- [[Subagent question relay via orchestrator]] -- The structural pattern
-- [[Subagents do not follow advisory instructions]] -- Why advisory does not work
 
 ## Changelog
 
