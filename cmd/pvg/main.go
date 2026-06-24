@@ -228,7 +228,7 @@ Commands:
   rtm [check] [--json]      Requirement Traceability Matrix (D&F coverage check)
   verify [path...] [flags]  Scan source files for stubs, thin files, TODOs
   gates [path...] [flags]   Metric quality gates (complexity, duplication, file size)
-  worktree remove <path>   Safely remove a worktree (CWD-independent) [alias: wt]
+  worktree remove <path> [--force]  Safely remove a Paivot-owned worktree (CWD-independent) [alias: wt]
   doctor [--json] [--fix]  Run diagnostic checks on vault configuration
   setup [--force]          One-command machine bootstrap: converge pvg/nd/vlt binaries,
                            the vlt skill, and the Claude plugins to the channel manifest
@@ -1422,9 +1422,13 @@ func loopRecover(cwd string, args []string) error {
 		fmt.Printf("  Stories reset:     %d\n", plan.Summary.StoriesReset)
 		fmt.Printf("  Stories delivered:  %d (needs PM review)\n", plan.Summary.StoriesDelivered)
 		fmt.Printf("  Orphan worktrees:  %d\n", plan.Summary.OrphanWorktrees)
+		fmt.Printf("  Foreign worktrees preserved: %d (not owned by Paivot -- left untouched)\n", plan.Summary.ForeignWorktreesPreserved)
 		for _, action := range plan.Actions {
 			if action.Kind == loop.ActionPreserveBranch {
-				fmt.Printf("    preserved: %s (%s)\n", action.BranchName, action.StoryID)
+				fmt.Printf("    preserved branch: %s (%s)\n", action.BranchName, action.StoryID)
+			}
+			if action.Kind == loop.ActionSkipForeignWorktree {
+				fmt.Printf("    preserved foreign worktree: %s (branch %s)\n", action.WorktreePath, action.BranchName)
 			}
 		}
 		if len(cfg.Warnings) > 0 {
@@ -1877,7 +1881,7 @@ stale worktree metadata after removal.`)
 		fmt.Fprintln(os.Stderr, `pvg worktree -- safe worktree operations
 
 Subcommands:
-  remove <path> [--json]   Remove a worktree safely`)
+  remove <path> [--json] [--force]   Remove a Paivot-owned worktree safely (--force overrides the ownership refusal)`)
 		return nil
 	default:
 		return fmt.Errorf("unknown worktree subcommand %q (try: remove)", args[0])
@@ -1886,17 +1890,29 @@ Subcommands:
 
 func worktreeRemove(args []string) error {
 	jsonOutput := false
+	force := false
 	var wtPath string
 
 	for _, arg := range args {
 		switch {
 		case arg == "--json":
 			jsonOutput = true
+		case arg == "--force":
+			force = true
 		case arg == "--help" || arg == "-h":
-			fmt.Fprintln(os.Stderr, `pvg worktree remove <path> [--json]
+			fmt.Fprintln(os.Stderr, `pvg worktree remove <path> [--json] [--force]
 
 Safely remove a git worktree. Resolves the project root from the worktree path
 itself (not from CWD), so the removal logic does not depend on the caller's shell location.
+
+Safe by default: REFUSES to remove a worktree outside Paivot's managed base
+(default .claude/worktrees/, overridable via the worktree.base setting).
+Worktrees created by other tools (e.g. .codex-worktrees/) or at external paths
+are never removed -- Paivot only deletes worktrees it owns.
+
+  --force   Emergency override of the ownership refusal. The CWD-inside guard
+            still applies, so it can never break your shell session. Use only to
+            clean up a worktree pvg created under a non-standard base.
 
 After removal, runs git worktree prune to clean up stale metadata.
 
@@ -1915,10 +1931,15 @@ already points at a deleted directory may fail before pvg can start.`)
 	}
 
 	if wtPath == "" {
-		return fmt.Errorf("missing worktree path (usage: pvg worktree remove <path>)")
+		return fmt.Errorf("missing worktree path (usage: pvg worktree remove <path> [--force])")
 	}
 
-	result := worktree.SafeRemove(wtPath)
+	var result worktree.RemoveResult
+	if force {
+		result = worktree.SafeRemoveForce(wtPath)
+	} else {
+		result = worktree.SafeRemove(wtPath)
+	}
 
 	if jsonOutput {
 		fmt.Println(result.FormatJSON())

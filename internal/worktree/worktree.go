@@ -68,10 +68,104 @@ func ResolveProjectRoot(worktreePath string) (string, error) {
 	return "", fmt.Errorf("cannot resolve project root from worktree path %q: no .claude/worktrees/ convention found and git resolution failed", abs)
 }
 
+// ownedWorktreeBase returns the directory under the project root that Paivot
+// owns for agent worktrees (the allowlist root). It honors the worktree.base
+// project setting (default ".claude/worktrees"), joined to root. SafeRemove
+// refuses to remove any worktree outside this base -- a worktree at another
+// path belongs to another tool and is not Paivot's to delete.
+func ownedWorktreeBase(root string) string {
+	rel := defaultWorktreeBaseRel
+	settingsPath := filepath.Join(root, ".vault", "knowledge", ".settings.yaml")
+	if v := strings.TrimSpace(loadSetting(settingsPath, worktreeBaseSettingKey)); v != "" {
+		rel = v
+	}
+	if filepath.IsAbs(rel) {
+		return filepath.Clean(rel)
+	}
+	return filepath.Clean(filepath.Join(root, rel))
+}
+
+const (
+	defaultWorktreeBaseRel = ".claude/worktrees"
+	worktreeBaseSettingKey = "worktree.base"
+)
+
+// loadSetting reads a single key from a ".settings.yaml"-style file (flat
+// "key: value" lines). Returns "" if the file or key is absent. Kept local to
+// avoid importing the settings package (which would create an import cycle:
+// settings has no dependency on worktree and must stay that way).
+func loadSetting(path, key string) string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		parts := strings.SplitN(line, ":", 2)
+		if len(parts) == 2 && strings.TrimSpace(parts[0]) == key {
+			return strings.TrimSpace(parts[1])
+		}
+	}
+	return ""
+}
+
+// isWithinBase reports whether path lies within base (equal to base, or under
+// it as base+separator). Both sides have symlinks resolved first so that, e.g.,
+// macOS's /var -> /private/var indirection (git reports resolved paths; the
+// configured base may not be) does not make an owned worktree look foreign.
+func isWithinBase(path, base string) bool {
+	clean := resolveSymlinks(filepath.Clean(path))
+	cleanBase := resolveSymlinks(filepath.Clean(base))
+	return clean == cleanBase || strings.HasPrefix(clean, cleanBase+string(filepath.Separator))
+}
+
+// resolveSymlinks returns the symlink-resolved form of path, or the longest
+// resolvable ancestor with the unresolved tail re-appended. It never fails:
+// a fully-unresolvable path is returned cleaned and unchanged.
+func resolveSymlinks(path string) string {
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		return resolved
+	}
+	dir := path
+	var tail []string
+	for {
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break
+		}
+		tail = append([]string{filepath.Base(dir)}, tail...)
+		if resolved, err := filepath.EvalSymlinks(parent); err == nil {
+			return filepath.Join(append([]string{resolved}, tail...)...)
+		}
+		dir = parent
+	}
+	return filepath.Clean(path)
+}
+
 // SafeRemove removes a git worktree by resolving the project root from the
 // worktree path, then running git operations from that root. It always prunes
 // stale worktree metadata afterward.
+//
+// SafeRemove is safe-by-default: it REFUSES to remove any worktree that is not
+// within Paivot's owned base (default <root>/.claude/worktrees). This is the
+// mechanism-layer defense that stops Paivot from ever deleting a worktree it
+// does not own. Use SafeRemoveForce for emergency removal that bypasses the
+// ownership refusal (the CWD-inside guard still applies).
 func SafeRemove(worktreePath string) RemoveResult {
+	return safeRemove(worktreePath, true)
+}
+
+// SafeRemoveForce removes a worktree WITHOUT the ownership refusal. It still
+// enforces the CWD-inside guard (which prevents session-fatal CWD corruption).
+// Intended only for emergency/manual use via `pvg worktree remove --force`.
+func SafeRemoveForce(worktreePath string) RemoveResult {
+	return safeRemove(worktreePath, false)
+}
+
+func safeRemove(worktreePath string, enforceOwnership bool) RemoveResult {
 	result := RemoveResult{
 		WorktreePath: worktreePath,
 	}
@@ -82,6 +176,29 @@ func SafeRemove(worktreePath string) RemoveResult {
 		return result
 	}
 	result.ProjectRoot = root
+
+	// Ownership guard (safe-by-default): refuse to remove a worktree that is
+	// not within Paivot's owned base. A worktree at any other path
+	// (.codex-worktrees/, an external absolute path, ...) belongs to another
+	// tool and removing it would destroy work Paivot does not own. This runs
+	// BEFORE any git remove call. SafeRemoveForce bypasses this guard.
+	if enforceOwnership {
+		base := ownedWorktreeBase(root)
+		// Resolve the target path against the project root so a relative path
+		// is compared correctly (do not use filepath.Abs, which would resolve
+		// against a possibly-drifted CWD).
+		target := filepath.Clean(worktreePath)
+		if !filepath.IsAbs(target) {
+			target = filepath.Clean(filepath.Join(root, worktreePath))
+		}
+		if !isWithinBase(target, base) {
+			result.Error = fmt.Sprintf(
+				"REFUSED: %q is outside Paivot's managed worktree base %q; refusing to remove a worktree Paivot does not own (use --force to override)",
+				worktreePath, base,
+			)
+			return result
+		}
+	}
 
 	// CWD safety guard: refuse to remove a worktree if the caller's CWD is
 	// inside it, because deleting the directory would permanently break the

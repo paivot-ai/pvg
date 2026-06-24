@@ -90,7 +90,9 @@ Before touching git or spawning new agents, run:
   pvg loop recover
 
 This command:
-1. Removes all orphaned agent worktrees and branches
+1. Removes ONLY Paivot-owned orphan worktrees (under .claude/worktrees/) and
+   their Paivot branches; worktrees created by other tools (e.g. .codex-worktrees/)
+   or at external paths are preserved, never touched
 2. Resets orphaned in-progress stories to open (delivered stories preserved)
 3. Outputs a recovery summary showing what is ready, delivered, and needs attention
 

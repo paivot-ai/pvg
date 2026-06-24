@@ -474,6 +474,10 @@ func checkAnalyzers() Finding {
 
 // --- fix implementations ---
 
+// fixStaleWorktrees prunes only git's stale worktree METADATA. `git worktree
+// prune` removes administrative entries for worktrees whose directories are
+// already gone -- it never deletes a live worktree directory and never touches
+// a foreign tool's worktree. Safe regardless of ownership; left as-is.
 func fixStaleWorktrees(projectRoot string) string {
 	cmd := execCommand("git", "worktree", "prune")
 	cmd.Dir = projectRoot
