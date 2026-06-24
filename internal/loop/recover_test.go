@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"reflect"
 	"testing"
+
+	"github.com/paivot-ai/pvg/internal/worktree"
 )
 
 func TestEvaluateRecover_EmptyConfig(t *testing.T) {
@@ -27,6 +29,7 @@ func TestEvaluateRecover_OrphanedStory(t *testing.T) {
 				NDLabels:     nil,
 				WorktreePath: "/project/.claude/worktrees/agent-a1b",
 				BranchName:   "worktree-agent-a1b",
+				Owned:        true,
 			},
 		},
 		InProgressIssues: []ndIssue{
@@ -63,6 +66,7 @@ func TestEvaluateRecover_DeliveredStory_PreservesBranch(t *testing.T) {
 				NDLabels:     []string{"delivered"},
 				WorktreePath: "/project/.claude/worktrees/agent-c3d",
 				BranchName:   "story/PROJ-c3d",
+				Owned:        true,
 			},
 		},
 		InProgressIssues: []ndIssue{
@@ -103,6 +107,7 @@ func TestEvaluateRecover_AcceptedStory_PreservesBranch(t *testing.T) {
 				NDLabels:     []string{"delivered"},
 				WorktreePath: "/project/.claude/worktrees/agent-c3d",
 				BranchName:   "story/PROJ-c3d",
+				Owned:        true,
 			},
 		},
 		InProgressIssues: []ndIssue{
@@ -125,6 +130,7 @@ func TestEvaluateRecover_OrphanWorktree_DeliveredStoryBranchPreserved(t *testing
 			{
 				Path:   "/project/.claude/worktrees/orphan-d4e",
 				Branch: "story/PROJ-d4e",
+				Owned:  true,
 			},
 		},
 		InProgressIssues: []ndIssue{
@@ -153,6 +159,7 @@ func TestEvaluateRecover_OrphanWorktree_NonDeliveredStoryBranchDeleted(t *testin
 			{
 				Path:   "/project/.claude/worktrees/orphan-d4e",
 				Branch: "story/PROJ-d4e",
+				Owned:  true,
 			},
 		},
 		InProgressIssues: []ndIssue{
@@ -177,6 +184,7 @@ func TestEvaluateRecover_PreservedBranchNotRedeletedByStaleOrPMLoops(t *testing.
 				NDLabels:     []string{"delivered"},
 				WorktreePath: "/project/.claude/worktrees/agent-c3d",
 				BranchName:   "worktree-agent-PROJ-c3d",
+				Owned:        true,
 			},
 		},
 		InProgressIssues: []ndIssue{
@@ -204,6 +212,7 @@ func TestEvaluateRecover_StoryClosedSinceSnapshot(t *testing.T) {
 				NDStatus:     "in_progress",
 				WorktreePath: "/project/.claude/worktrees/agent-e5f",
 				BranchName:   "worktree-agent-e5f",
+				Owned:        true,
 			},
 		},
 		// Story no longer in-progress in nd (was closed)
@@ -227,6 +236,7 @@ func TestEvaluateRecover_OrphanWorktree(t *testing.T) {
 			{
 				Path:   "/project/.claude/worktrees/orphan-123",
 				Branch: "worktree-orphan-123",
+				Owned:  true,
 			},
 		},
 	}
@@ -269,9 +279,9 @@ func TestEvaluateRecover_StoryWithNoWorktree(t *testing.T) {
 }
 
 func TestEvaluateRecover_MixedStories(t *testing.T) {
-	// Owned worktrees live under the Paivot base and use Paivot branch names so
-	// they are legitimately cleaned up. The trailing "/wt/orphan-xyz" entry is a
-	// FOREIGN worktree (outside the base) and MUST be preserved -- never removed,
+	// Owned worktrees carry Paivot's ownership marker (Owned:true) so they are
+	// legitimately cleaned up. The trailing "/wt/orphan-xyz" entry is a FOREIGN
+	// worktree (no marker, Owned:false) and MUST be preserved -- never removed,
 	// its branch never deleted.
 	cfg := RecoverConfig{
 		WorktreeBase: "/project/.claude/worktrees",
@@ -281,6 +291,7 @@ func TestEvaluateRecover_MixedStories(t *testing.T) {
 				NDStatus:     "in_progress",
 				WorktreePath: "/project/.claude/worktrees/agent-a1b",
 				BranchName:   "story/PROJ-a1b",
+				Owned:        true,
 			},
 			{
 				StoryID:      "PROJ-c3d",
@@ -288,20 +299,22 @@ func TestEvaluateRecover_MixedStories(t *testing.T) {
 				NDLabels:     []string{"delivered"},
 				WorktreePath: "/project/.claude/worktrees/agent-c3d",
 				BranchName:   "story/PROJ-c3d",
+				Owned:        true,
 			},
 			{
 				StoryID:      "PROJ-e5f",
 				NDStatus:     "in_progress",
 				WorktreePath: "/project/.claude/worktrees/agent-e5f",
 				BranchName:   "story/PROJ-e5f",
+				Owned:        true,
 			},
 		},
 		CurrentWorktrees: []Worktree{
-			{Path: "/project/.claude/worktrees/agent-a1b", Branch: "story/PROJ-a1b"},
-			{Path: "/project/.claude/worktrees/agent-c3d", Branch: "story/PROJ-c3d"},
-			{Path: "/project/.claude/worktrees/agent-e5f", Branch: "story/PROJ-e5f"},
-			// FOREIGN: outside the owned base -- must be preserved untouched.
-			{Path: "/wt/orphan-xyz", Branch: "orphan-xyz"},
+			{Path: "/project/.claude/worktrees/agent-a1b", Branch: "story/PROJ-a1b", Owned: true},
+			{Path: "/project/.claude/worktrees/agent-c3d", Branch: "story/PROJ-c3d", Owned: true},
+			{Path: "/project/.claude/worktrees/agent-e5f", Branch: "story/PROJ-e5f", Owned: true},
+			// FOREIGN: no ownership marker -- must be preserved untouched.
+			{Path: "/wt/orphan-xyz", Branch: "orphan-xyz", Owned: false},
 		},
 		InProgressIssues: []ndIssue{
 			{ID: "PROJ-a1b", Status: "in_progress"},
@@ -350,15 +363,15 @@ func TestEvaluateRecover_MixedStories(t *testing.T) {
 // --- Foreign-worktree preservation regressions (the data-loss bug) ---
 
 // TestEvaluateRecover_ForeignCodexWorktreePreserved verifies that a Codex
-// worktree under .codex-worktrees/ with an EMPTY snapshot is preserved: never
-// removed, its branch never deleted. This is the exact case the user hit --
-// Paivot deleting worktrees that were not his.
+// worktree under .codex-worktrees/ (no ownership marker, Owned:false) with an
+// EMPTY snapshot is preserved: never removed, its branch never deleted. This is
+// the exact case the user hit -- Paivot deleting worktrees that were not his.
 func TestEvaluateRecover_ForeignCodexWorktreePreserved(t *testing.T) {
 	cfg := RecoverConfig{
 		WorktreeBase: "/project/.claude/worktrees",
 		// No snapshot stories.
 		CurrentWorktrees: []Worktree{
-			{Path: "/project/.codex-worktrees/feature-x", Branch: "feature/x"},
+			{Path: "/project/.codex-worktrees/feature-x", Branch: "feature/x", Owned: false},
 		},
 	}
 
@@ -379,15 +392,57 @@ func TestEvaluateRecover_ForeignCodexWorktreePreserved(t *testing.T) {
 	assertNotContains(t, kinds, ActionDeleteBranch, "delete_branch")
 }
 
+// TestEvaluateRecover_UnmarkedWorktreeInsideClaudeBasePreserved is the DECISIVE
+// regression for marker-based ownership: a worktree whose path is UNDER
+// .claude/worktrees/ but which carries NO ownership marker (Owned:false -- a
+// concurrent NON-Paivot session ran `git worktree add .claude/worktrees/foo`)
+// must be PRESERVED. Path is no longer proof of ownership; only the marker is.
+// The worktree must not be removed and its branch must not be deleted.
+func TestEvaluateRecover_UnmarkedWorktreeInsideClaudeBasePreserved(t *testing.T) {
+	cfg := RecoverConfig{
+		WorktreeBase: "/project/.claude/worktrees",
+		CurrentWorktrees: []Worktree{
+			// INSIDE Paivot's base, on a Paivot-named branch, yet UNMARKED.
+			{Path: "/project/.claude/worktrees/foreign-session", Branch: "story/INTRUDER", Owned: false},
+		},
+	}
+
+	plan := EvaluateRecover(cfg)
+
+	if plan.Summary.ForeignWorktreesPreserved != 1 {
+		t.Errorf("expected 1 foreign worktree preserved, got %d", plan.Summary.ForeignWorktreesPreserved)
+	}
+	if plan.Summary.WorktreesRemoved != 0 {
+		t.Errorf("expected 0 worktrees removed, got %d", plan.Summary.WorktreesRemoved)
+	}
+	if plan.Summary.BranchesDeleted != 0 {
+		t.Errorf("expected 0 branches deleted, got %d", plan.Summary.BranchesDeleted)
+	}
+	kinds := actionKinds(plan.Actions)
+	assertContains(t, kinds, ActionSkipForeignWorktree, "skip_foreign_worktree")
+	assertNotContains(t, kinds, ActionRemoveWorktree, "remove_worktree")
+	assertNotContains(t, kinds, ActionDeleteBranch, "delete_branch")
+	// Belt-and-suspenders: the unmarked worktree/branch must never appear in a
+	// destructive action.
+	for _, a := range plan.Actions {
+		if a.Kind == ActionRemoveWorktree && a.WorktreePath == "/project/.claude/worktrees/foreign-session" {
+			t.Errorf("unmarked worktree inside .claude/worktrees/ must never be removed")
+		}
+		if a.Kind == ActionDeleteBranch && a.BranchName == "story/INTRUDER" {
+			t.Errorf("unmarked worktree's branch must never be deleted")
+		}
+	}
+}
+
 // TestEvaluateRecover_ForeignCodexWorktreeOnPaivotLikeBranch ensures that even
 // when a foreign worktree happens to be checked out on a Paivot-NAMED branch
-// (story/...), it is STILL preserved -- ownership is decided by the worktree
-// path, not the branch name. The branch must not be deleted either.
+// (story/...), it is STILL preserved -- ownership is decided by the marker, not
+// the branch name and not the path. The branch must not be deleted either.
 func TestEvaluateRecover_ForeignCodexWorktreeOnPaivotLikeBranch(t *testing.T) {
 	cfg := RecoverConfig{
 		WorktreeBase: "/project/.claude/worktrees",
 		CurrentWorktrees: []Worktree{
-			{Path: "/project/.codex-worktrees/feature-x", Branch: "story/PROJ-x"},
+			{Path: "/project/.codex-worktrees/feature-x", Branch: "story/PROJ-x", Owned: false},
 		},
 	}
 
@@ -431,8 +486,8 @@ func TestEvaluateRecover_NoSnapshot_OwnedRemovedForeignPreserved(t *testing.T) {
 	cfg := RecoverConfig{
 		WorktreeBase: "/project/.claude/worktrees",
 		CurrentWorktrees: []Worktree{
-			{Path: "/project/.claude/worktrees/dev-A", Branch: "story/A"},
-			{Path: "/project/.codex-worktrees/B", Branch: "feature/B"},
+			{Path: "/project/.claude/worktrees/dev-A", Branch: "story/A", Owned: true},
+			{Path: "/project/.codex-worktrees/B", Branch: "feature/B", Owned: false},
 		},
 		// story/A is NOT delivered in nd (no entry) -> branch cleanup applies.
 		InProgressIssues: nil,
@@ -469,7 +524,7 @@ func TestEvaluateRecover_OwnedWorktreeNonPaivotBranchPreserved(t *testing.T) {
 	cfg := RecoverConfig{
 		WorktreeBase: "/project/.claude/worktrees",
 		CurrentWorktrees: []Worktree{
-			{Path: "/project/.claude/worktrees/dev-Z", Branch: "feature/random"},
+			{Path: "/project/.claude/worktrees/dev-Z", Branch: "feature/random", Owned: true},
 		},
 	}
 
@@ -588,7 +643,7 @@ func TestEvaluateRecover_StaleBranchDeduplication(t *testing.T) {
 	cfg := RecoverConfig{
 		WorktreeBase: "/project/.claude/worktrees",
 		CurrentWorktrees: []Worktree{
-			{Path: "/project/.claude/worktrees/agent-abc", Branch: "worktree-agent-abc"},
+			{Path: "/project/.claude/worktrees/agent-abc", Branch: "worktree-agent-abc", Owned: true},
 		},
 		StaleBranches: []string{
 			"worktree-agent-abc", // same as orphan worktree branch
@@ -703,11 +758,13 @@ func TestExecuteRecover_SkipForeignWorktreeIsNoOp(t *testing.T) {
 
 // TestRecover_Integration_PreservesForeignWorktree is the highest-value
 // regression: it builds a REAL git repo with both a Paivot-owned worktree
-// (.claude/worktrees/dev-X on story/X) and a foreign worktree
-// (.codex-worktrees/foreign on feature/foreign), runs the full
-// BuildRecoverConfig -> EvaluateRecover -> ExecuteRecover pipeline, and asserts
-// the foreign worktree directory and its branch SURVIVE while the owned one is
-// removed.
+// (.claude/worktrees/dev-X on story/X, created via worktree.Add so it carries
+// the ownership marker) and an UNMARKED worktree (.claude/worktrees/foreign-session
+// on feature/foreign, created via RAW `git worktree add` -- a concurrent
+// non-Paivot session). It runs the full BuildRecoverConfig -> EvaluateRecover ->
+// ExecuteRecover pipeline and asserts the unmarked worktree directory and its
+// branch SURVIVE while the marked one is removed. Note the unmarked worktree
+// lives INSIDE .claude/worktrees/ -- proving ownership is the marker, not path.
 func TestRecover_Integration_PreservesForeignWorktree(t *testing.T) {
 	root := t.TempDir()
 
@@ -730,21 +787,28 @@ func TestRecover_Integration_PreservesForeignWorktree(t *testing.T) {
 	}
 	run("-C", root, "commit", "--allow-empty", "-m", "init")
 
-	// Owned worktree: .claude/worktrees/dev-X on story/X
+	// Owned worktree: .claude/worktrees/dev-X on story/X, created via worktree.Add
+	// so it carries the ownership marker.
 	run("-C", root, "branch", "story/X")
 	ownedWT := filepath.Join(root, ".claude", "worktrees", "dev-X")
 	if err := os.MkdirAll(filepath.Dir(ownedWT), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	run("-C", root, "worktree", "add", ownedWT, "story/X")
-
-	// Foreign worktree: .codex-worktrees/foreign on feature/foreign
-	run("-C", root, "branch", "feature/foreign")
-	foreignWT := filepath.Join(root, ".codex-worktrees", "foreign")
-	if err := os.MkdirAll(filepath.Dir(foreignWT), 0o755); err != nil {
-		t.Fatal(err)
+	if res := worktree.Add(root, ownedWT, "story/X", "X"); res.Error != "" {
+		t.Fatalf("worktree.Add owned worktree failed: %s", res.Error)
 	}
+	if !worktree.IsPaivotOwned(ownedWT) {
+		t.Fatalf("owned worktree is not marked after worktree.Add")
+	}
+
+	// UNMARKED worktree INSIDE .claude/worktrees/: created with RAW git (a
+	// concurrent non-Paivot session) so it has NO ownership marker.
+	run("-C", root, "branch", "feature/foreign")
+	foreignWT := filepath.Join(root, ".claude", "worktrees", "foreign-session")
 	run("-C", root, "worktree", "add", foreignWT, "feature/foreign")
+	if worktree.IsPaivotOwned(foreignWT) {
+		t.Fatalf("raw `git worktree add` worktree must NOT be marked")
+	}
 
 	// Sanity: both worktrees exist before recovery.
 	if _, err := os.Stat(ownedWT); err != nil {

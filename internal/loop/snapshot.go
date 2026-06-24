@@ -13,12 +13,25 @@ import (
 const snapshotFile = ".piv-loop-snapshot.json"
 
 // Worktree represents a single git worktree parsed from porcelain output.
+//
+// Owned records whether the worktree carries Paivot's ownership marker
+// (worktree.IsPaivotOwned). It is resolved in BuildRecoverConfig (I/O), NOT in
+// the pure EvaluateRecover. Ownership is the SOLE license to remove a worktree
+// or delete its branch: an unmarked worktree is foreign and must be preserved,
+// regardless of its path (so a foreign worktree inside .claude/worktrees/ is
+// still preserved) or branch name.
 type Worktree struct {
 	Path   string `json:"path"`
 	Branch string `json:"branch"`
+	Owned  bool   `json:"owned"`
 }
 
 // SnapshotEntry records the state of one story at snapshot time.
+//
+// Owned is an eval-time field (json:"-" -- never persisted to the snapshot
+// file). BuildRecoverConfig resolves it from the worktree's ownership marker so
+// the pure EvaluateRecover can treat an unmarked snapshot worktree as
+// foreign/preserved without doing any I/O itself.
 type SnapshotEntry struct {
 	StoryID      string   `json:"story_id"`
 	NDStatus     string   `json:"nd_status"`
@@ -26,6 +39,7 @@ type SnapshotEntry struct {
 	AgentType    string   `json:"agent_type,omitempty"`
 	WorktreePath string   `json:"worktree_path,omitempty"`
 	BranchName   string   `json:"branch_name,omitempty"`
+	Owned        bool     `json:"-"`
 }
 
 // Snapshot is the full checkpoint written before compaction or context loss.

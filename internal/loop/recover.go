@@ -23,9 +23,11 @@ const (
 	// branch holds delivered-but-unmerged work and must NOT be deleted.
 	ActionPreserveBranch ActionKind = "preserve_branch"
 	// ActionSkipForeignWorktree is informational (no-op in ExecuteRecover): the
-	// worktree lives OUTSIDE Paivot's owned base (e.g. .codex-worktrees/, an
-	// external absolute path), so Paivot does not own it and must NEVER remove
-	// it or delete its branch. Surfaced so the operator can see it was preserved.
+	// worktree carries NO Paivot ownership marker (it was not created by
+	// `pvg worktree add`), so Paivot does not own it and must NEVER remove it or
+	// delete its branch. This holds regardless of path -- including a foreign
+	// worktree inside .claude/worktrees/ created by a concurrent non-Paivot
+	// session. Surfaced so the operator can see it was preserved.
 	ActionSkipForeignWorktree ActionKind = "skip_foreign_worktree"
 )
 
@@ -47,14 +49,19 @@ func isPaivotBranch(branch string) bool {
 }
 
 // isOwnedWorktreePath reports whether worktree path `path` lies within Paivot's
-// owned base directory `base`. Ownership is the ONLY license to remove a
-// worktree or delete its branch: anything outside the owned base is foreign and
-// must be left untouched.
+// owned base directory `base`.
+//
+// DEPRECATED as the ownership authority: ownership is now decided by the
+// per-worktree marker (worktree.IsPaivotOwned, resolved into the Owned flag),
+// NOT by path. This helper is retained only as a path-segment utility and must
+// NOT gate worktree removal or branch deletion -- a path under the base is no
+// longer proof of ownership (a concurrent non-Paivot session can create an
+// unmarked worktree inside .claude/worktrees/).
 //
 // If base is empty, it falls back to detecting the Paivot path segment
-// <sep>.claude<sep>worktrees<sep> anywhere in the path (mirrors Strategy 1 in
-// worktree.ResolveProjectRoot). Comparison is done on filepath.Clean'd paths:
-// the path must equal base exactly or sit under it as base+separator prefix.
+// <sep>.claude<sep>worktrees<sep> anywhere in the path. Comparison is done on
+// filepath.Clean'd paths: the path must equal base exactly or sit under it as
+// base+separator prefix.
 func isOwnedWorktreePath(path, base string) bool {
 	if path == "" {
 		return false
@@ -164,19 +171,21 @@ func EvaluateRecover(cfg RecoverConfig) RecoverPlan {
 
 	// Process snapshot stories
 	for _, entry := range cfg.SnapshotStories {
-		// Worktree cleanup -- ONLY if Paivot owns the worktree path. A snapshot
-		// entry could (in a corrupt/stale snapshot, or a misconfigured base)
-		// point at a worktree outside the owned base; removing it would destroy
-		// a worktree Paivot does not own. Surface it as preserved and skip BOTH
-		// the worktree removal and the branch deletion below.
+		// Worktree cleanup -- ONLY if Paivot owns the worktree (it carries
+		// Paivot's ownership marker, resolved into entry.Owned by
+		// BuildRecoverConfig). A snapshot entry could point at a worktree that a
+		// concurrent non-Paivot session created (no marker, possibly even inside
+		// .claude/worktrees/); removing it would destroy a worktree Paivot does
+		// not own. Surface it as preserved and skip BOTH the worktree removal and
+		// the branch deletion below.
 		if entry.WorktreePath != "" {
-			if !isOwnedWorktreePath(entry.WorktreePath, cfg.WorktreeBase) {
+			if !entry.Owned {
 				plan.Actions = append(plan.Actions, RecoverAction{
 					Kind:         ActionSkipForeignWorktree,
 					StoryID:      entry.StoryID,
 					WorktreePath: entry.WorktreePath,
 					BranchName:   entry.BranchName,
-					Reason:       "worktree is outside Paivot's owned base -- not owned by Paivot, preserved (no removal, no branch deletion)",
+					Reason:       "worktree has no Paivot ownership marker -- not owned by Paivot, preserved (no removal, no branch deletion)",
 				})
 				plan.Summary.ForeignWorktreesPreserved++
 				accountedWorktrees[entry.WorktreePath] = true
@@ -236,16 +245,18 @@ func EvaluateRecover(cfg RecoverConfig) RecoverPlan {
 		}
 
 		// Ownership gate: Paivot may remove a worktree (and delete its branch)
-		// ONLY when the worktree lives inside its owned base. A worktree at any
-		// other path -- .codex-worktrees/, .opencode-worktrees/, an external
-		// absolute path -- belongs to another tool and is left COMPLETELY
-		// untouched: no removal, no branch deletion, just an informational note.
-		if !isOwnedWorktreePath(wt.Path, cfg.WorktreeBase) {
+		// ONLY when the worktree carries Paivot's ownership marker (resolved into
+		// wt.Owned by BuildRecoverConfig). A worktree without the marker --
+		// created by another tool (.codex-worktrees/, an external absolute path)
+		// OR by a concurrent non-Paivot session even inside .claude/worktrees/ --
+		// is left COMPLETELY untouched: no removal, no branch deletion, just an
+		// informational note.
+		if !wt.Owned {
 			plan.Actions = append(plan.Actions, RecoverAction{
 				Kind:         ActionSkipForeignWorktree,
 				WorktreePath: wt.Path,
 				BranchName:   wt.Branch,
-				Reason:       "foreign worktree not under Paivot's owned base -- preserved (no removal, no branch deletion)",
+				Reason:       "worktree has no Paivot ownership marker -- preserved (no removal, no branch deletion)",
 			})
 			plan.Summary.ForeignWorktreesPreserved++
 			continue
@@ -429,12 +440,27 @@ func BuildRecoverConfig(projectRoot string) (RecoverConfig, error) {
 	snap, err := ReadSnapshot(projectRoot)
 	if err == nil && snap != nil {
 		cfg.SnapshotStories = snap.Stories
+		// Resolve ownership (I/O) for each snapshot worktree so the pure
+		// EvaluateRecover can treat an unmarked snapshot worktree as
+		// foreign/preserved without doing any I/O itself.
+		for i := range cfg.SnapshotStories {
+			if path := cfg.SnapshotStories[i].WorktreePath; path != "" {
+				cfg.SnapshotStories[i].Owned = worktree.IsPaivotOwned(path)
+			}
+		}
 	}
 
 	// List current worktrees
 	worktrees, err := ListWorktrees(projectRoot)
 	if err != nil {
 		return cfg, fmt.Errorf("list worktrees: %w", err)
+	}
+	// Resolve ownership (I/O) for every current worktree: a worktree is owned
+	// IFF it carries Paivot's ownership marker (written only by `pvg worktree
+	// add`). Unmarked worktrees -- including any a concurrent non-Paivot session
+	// created inside .claude/worktrees/ -- are foreign and must be preserved.
+	for i := range worktrees {
+		worktrees[i].Owned = worktree.IsPaivotOwned(worktrees[i].Path)
 	}
 	cfg.CurrentWorktrees = worktrees
 

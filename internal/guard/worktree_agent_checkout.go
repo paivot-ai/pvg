@@ -14,7 +14,7 @@ var worktreeAgentCheckoutRe = regexp.MustCompile(
 const worktreeAgentCheckoutBlockMsg = "BLOCKED: Dispatcher mode is active and this command would check out a worktree-agent-* branch on the shared HEAD.\n\n" +
 	"worktree-agent-* branches are Claude Code isolation branches. Checking one out in the parent repository can reset another Paivot session's HEAD and hide in-flight edits.\n\n" +
 	"Use dispatcher-managed worktrees instead:\n" +
-	"  git worktree add .claude/worktrees/dev-<STORY_ID> story/<STORY_ID>\n\n" +
+	"  pvg worktree add .claude/worktrees/dev-<STORY_ID> story/<STORY_ID>  # stamps the ownership marker\n\n" +
 	"If you are cleaning stale isolation branches, delete them with git branch -D or git push --delete; do not check them out."
 
 // CheckWorktreeAgentCheckout blocks shared-HEAD checkout/switch operations to

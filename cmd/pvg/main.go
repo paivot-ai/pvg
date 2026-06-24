@@ -26,6 +26,7 @@
 //	pvg loop next --json         # Select the next orchestration action
 //	pvg loop snapshot            # Checkpoint agent/worktree state
 //	pvg loop recover             # Clean up after context loss
+//	pvg worktree add <path> <branch>  # Create a worktree + stamp ownership marker
 //	pvg worktree remove <path>   # Safely remove a worktree (CWD-independent)
 //	pvg setup                    # One-command machine bootstrap (channel-pinned)
 //	pvg update [--to REF] [--pin] [--dry-run] # Converge toolchain to the channel manifest
@@ -228,6 +229,7 @@ Commands:
   rtm [check] [--json]      Requirement Traceability Matrix (D&F coverage check)
   verify [path...] [flags]  Scan source files for stubs, thin files, TODOs
   gates [path...] [flags]   Metric quality gates (complexity, duplication, file size)
+  worktree add <path> <branch>      Create a worktree + stamp Paivot ownership marker [alias: wt]
   worktree remove <path> [--force]  Safely remove a Paivot-owned worktree (CWD-independent) [alias: wt]
   doctor [--json] [--fix]  Run diagnostic checks on vault configuration
   setup [--force]          One-command machine bootstrap: converge pvg/nd/vlt binaries,
@@ -1863,29 +1865,114 @@ func changedFiles(ref string) ([]string, error) {
 
 func runWorktree(args []string) error {
 	if len(args) < 1 {
-		fmt.Fprintln(os.Stderr, `pvg worktree -- safe worktree operations
-
-Subcommands:
-  remove <path> [--json]   Remove a worktree safely (resolves project root from path, not CWD)
-
-The remove command uses the worktree path to find the project root, so it works
-without relying on the caller's current shell location once the command starts. It always prunes
-stale worktree metadata after removal.`)
+		fmt.Fprintln(os.Stderr, worktreeUsage)
 		return cliExit{code: 1}
 	}
 
 	switch args[0] {
+	case "add":
+		return worktreeAdd(args[1:])
 	case "remove":
 		return worktreeRemove(args[1:])
 	case "--help", "-h":
-		fmt.Fprintln(os.Stderr, `pvg worktree -- safe worktree operations
-
-Subcommands:
-  remove <path> [--json] [--force]   Remove a Paivot-owned worktree safely (--force overrides the ownership refusal)`)
+		fmt.Fprintln(os.Stderr, worktreeUsage)
 		return nil
 	default:
-		return fmt.Errorf("unknown worktree subcommand %q (try: remove)", args[0])
+		return fmt.Errorf("unknown worktree subcommand %q (try: add, remove)", args[0])
 	}
+}
+
+const worktreeUsage = `pvg worktree -- safe worktree operations
+
+Subcommands:
+  add <path> <branch> [--story <id>] [--json]   Create a worktree and stamp Paivot's ownership marker
+  remove <path> [--json] [--force]              Remove a Paivot-owned worktree (--force overrides the ownership refusal)
+
+add creates the worktree via git and writes a 'paivot-owned' marker into its git
+admin dir. ONLY worktrees created this way carry the marker, and recover/remove
+remove ONLY marked worktrees -- so a concurrent NON-Paivot session that creates a
+worktree (even under .claude/worktrees/) is never touched.
+
+remove resolves the project root from the worktree path (not CWD) and refuses to
+remove a worktree that has no ownership marker. It always prunes stale metadata.`
+
+func worktreeAdd(args []string) error {
+	jsonOutput := false
+	storyID := ""
+	var positional []string
+
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		switch {
+		case arg == "--json":
+			jsonOutput = true
+		case arg == "--story":
+			if i+1 >= len(args) {
+				return fmt.Errorf("--story requires a value")
+			}
+			i++
+			storyID = args[i]
+		case strings.HasPrefix(arg, "--story="):
+			storyID = strings.TrimPrefix(arg, "--story=")
+		case arg == "--help" || arg == "-h":
+			fmt.Fprintln(os.Stderr, `pvg worktree add <path> <branch> [--story <id>] [--json]
+
+Create a git worktree at <path> checked out on <branch>, then stamp Paivot's
+ownership marker ('paivot-owned') into the worktree's git admin dir. The marker
+is what licenses 'pvg loop recover' and 'pvg worktree remove' to clean the
+worktree up later; without it the worktree is treated as foreign and preserved.
+
+The branch must already exist (create it first with 'git branch <branch> <base>'
+WITHOUT switching the dispatcher's HEAD). The project root is resolved from the
+current directory's git repository.
+
+  --story <id>   Record the story id in the marker (diagnostic only).
+  --json         Emit the structured result as JSON.`)
+			return nil
+		case strings.HasPrefix(arg, "-"):
+			return fmt.Errorf("unknown flag %q", arg)
+		default:
+			positional = append(positional, arg)
+		}
+	}
+
+	if len(positional) != 2 {
+		return fmt.Errorf("usage: pvg worktree add <path> <branch> [--story <id>] [--json]")
+	}
+	wtPath, branch := positional[0], positional[1]
+
+	root, err := resolveRepoRoot()
+	if err != nil {
+		return err
+	}
+
+	result := worktree.Add(root, wtPath, branch, storyID)
+
+	if jsonOutput {
+		fmt.Println(result.FormatJSON())
+	} else {
+		fmt.Println(result.FormatText())
+	}
+
+	if result.Error != "" {
+		return cliExit{code: 1}
+	}
+	return nil
+}
+
+// resolveRepoRoot returns the absolute top-level directory of the git
+// repository containing the current working directory.
+func resolveRepoRoot() (string, error) {
+	cmd := exec.Command("git", "rev-parse", "--show-toplevel")
+	out, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("not a git repository (run from inside the project): %w", err)
+	}
+	root := strings.TrimSpace(string(out))
+	if root == "" {
+		return "", fmt.Errorf("git rev-parse --show-toplevel returned empty")
+	}
+	return root, nil
 }
 
 func worktreeRemove(args []string) error {

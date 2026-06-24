@@ -112,48 +112,17 @@ func loadSetting(path, key string) string {
 	return ""
 }
 
-// isWithinBase reports whether path lies within base (equal to base, or under
-// it as base+separator). Both sides have symlinks resolved first so that, e.g.,
-// macOS's /var -> /private/var indirection (git reports resolved paths; the
-// configured base may not be) does not make an owned worktree look foreign.
-func isWithinBase(path, base string) bool {
-	clean := resolveSymlinks(filepath.Clean(path))
-	cleanBase := resolveSymlinks(filepath.Clean(base))
-	return clean == cleanBase || strings.HasPrefix(clean, cleanBase+string(filepath.Separator))
-}
-
-// resolveSymlinks returns the symlink-resolved form of path, or the longest
-// resolvable ancestor with the unresolved tail re-appended. It never fails:
-// a fully-unresolvable path is returned cleaned and unchanged.
-func resolveSymlinks(path string) string {
-	if resolved, err := filepath.EvalSymlinks(path); err == nil {
-		return resolved
-	}
-	dir := path
-	var tail []string
-	for {
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			break
-		}
-		tail = append([]string{filepath.Base(dir)}, tail...)
-		if resolved, err := filepath.EvalSymlinks(parent); err == nil {
-			return filepath.Join(append([]string{resolved}, tail...)...)
-		}
-		dir = parent
-	}
-	return filepath.Clean(path)
-}
-
 // SafeRemove removes a git worktree by resolving the project root from the
 // worktree path, then running git operations from that root. It always prunes
 // stale worktree metadata afterward.
 //
-// SafeRemove is safe-by-default: it REFUSES to remove any worktree that is not
-// within Paivot's owned base (default <root>/.claude/worktrees). This is the
-// mechanism-layer defense that stops Paivot from ever deleting a worktree it
-// does not own. Use SafeRemoveForce for emergency removal that bypasses the
-// ownership refusal (the CWD-inside guard still applies).
+// SafeRemove is safe-by-default: it REFUSES to remove any worktree that does
+// not carry Paivot's ownership marker (written only by `pvg worktree add`).
+// This is the mechanism-layer defense that stops Paivot from ever deleting a
+// worktree it does not own -- decided by the marker, not by path, so a foreign
+// worktree inside .claude/worktrees/ is still refused. Use SafeRemoveForce for
+// emergency removal that bypasses the ownership refusal (the CWD-inside guard
+// still applies).
 func SafeRemove(worktreePath string) RemoveResult {
 	return safeRemove(worktreePath, true)
 }
@@ -177,27 +146,23 @@ func safeRemove(worktreePath string, enforceOwnership bool) RemoveResult {
 	}
 	result.ProjectRoot = root
 
-	// Ownership guard (safe-by-default): refuse to remove a worktree that is
-	// not within Paivot's owned base. A worktree at any other path
-	// (.codex-worktrees/, an external absolute path, ...) belongs to another
-	// tool and removing it would destroy work Paivot does not own. This runs
-	// BEFORE any git remove call. SafeRemoveForce bypasses this guard.
-	if enforceOwnership {
+	// Ownership guard (safe-by-default): refuse to remove a worktree that does
+	// not carry Paivot's ownership marker. The marker -- written only by
+	// `pvg worktree add` (worktree.Add) -- is the SOLE proof of ownership. A
+	// worktree without it belongs to another tool or a concurrent non-Paivot
+	// session and removing it would destroy work Paivot does not own. This is
+	// decided by the marker, NOT by path: a foreign worktree that happens to
+	// live inside .claude/worktrees/ is still refused. Runs BEFORE any git
+	// remove call. SafeRemoveForce bypasses this guard.
+	if enforceOwnership && !IsPaivotOwned(worktreePath) {
+		// Surface the managed base as an additional diagnostic, but the decisive
+		// refusal is marker-absence, not the path.
 		base := ownedWorktreeBase(root)
-		// Resolve the target path against the project root so a relative path
-		// is compared correctly (do not use filepath.Abs, which would resolve
-		// against a possibly-drifted CWD).
-		target := filepath.Clean(worktreePath)
-		if !filepath.IsAbs(target) {
-			target = filepath.Clean(filepath.Join(root, worktreePath))
-		}
-		if !isWithinBase(target, base) {
-			result.Error = fmt.Sprintf(
-				"REFUSED: %q is outside Paivot's managed worktree base %q; refusing to remove a worktree Paivot does not own (use --force to override)",
-				worktreePath, base,
-			)
-			return result
-		}
+		result.Error = fmt.Sprintf(
+			"REFUSED: %q has no Paivot ownership marker (not created by `pvg worktree add`); refusing to remove a worktree Paivot may not own. Use --force to override. (Paivot's managed base is %q.)",
+			worktreePath, base,
+		)
+		return result
 	}
 
 	// CWD safety guard: refuse to remove a worktree if the caller's CWD is

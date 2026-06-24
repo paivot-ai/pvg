@@ -23,7 +23,7 @@ const storyCheckoutBlockMsg = "BLOCKED: Dispatcher mode is active and this comma
 	"Isolated agents hit this when the harness resets their CWD to the project root between tool calls: ALWAYS prefix shell commands with `cd <your-worktree>`.\n\n" +
 	"Correct patterns:\n" +
 	"  git branch story/<STORY_ID> origin/epic/<EPIC_ID>     # create WITHOUT switching HEAD\n" +
-	"  git worktree add .claude/worktrees/dev-<STORY_ID> story/<STORY_ID>\n" +
+	"  pvg worktree add .claude/worktrees/dev-<STORY_ID> story/<STORY_ID>  # stamps the ownership marker\n" +
 	"  cd .claude/worktrees/dev-<STORY_ID>                    # work happens here\n\n" +
 	"If you are an isolated PM/developer agent: cd into your worktree first, then check out the story branch there."
 

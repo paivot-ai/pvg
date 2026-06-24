@@ -21,6 +21,7 @@ pvg seed [--force]           # Seed vault with agent prompts and conventions
 pvg loop setup --all         # Start unattended execution loop
 pvg loop snapshot            # Checkpoint active agent/worktree state
 pvg loop recover             # Clean up after context loss
+pvg worktree add <path> <branch>  # Create a worktree + stamp Paivot ownership marker
 pvg worktree remove <path>   # Safely remove a worktree (CWD-independent)
 pvg setup                    # One-command machine bootstrap (channel-pinned)
 pvg update [--to REF] [--pin] [--dry-run]  # Converge toolchain to the channel manifest
@@ -362,13 +363,22 @@ parallel copies of the queue-selection rules.
 ### Worktree safety
 
 ```bash
+pvg worktree add .claude/worktrees/dev-PROJ-a1b story/PROJ-a1b   # Create + stamp ownership marker
 pvg worktree remove .claude/worktrees/dev-PROJ-a1b          # Remove worktree safely
 pvg worktree remove .claude/worktrees/dev-PROJ-a1b --json   # JSON output
 ```
 
-`pvg worktree remove` resolves the project root from the worktree path itself (by parsing
-the `.claude/worktrees/` convention), not from the current working directory. That means the
-removal logic itself does not depend on the caller's shell location once `pvg` is running.
+Ownership is a MARKER, not a path. `pvg worktree add` creates the worktree via git and writes a
+`paivot-owned` marker file into the worktree's git admin dir (`.git/worktrees/<name>/paivot-owned`).
+ONLY worktrees created this way are owned. `pvg worktree remove` and `pvg loop recover` remove a
+worktree (and delete its branch) ONLY when it carries the marker -- so a concurrent NON-Paivot session
+that runs `git worktree add` itself, even under `.claude/worktrees/`, is never touched. The marker
+lives in the git admin dir so git manages its lifecycle: `git worktree remove`/`prune` deletes it.
+
+`pvg worktree remove` resolves the project root from the worktree path itself, not from the current
+working directory, so the removal logic does not depend on the caller's shell location once `pvg` is
+running. Use `--force` to override the ownership refusal for an unmarked worktree (the CWD-inside guard
+still applies).
 It still should be invoked from a healthy shell, typically after `cd $PROJECT_ROOT && pwd`.
 
 After removal, it always runs `git worktree prune` to clean stale metadata. If the worktree
@@ -388,7 +398,8 @@ While dispatcher mode is active, the PreToolUse guard also blocks `git checkout`
 to `worktree-agent-*` branches in the parent checkout. Those branches belong to Claude Code's
 automatic worktree isolation; checking them out on the shared HEAD can make another Paivot
 window appear to lose edits. Delete stale `worktree-agent-*` branches directly, or create an
-explicit `git worktree add .claude/worktrees/dev-<story> story/<story>` checkout for code work.
+explicit `pvg worktree add .claude/worktrees/dev-<story> story/<story>` checkout for code work
+(`pvg worktree add` stamps the ownership marker, so recover only ever removes worktrees Paivot created).
 
 ### Diagnostics
 

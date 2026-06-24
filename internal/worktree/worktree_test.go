@@ -179,10 +179,11 @@ func TestSafeRemove_Integration(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// Create via Add so the worktree carries the ownership marker (SafeRemove
+	// refuses unmarked worktrees).
 	wtPath := filepath.Join(wtDir, "dev-TEST-123")
-	cmd = exec.Command("git", "-C", root, "worktree", "add", wtPath, "story/TEST-123")
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("git worktree add failed: %s", out)
+	if res := Add(root, wtPath, "story/TEST-123", "TEST-123"); res.Error != "" {
+		t.Fatalf("worktree.Add failed: %s", res.Error)
 	}
 
 	// Verify the worktree exists
@@ -246,10 +247,11 @@ func TestSafeRemove_RefusesCwdInside(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// Create via Add so the worktree is MARKED (ownership guard passes) and the
+	// CWD-inside guard is the one that fires below.
 	wtPath := filepath.Join(wtDir, "dev-CWD-GUARD")
-	cmd = exec.Command("git", "-C", root, "worktree", "add", wtPath, "story/CWD-GUARD")
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("git worktree add failed: %s", out)
+	if res := Add(root, wtPath, "story/CWD-GUARD", "CWD-GUARD"); res.Error != "" {
+		t.Fatalf("worktree.Add failed: %s", res.Error)
 	}
 
 	// Verify the worktree exists
@@ -276,6 +278,10 @@ func TestSafeRemove_RefusesCwdInside(t *testing.T) {
 	}
 	if !contains(result.Error, "REFUSED") {
 		t.Errorf("expected error to contain 'REFUSED', got %q", result.Error)
+	}
+	// The decisive refusal here must be the CWD-inside guard, not the marker.
+	if !contains(result.Error, "CWD") {
+		t.Errorf("expected the CWD-inside guard to fire (marker is present), got %q", result.Error)
 	}
 
 	// Verify the worktree directory was NOT deleted.
@@ -322,10 +328,10 @@ func TestSafeRemove_AllowsRemovalFromOutside(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// Create via Add so the worktree carries the ownership marker.
 	wtPath := filepath.Join(wtDir, "dev-OUTSIDE")
-	cmd = exec.Command("git", "-C", root, "worktree", "add", wtPath, "story/OUTSIDE")
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("git worktree add failed: %s", out)
+	if res := Add(root, wtPath, "story/OUTSIDE", "OUTSIDE"); res.Error != "" {
+		t.Fatalf("worktree.Add failed: %s", res.Error)
 	}
 
 	if !isDir(wtPath) {
@@ -404,10 +410,10 @@ func TestSafeRemove_RefusesCwdInsideRelativePath(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// Create via Add so the worktree is MARKED and the CWD guard is what fires.
 	wtPath := filepath.Join(wtDir, "dev-REL-PATH")
-	cmd = exec.Command("git", "-C", root, "worktree", "add", wtPath, "story/REL-PATH")
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("git worktree add failed: %s", out)
+	if res := Add(root, wtPath, "story/REL-PATH", "REL-PATH"); res.Error != "" {
+		t.Fatalf("worktree.Add failed: %s", res.Error)
 	}
 
 	// Verify the worktree exists
@@ -457,16 +463,33 @@ func TestSafeRemove_PermissionDeniedActionableError(t *testing.T) {
 	if out, err := exec.Command("git", "init", root).CombinedOutput(); err != nil {
 		t.Skipf("git init failed (git not available?): %s", out)
 	}
+	cmd := exec.Command("git", "-C", root, "commit", "--allow-empty", "-m", "init")
+	cmd.Env = append(os.Environ(),
+		"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@test.com",
+		"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@test.com",
+	)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Skipf("git commit failed: %s", out)
+	}
+	if out, err := exec.Command("git", "-C", root, "branch", "story/ROOTOWNED").CombinedOutput(); err != nil {
+		t.Fatalf("git branch failed: %s", out)
+	}
+	// Create a REAL, MARKED worktree so the ownership guard passes and the
+	// permission-denied path is what we exercise.
 	wtPath := filepath.Join(root, ".claude", "worktrees", "dev-ROOTOWNED")
-	if err := os.MkdirAll(wtPath, 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(wtPath), 0o755); err != nil {
 		t.Fatal(err)
+	}
+	if res := Add(root, wtPath, "story/ROOTOWNED", "ROOTOWNED"); res.Error != "" {
+		t.Fatalf("worktree.Add failed: %s", res.Error)
 	}
 
 	origExec := execCommand
 	t.Cleanup(func() { execCommand = origExec })
-	// Mock the `git worktree remove` by re-exec'ing this test binary as a
-	// helper that emits a permission-denied error and exits non-zero. No
-	// shell is involved, so there is no command-injection surface.
+	// Mock ONLY the `git worktree remove` by re-exec'ing this test binary as a
+	// helper that emits a permission-denied error and exits non-zero. Every other
+	// git call (including the rev-parse that IsPaivotOwned needs) passes through
+	// to real git. No shell is involved, so there is no command-injection surface.
 	execCommand = func(name string, args ...string) *exec.Cmd {
 		for i := 0; i+1 < len(args); i++ {
 			if args[i] == "worktree" && args[i+1] == "remove" {
@@ -475,7 +498,7 @@ func TestSafeRemove_PermissionDeniedActionableError(t *testing.T) {
 				return c
 			}
 		}
-		return exec.Command("git", "--version")
+		return exec.Command(name, args...)
 	}
 
 	result := SafeRemove(wtPath)
@@ -489,11 +512,12 @@ func TestSafeRemove_PermissionDeniedActionableError(t *testing.T) {
 	}
 }
 
-// TestSafeRemove_RefusesOutsideOwnedBase verifies the ownership guard: a
-// worktree OUTSIDE Paivot's owned base (e.g. .codex-worktrees/) is refused, and
-// the refusal happens BEFORE any `git worktree remove` is ever invoked. This is
-// the mechanism-layer defense against deleting worktrees Paivot does not own.
-func TestSafeRemove_RefusesOutsideOwnedBase(t *testing.T) {
+// TestSafeRemove_RefusesUnmarkedOutsideBase verifies the marker ownership guard:
+// an UNMARKED worktree outside .claude/worktrees (e.g. .codex-worktrees/) is
+// refused, and the refusal happens BEFORE any `git worktree remove` is ever
+// invoked. This is the mechanism-layer defense against deleting worktrees Paivot
+// does not own.
+func TestSafeRemove_RefusesUnmarkedOutsideBase(t *testing.T) {
 	root := t.TempDir()
 	if out, err := exec.Command("git", "init", root).CombinedOutput(); err != nil {
 		t.Skipf("git init failed (git not available?): %s", out)
@@ -501,7 +525,7 @@ func TestSafeRemove_RefusesOutsideOwnedBase(t *testing.T) {
 
 	// A real foreign worktree directory outside .claude/worktrees. It must be a
 	// real dir so ResolveProjectRoot can use git resolution (Strategy 2) and
-	// succeed in finding the project root.
+	// succeed in finding the project root. It carries NO ownership marker.
 	foreignWT := filepath.Join(root, ".codex-worktrees", "feature-x")
 	if err := os.MkdirAll(foreignWT, 0o755); err != nil {
 		t.Fatal(err)
@@ -511,8 +535,8 @@ func TestSafeRemove_RefusesOutsideOwnedBase(t *testing.T) {
 	t.Cleanup(func() { execCommand = origExec })
 
 	// Mock execCommand: allow the git resolution call(s) that ResolveProjectRoot
-	// needs, but FAIL the test loudly if `git worktree remove` is ever reached --
-	// the ownership refusal must short-circuit before any removal.
+	// and IsPaivotOwned need, but FAIL the test loudly if `git worktree remove`
+	// is ever reached -- the ownership refusal must short-circuit before removal.
 	var removeCalled bool
 	execCommand = func(name string, args ...string) *exec.Cmd {
 		for i := 0; i+1 < len(args); i++ {
@@ -526,16 +550,16 @@ func TestSafeRemove_RefusesOutsideOwnedBase(t *testing.T) {
 	result := SafeRemove(foreignWT)
 
 	if removeCalled {
-		t.Fatal("git worktree remove was invoked on a foreign worktree (ownership guard failed to short-circuit)")
+		t.Fatal("git worktree remove was invoked on an unmarked worktree (ownership guard failed to short-circuit)")
 	}
 	if result.Removed {
-		t.Errorf("expected Removed=false for a worktree outside the owned base")
+		t.Errorf("expected Removed=false for an unmarked worktree")
 	}
 	if !contains(result.Error, "REFUSED") {
 		t.Errorf("expected error to contain 'REFUSED', got %q", result.Error)
 	}
-	if !contains(result.Error, "managed worktree base") {
-		t.Errorf("expected error to name the managed base, got %q", result.Error)
+	if !contains(result.Error, "ownership marker") {
+		t.Errorf("expected error to cite the missing ownership marker, got %q", result.Error)
 	}
 	// The foreign worktree directory must NOT have been touched.
 	if !isDir(foreignWT) {
@@ -544,8 +568,8 @@ func TestSafeRemove_RefusesOutsideOwnedBase(t *testing.T) {
 }
 
 // TestSafeRemoveForce_BypassesOwnershipGuard verifies the emergency escape
-// hatch: SafeRemoveForce removes a worktree outside the owned base (the CWD
-// guard still applies, but ownership does not).
+// hatch: SafeRemoveForce removes an UNMARKED worktree (the CWD guard still
+// applies, but the marker ownership refusal does not).
 func TestSafeRemoveForce_BypassesOwnershipGuard(t *testing.T) {
 	root := t.TempDir()
 
@@ -594,10 +618,11 @@ func TestSafeRemoveForce_BypassesOwnershipGuard(t *testing.T) {
 	}
 }
 
-// TestSafeRemove_AllowsCustomBaseFromSetting verifies the worktree.base setting
-// overrides the default owned base, so a non-default base (e.g. the codex
-// variant's .codex-worktrees) is treated as owned.
-func TestSafeRemove_AllowsCustomBaseFromSetting(t *testing.T) {
+// TestSafeRemove_AllowsMarkedWorktreeOutsideDefaultBase verifies that ownership
+// is the MARKER, not the path: a worktree created via Add (marked) OUTSIDE the
+// default .claude/worktrees base is still removable. The worktree.base setting
+// no longer decides ownership -- the marker does.
+func TestSafeRemove_AllowsMarkedWorktreeOutsideDefaultBase(t *testing.T) {
 	root := t.TempDir()
 
 	origExec := execCommand
@@ -615,34 +640,25 @@ func TestSafeRemove_AllowsCustomBaseFromSetting(t *testing.T) {
 		t.Skipf("git commit failed: %s", out)
 	}
 
-	// Write a settings file pointing the owned base at .codex-worktrees.
-	settingsDir := filepath.Join(root, ".vault", "knowledge")
-	if err := os.MkdirAll(settingsDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(settingsDir, ".settings.yaml"),
-		[]byte("worktree.base: .codex-worktrees\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
 	if out, err := exec.Command("git", "-C", root, "branch", "feature/owned").CombinedOutput(); err != nil {
 		t.Fatalf("git branch failed: %s", out)
 	}
+	// Worktree OUTSIDE the default base, created via Add so it carries the marker.
 	wt := filepath.Join(root, ".codex-worktrees", "dev-owned")
 	if err := os.MkdirAll(filepath.Dir(wt), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if out, err := exec.Command("git", "-C", root, "worktree", "add", wt, "feature/owned").CombinedOutput(); err != nil {
-		t.Fatalf("git worktree add failed: %s", out)
+	if res := Add(root, wt, "feature/owned", "owned"); res.Error != "" {
+		t.Fatalf("worktree.Add failed: %s", res.Error)
 	}
 
-	// With the setting, .codex-worktrees is OWNED -> SafeRemove succeeds.
+	// The marker -- not the path -- makes it removable.
 	result := SafeRemove(wt)
 	if result.Error != "" {
-		t.Fatalf("SafeRemove should succeed for the configured base; got error: %s", result.Error)
+		t.Fatalf("SafeRemove should succeed for a marked worktree; got error: %s", result.Error)
 	}
 	if !result.Removed {
-		t.Error("expected Removed=true for a worktree under the configured base")
+		t.Error("expected Removed=true for a marked worktree outside the default base")
 	}
 }
 

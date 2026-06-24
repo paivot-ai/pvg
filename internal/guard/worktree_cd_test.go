@@ -57,6 +57,7 @@ func TestCheckWorktreeCd_AllowsLegitimateCommands(t *testing.T) {
 		{"empty", ""},
 		{"no worktree ref", "cd /Users/ramirosalas/workspace/praktical"},
 		{"git worktree add", "git worktree add .claude/worktrees/dev-PRA-36tu story/PRA-36tu"},
+		{"pvg worktree add", "pvg worktree add .claude/worktrees/dev-PRA-36tu story/PRA-36tu"},
 		{"pvg worktree remove", "pvg worktree remove .claude/worktrees/dev-PRA-36tu"},
 		{"ls worktree dir", "ls .claude/worktrees/dev-PRA-36tu"},
 		{"git -C worktree", "git -C .claude/worktrees/dev-PRA-36tu log --oneline"},
