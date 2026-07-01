@@ -30,6 +30,10 @@ var toolSpecs = []toolSpec{
 	{Name: "pvg", VersionArgs: []string{"version"}},
 	{Name: "nd", VersionArgs: []string{"--version"}},
 	{Name: "vlt", VersionArgs: []string{"version"}},
+	// modelith backs the optional dnf.domain_model D&F artifact. It is a
+	// third-party tool (stacklok/modelith) pinned by the channel manifest; if
+	// the manifest does not pin it, convergence SKIPs it gracefully.
+	{Name: "modelith", VersionArgs: []string{"--version"}},
 }
 
 // Options selects which convergence surfaces run.

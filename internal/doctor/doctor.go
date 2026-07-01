@@ -53,6 +53,7 @@ func RunAll(projectRoot string) Report {
 
 	r.Findings = append(r.Findings, checkVaultResolution(projectRoot))
 	r.Findings = append(r.Findings, checkNDReachable())
+	r.Findings = append(r.Findings, checkModelith())
 	r.Findings = append(r.Findings, checkSharedConfigConsistency(projectRoot))
 	r.Findings = append(r.Findings, checkVaultDivergence(projectRoot))
 	r.Findings = append(r.Findings, checkSnapshotDrift(projectRoot))
@@ -144,6 +145,24 @@ func checkNDReachable() Finding {
 	}
 	ver := strings.TrimSpace(string(out))
 	return Finding{Name: "nd-reachable", Status: StatusPass, Message: ver}
+}
+
+// checkModelith reports whether the modelith binary is installed. modelith
+// backs the optional dnf.domain_model D&F artifact, so its absence is a WARN
+// (not a FAIL like nd): it is only required when a project opts into domain
+// models. `pvg setup`/`pvg update` install it from the channel manifest.
+func checkModelith() Finding {
+	cmd := execCommand("modelith", "--version")
+	out, err := cmd.Output()
+	if err != nil {
+		return Finding{
+			Name:    "modelith-reachable",
+			Status:  StatusWarn,
+			Message: "modelith not found -- needed only when dnf.domain_model is enabled; run 'pvg update' to install it",
+		}
+	}
+	ver := strings.TrimSpace(string(out))
+	return Finding{Name: "modelith-reachable", Status: StatusPass, Message: ver}
 }
 
 func checkSharedConfigConsistency(projectRoot string) Finding {

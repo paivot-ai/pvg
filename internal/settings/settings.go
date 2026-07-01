@@ -34,6 +34,7 @@ var defaults = map[string]string{
 	"workflow.custom_statuses":     "",
 	"dnf.specialist_review":        "false",
 	"dnf.max_iterations":           "3",
+	"dnf.domain_model":             "false",
 	"architecture.c4":              "false",
 	"loop.persist_across_sessions": "true",
 	"lint.quality_gates":           "",

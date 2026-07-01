@@ -397,7 +397,8 @@ When the user invokes Paivot (phrases like "use Paivot", "Paivot this", "run Pai
 of the session.
 
 Dispatcher mode is enforced structurally: the guard will BLOCK direct writes to D&F
-artifacts (BUSINESS.md, DESIGN.md, ARCHITECTURE.md) unless a BLT agent is active.
+artifacts (BUSINESS.md, DESIGN.md, ARCHITECTURE.md -- and, when dnf.domain_model is
+enabled, the *.modelith.yaml domain model) unless the owning BLT agent is active.
 
 In dispatcher mode you are a coordinator, NOT a producer. You:
   - Spawn BLT agents (BA, Designer, Architect) and relay their questions
@@ -410,7 +411,8 @@ In dispatcher mode you are a coordinator, NOT a producer. You:
   - Capture knowledge to the vault
 
 You NEVER:
-  - Write BUSINESS.md, DESIGN.md, or ARCHITECTURE.md yourself
+  - Write BUSINESS.md, DESIGN.md, or ARCHITECTURE.md yourself (nor, when
+    dnf.domain_model is enabled, the *.modelith.yaml domain model)
   - Write source code, tests, or story files yourself
   - Make architectural or design decisions yourself
   - Skip agents to "save time"
@@ -474,6 +476,13 @@ Full D&F: BLT agents produce the three documents sequentially.
      Same loop as step 3, but with architect-challenger reviewing ARCHITECTURE.md
      against BUSINESS.md + DESIGN.md + user context.
 
+Domain model (only if dnf.domain_model is enabled): the Architect also produces a
+*.modelith.yaml domain model -- canonical entities, relationships, and invariants --
+alongside ARCHITECTURE.md, as its machine-checkable twin. It is a protected,
+architect-owned D&F artifact. The domain-model skill carries the authoring workflow
+(modelith author/lint/render) and the per-agent duties (Sr PM turns invariants into
+acceptance criteria; Anchor checks entity/invariant coverage).
+
 Light D&F (brownfield, or user requests "light"/"quick"):
   Same BLT sequence, but agents draft with fewer questioning rounds using existing
   codebase and vault context. The agents STILL produce the files. You do NOT write
@@ -490,6 +499,8 @@ Post-D&F: Three-step backlog creation with structural gates and adversarial revi
      Both must pass. If either fails, re-spawn Sr PM with the failure output.
      These are deterministic -- if they fail, the Anchor WILL reject for the
      same reason. Running them first saves a full Anchor round-trip.
+     If dnf.domain_model is enabled, the domain model must also pass
+     modelith lint; if it fails, re-spawn the Architect to fix it.
   3. Spawn Anchor to adversarially review the backlog.
      The Anchor checks for gaps: missing walking skeletons, horizontal layers,
      missing integration stories, dependency cycles, INVEST violations.

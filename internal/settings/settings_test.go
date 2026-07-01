@@ -20,6 +20,16 @@ func TestDefaultSoloDev(t *testing.T) {
 	}
 }
 
+func TestDefaultDomainModel(t *testing.T) {
+	val, ok := defaults["dnf.domain_model"]
+	if !ok {
+		t.Fatal("dnf.domain_model missing from defaults")
+	}
+	if val != "false" {
+		t.Fatalf("expected dnf.domain_model default 'false', got %q", val)
+	}
+}
+
 func TestLoadSettings_NoFile(t *testing.T) {
 	s := loadSettings("/nonexistent/.settings.yaml")
 	if len(s) != 0 {

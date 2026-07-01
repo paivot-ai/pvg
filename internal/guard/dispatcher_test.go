@@ -249,6 +249,116 @@ func TestCheckDispatcher_BashBlocksDFWriteWithWrongAgent(t *testing.T) {
 	}
 }
 
+// enableDomainModel turns on the dnf.domain_model setting at the orchestrator
+// root so the guard treats *.modelith.yaml as an architect-owned D&F artifact.
+func enableDomainModel(t *testing.T, root string) {
+	t.Helper()
+	path := filepath.Join(root, ".vault", "knowledge", ".settings.yaml")
+	if err := os.WriteFile(path, []byte("dnf.domain_model: true\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCheckDispatcher_AllowsModelith_WhenDomainModelDisabled(t *testing.T) {
+	dir, _ := setupDispatcher(t)
+	// dnf.domain_model not enabled -> *.modelith.yaml is not a protected artifact.
+	input := HookInput{
+		ToolName:  "Write",
+		ToolInput: ToolInput{FilePath: filepath.Join(dir, "domain.modelith.yaml")},
+	}
+	result := CheckDispatcher(dir, input)
+	if !result.Allowed {
+		t.Errorf("expected allowed for *.modelith.yaml when dnf.domain_model disabled, got blocked: %s", result.Reason)
+	}
+}
+
+func TestCheckDispatcher_BlocksModelith_WhenEnabledNoAgent(t *testing.T) {
+	dir, _ := setupDispatcher(t)
+	enableDomainModel(t, dir)
+	input := HookInput{
+		ToolName:  "Write",
+		ToolInput: ToolInput{FilePath: filepath.Join(dir, "domain.modelith.yaml")},
+	}
+	result := CheckDispatcher(dir, input)
+	if result.Allowed {
+		t.Error("expected *.modelith.yaml write blocked when enabled and no architect agent")
+	}
+}
+
+func TestCheckDispatcher_AllowsModelith_FromArchitectWorktree(t *testing.T) {
+	root, worktree := setupDispatcher(t)
+	enableDomainModel(t, root)
+	if err := dispatcher.TrackAgent(worktree, "agent-1", "paivot-graph:architect"); err != nil {
+		t.Fatal(err)
+	}
+	input := HookInput{
+		ToolName:  "Write",
+		ToolInput: ToolInput{FilePath: filepath.Join(worktree, "domain.modelith.yaml")},
+	}
+	result := CheckDispatcher(worktree, input)
+	if !result.Allowed {
+		t.Errorf("expected architect worktree *.modelith.yaml write allowed, got blocked: %s", result.Reason)
+	}
+}
+
+func TestCheckDispatcher_BlocksModelith_MismatchedAgent(t *testing.T) {
+	root, worktree := setupDispatcher(t)
+	enableDomainModel(t, root)
+	if err := dispatcher.TrackAgent(worktree, "agent-1", "paivot-graph:designer"); err != nil {
+		t.Fatal(err)
+	}
+	input := HookInput{
+		ToolName:  "Write",
+		ToolInput: ToolInput{FilePath: filepath.Join(worktree, "domain.modelith.yaml")},
+	}
+	result := CheckDispatcher(worktree, input)
+	if result.Allowed {
+		t.Error("expected *.modelith.yaml write blocked for mismatched (designer) agent")
+	}
+}
+
+func TestCheckDispatcher_BashBlocksRedirectToModelith_WhenEnabled(t *testing.T) {
+	dir, _ := setupDispatcher(t)
+	enableDomainModel(t, dir)
+	input := HookInput{
+		ToolName:  "Bash",
+		ToolInput: ToolInput{Command: `cat draft.yaml > domain.modelith.yaml`},
+	}
+	result := CheckDispatcher(dir, input)
+	if result.Allowed {
+		t.Error("expected blocked for bash redirect to *.modelith.yaml when enabled")
+	}
+}
+
+func TestCheckDispatcher_BashAllowsModelithLintWhenEnabled(t *testing.T) {
+	dir, _ := setupDispatcher(t)
+	enableDomainModel(t, dir)
+	input := HookInput{
+		ToolName:  "Bash",
+		ToolInput: ToolInput{Command: `modelith lint domain.modelith.yaml`},
+	}
+	result := CheckDispatcher(dir, input)
+	if !result.Allowed {
+		t.Errorf("expected allowed for linting *.modelith.yaml, got blocked: %s", result.Reason)
+	}
+}
+
+func TestCheckDispatcher_BashAllowsModelithWrite_WithArchitect(t *testing.T) {
+	root, worktree := setupDispatcher(t)
+	enableDomainModel(t, root)
+	if err := dispatcher.TrackAgent(worktree, "agent-1", "paivot-graph:architect"); err != nil {
+		t.Fatal(err)
+	}
+	input := HookInput{
+		ToolName:  "Bash",
+		ToolInput: ToolInput{Command: `cat draft.yaml > domain.modelith.yaml`},
+	}
+	result := CheckDispatcher(worktree, input)
+	if !result.Allowed {
+		t.Errorf("expected architect *.modelith.yaml write allowed, got blocked: %s", result.Reason)
+	}
+}
+
 func TestCheckDispatcher_BashBlocksMutatingNDCommandFromCoordinator(t *testing.T) {
 	root, _ := setupDispatcher(t)
 	input := HookInput{
