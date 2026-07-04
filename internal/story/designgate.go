@@ -97,7 +97,7 @@ func idsMissingFromTests(projectRoot string, ids []string) ([]string, error) {
 		if !isTestPath(filepath.ToSlash(rel)) {
 			return nil
 		}
-		data, rerr := os.ReadFile(path)
+		data, rerr := os.ReadFile(path) // #nosec G122 -- read-only scan of the project's own tree for stable-id coverage; paths come from WalkDir over projectRoot
 		if rerr != nil {
 			return nil
 		}
