@@ -18,24 +18,32 @@ const settingsFile = ".vault/knowledge/.settings.yaml"
 // defaults for all known settings.
 // Keys here must match those documented in commands/vault-settings.md.
 var defaults = map[string]string{
-	"session_start_max_notes":      "10",
-	"auto_capture":                 "true",
-	"staleness_days":               "30",
-	"stack_detection":              "false",
-	"bug_fast_track":               "false",
-	"project_vault_git":            "ask",
-	"default_scope":                "system",
-	"proposal_expiry_days":         "30",
-	"auto_init_project_vault":      "ask",
-	"workflow.solo_dev":            "true",
-	"workflow.fsm":                 "false",
-	"workflow.sequence":            "open,in_progress,closed",
-	"workflow.exit_rules":          "blocked:open,in_progress;deferred:open,in_progress",
-	"workflow.custom_statuses":     "",
-	"dnf.specialist_review":        "false",
-	"dnf.max_iterations":           "3",
-	"dnf.domain_model":             "false",
-	"architecture.c4":              "false",
+	"session_start_max_notes":  "10",
+	"auto_capture":             "true",
+	"staleness_days":           "30",
+	"stack_detection":          "false",
+	"bug_fast_track":           "false",
+	"project_vault_git":        "ask",
+	"default_scope":            "system",
+	"proposal_expiry_days":     "30",
+	"auto_init_project_vault":  "ask",
+	"workflow.solo_dev":        "true",
+	"workflow.fsm":             "false",
+	"workflow.sequence":        "open,in_progress,closed",
+	"workflow.exit_rules":      "blocked:open,in_progress;deferred:open,in_progress",
+	"workflow.custom_statuses": "",
+	"dnf.specialist_review":    "false",
+	"dnf.max_iterations":       "3",
+	// Deprecated pair, kept for existing projects: the machinery design
+	// substrate (design.machinery) supersedes both. The adapter skills read
+	// design.machinery; these two only gate the legacy narrative-twin flow.
+	"dnf.domain_model": "false",
+	"architecture.c4":  "false",
+	// The machinery design substrate: domain model -> C4 contract -> state
+	// machines -> oracles, checked by `machinery check`. auto (default)
+	// applies it exactly when the repo is machinery-managed (.machinery.json
+	// or design/domain.modelith.yaml); on promises it; off disables it.
+	"design.machinery":             "auto",
 	"loop.persist_across_sessions": "true",
 	"lint.quality_gates":           "",
 	"lint.brownfield":              "false",
@@ -172,6 +180,10 @@ func setSettings(projectRoot, path string, args []string) error {
 			if err := validateGateMode(key, value); err != nil {
 				return err
 			}
+		}
+
+		if key == "design.machinery" && value != "auto" && value != "on" && value != "off" {
+			return fmt.Errorf("invalid value %q for design.machinery (allowed: auto, on, off)", value)
 		}
 
 		settings[key] = value

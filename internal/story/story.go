@@ -20,6 +20,11 @@ type TransitionOptions struct {
 	Reason    string
 	Feedback  string
 	NextStory string
+	// SkipDesign waives the approve-red design preconditions (machinery RED
+	// exit gate); the reason is recorded in the story contract so the waiver
+	// leaves a trace.
+	SkipDesign       bool
+	SkipDesignReason string
 }
 
 type DeliveryReport struct {
@@ -47,7 +52,8 @@ func Transition(projectRoot, action, storyID string, opts TransitionOptions) (st
 		return "", fmt.Errorf("ensure nd vault: %w", err)
 	}
 
-	if _, err := outputND(projectRoot, "show", storyID); err != nil {
+	shown, err := outputND(projectRoot, "show", storyID)
+	if err != nil {
 		return "", fmt.Errorf("story not found: %s", storyID)
 	}
 
@@ -64,6 +70,26 @@ func Transition(projectRoot, action, storyID string, opts TransitionOptions) (st
 		// ready queue for the GREEN implementation phase. The red-approved
 		// label is the phase boundary the loop reads. Deliberately NOT a
 		// close: a RED story has tests only, no implementation.
+		//
+		// On a machinery-managed project, approval first passes the
+		// deterministic RED exit gate: the design check is green and every
+		// oracle stable id the story references is carried by a test.
+		designNote := ""
+		if opts.SkipDesign {
+			reason := strings.TrimSpace(opts.SkipDesignReason)
+			if reason == "" {
+				return "", fmt.Errorf("--skip-design requires a reason (it is recorded in the story contract)")
+			}
+			designNote = "Design RED gate SKIPPED by explicit waiver: " + reason + "."
+		} else {
+			note, gerr := designRedGate(projectRoot, storyID, string(shown))
+			if gerr != nil {
+				return "", gerr
+			}
+			if note != "" {
+				designNote = "Design RED gate: " + note + "."
+			}
+		}
 		if err := runND(projectRoot, "update", storyID, "--status=open"); err != nil {
 			return "", err
 		}
@@ -72,8 +98,12 @@ func Transition(projectRoot, action, storyID string, opts TransitionOptions) (st
 		if err := runND(projectRoot, "labels", "add", storyID, "red-approved"); err != nil {
 			return "", err
 		}
+		evidence := fmt.Sprintf("RED tests approved via pvg story approve-red on %s.", today())
+		if designNote != "" {
+			evidence += " " + designNote
+		}
 		if err := appendContract(projectRoot, storyID, "red-approved",
-			fmt.Sprintf("RED tests approved via pvg story approve-red on %s.", today()),
+			evidence,
 			"[ ] GREEN developer must implement against the approved RED tests without modifying them.",
 		); err != nil {
 			return "", err

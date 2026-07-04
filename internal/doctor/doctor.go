@@ -54,6 +54,7 @@ func RunAll(projectRoot string) Report {
 	r.Findings = append(r.Findings, checkVaultResolution(projectRoot))
 	r.Findings = append(r.Findings, checkNDReachable())
 	r.Findings = append(r.Findings, checkModelith())
+	r.Findings = append(r.Findings, checkMachinery())
 	r.Findings = append(r.Findings, checkSharedConfigConsistency(projectRoot))
 	r.Findings = append(r.Findings, checkVaultDivergence(projectRoot))
 	r.Findings = append(r.Findings, checkSnapshotDrift(projectRoot))
@@ -163,6 +164,23 @@ func checkModelith() Finding {
 	}
 	ver := strings.TrimSpace(string(out))
 	return Finding{Name: "modelith-reachable", Status: StatusPass, Message: ver}
+}
+
+// checkMachinery reports whether the machinery binary is installed. machinery
+// backs the design.machinery substrate (design gates, oracles, hard-TDD
+// preconditions); like modelith it converges from the channel manifest.
+func checkMachinery() Finding {
+	cmd := execCommand("machinery", "version")
+	out, err := cmd.Output()
+	if err != nil {
+		return Finding{
+			Name:    "machinery-reachable",
+			Status:  StatusWarn,
+			Message: "machinery not found -- needed only when design.machinery applies; run 'pvg update' to install it",
+		}
+	}
+	ver := strings.TrimSpace(string(out))
+	return Finding{Name: "machinery-reachable", Status: StatusPass, Message: ver}
 }
 
 func checkSharedConfigConsistency(projectRoot string) Finding {

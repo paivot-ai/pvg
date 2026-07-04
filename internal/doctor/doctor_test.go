@@ -536,6 +536,9 @@ func TestRunAll_ProducesReport(t *testing.T) {
 		case "modelith":
 			// modelith --version
 			return exec.Command("echo", "modelith version 0.4.0")
+		case "machinery":
+			// machinery version
+			return exec.Command("echo", "machinery version v0.1.7")
 		case "git":
 			// git worktree list -- empty porcelain output
 			return exec.Command("echo", "")
@@ -553,8 +556,8 @@ func TestRunAll_ProducesReport(t *testing.T) {
 	}
 
 	r := RunAll(root)
-	if len(r.Findings) != 10 {
-		t.Fatalf("expected 10 findings, got %d", len(r.Findings))
+	if len(r.Findings) != 11 {
+		t.Fatalf("expected 11 findings, got %d", len(r.Findings))
 	}
 
 	names := make(map[string]bool)
@@ -569,7 +572,7 @@ func TestRunAll_ProducesReport(t *testing.T) {
 		t.Logf("[%s] %s: %s", f.Status, f.Name, f.Message)
 	}
 
-	for _, expected := range []string{"vault-resolution", "nd-reachable", "modelith-reachable", "shared-config-consistency", "snapshot-drift", "nd-doctor", "loop-state", "worktree-hygiene", "code-quality-analyzers"} {
+	for _, expected := range []string{"vault-resolution", "nd-reachable", "modelith-reachable", "machinery-reachable", "shared-config-consistency", "snapshot-drift", "nd-doctor", "loop-state", "worktree-hygiene", "code-quality-analyzers"} {
 		if !names[expected] {
 			t.Errorf("missing check %q", expected)
 		}

@@ -34,6 +34,11 @@ var toolSpecs = []toolSpec{
 	// third-party tool (stacklok/modelith) pinned by the channel manifest; if
 	// the manifest does not pin it, convergence SKIPs it gracefully.
 	{Name: "modelith", VersionArgs: []string{"--version"}},
+	// machinery is the design substrate behind design.machinery: the domain
+	// model, C4 contract, state machines, oracles, and the deterministic
+	// gates pvg's design gate and story transitions shell out to. Third
+	// party (RamXX/machinery), pinned by the channel; SKIPped when unpinned.
+	{Name: "machinery", VersionArgs: []string{"version"}},
 }
 
 // Options selects which convergence surfaces run.

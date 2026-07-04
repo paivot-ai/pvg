@@ -50,6 +50,7 @@ import (
 	"strings"
 
 	"github.com/paivot-ai/pvg/internal/converge"
+	"github.com/paivot-ai/pvg/internal/design"
 	"github.com/paivot-ai/pvg/internal/dispatcher"
 	"github.com/paivot-ai/pvg/internal/doctor"
 	"github.com/paivot-ai/pvg/internal/gates"
@@ -588,16 +589,37 @@ func runStory(args []string) error {
 		fmt.Println(msg)
 		return nil
 	case "approve-red":
-		if len(args) != 2 {
-			storyUsage()
-			return fmt.Errorf("usage: pvg story approve-red <story-id>")
+		rest := args[1:]
+		opts := story.TransitionOptions{}
+		var ids []string
+		for i := 0; i < len(rest); i++ {
+			switch rest[i] {
+			case "--skip-design":
+				if i+1 >= len(rest) {
+					return fmt.Errorf("--skip-design requires a reason argument")
+				}
+				i++
+				opts.SkipDesign = true
+				opts.SkipDesignReason = rest[i]
+			default:
+				if strings.HasPrefix(rest[i], "-") {
+					return fmt.Errorf("unknown flag %q for pvg story approve-red", rest[i])
+				}
+				ids = append(ids, rest[i])
+			}
 		}
-		msg, err := story.Transition(cwd, "approve-red", args[1], story.TransitionOptions{})
+		if len(ids) != 1 {
+			storyUsage()
+			return fmt.Errorf("usage: pvg story approve-red <story-id> [--skip-design REASON]")
+		}
+		msg, err := story.Transition(cwd, "approve-red", ids[0], opts)
 		if err != nil {
 			return err
 		}
 		fmt.Println(msg)
 		return nil
+	case "sync-oracle":
+		return runStorySyncOracle(cwd, args[1:])
 	case "accept":
 		return runStoryAccept(cwd, args[1:])
 	case "reject":
@@ -630,7 +652,45 @@ Subcommands:
   merge <story-id> [--base BRANCH]       Merge an accepted story branch
   verify-delivery <story-id> [--json]    Check delivery proof completeness
   verify-tdd [--range A..B | --base REF] [--json]
-                                         Hard-TDD guard: fail if a non-RED, unauthorized commit edited tests`)
+                                         Hard-TDD guard: fail if a non-RED, unauthorized commit edited tests
+  sync-oracle [--base REF] [--json]      Map the design oracle stable-id diff onto affected nd stories
+
+approve-red on a machinery-managed project first runs the deterministic RED
+exit gate: machinery check green and every story-referenced oracle stable id
+carried by a test. --skip-design REASON waives it, recorded in the contract.`)
+}
+
+func runStorySyncOracle(cwd string, args []string) error {
+	base := "origin/main"
+	asJSON := false
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--base":
+			if i+1 >= len(args) {
+				return fmt.Errorf("--base requires a git ref argument")
+			}
+			i++
+			base = args[i]
+		case "--json":
+			asJSON = true
+		default:
+			return fmt.Errorf("unknown flag %q for pvg story sync-oracle", args[i])
+		}
+	}
+	rep, err := story.SyncOracle(cwd, base)
+	if err != nil {
+		return err
+	}
+	if asJSON {
+		out, jerr := story.FormatSyncJSON(rep)
+		if jerr != nil {
+			return jerr
+		}
+		fmt.Println(out)
+		return nil
+	}
+	fmt.Print(story.FormatSyncText(rep))
+	return nil
 }
 
 func runStoryAccept(cwd string, args []string) error {
@@ -1806,18 +1866,43 @@ silent pass. Exit code 0 unless a BLOCK finding fired (then 1).`)
 		return err
 	}
 
+	// The design gate (machinery) runs beside the metric gates whenever the
+	// design.machinery setting resolves applicable for this project. Missing
+	// binary FAILS (a declared design promise is never silently waived).
+	var designRes *design.CheckResult
+	if cfg, applies, reason := design.Applies(projectRoot, sett["design.machinery"]); applies {
+		r := design.RunCheck(projectRoot, cfg)
+		r.Reason = reason
+		designRes = &r
+	}
+
 	switch format {
 	case "json":
 		out, jerr := gates.FormatJSON(report)
 		if jerr != nil {
 			return jerr
 		}
+		if designRes != nil {
+			var doc map[string]any
+			if uerr := json.Unmarshal([]byte(out), &doc); uerr != nil {
+				return uerr
+			}
+			doc["design"] = designRes
+			merged, merr := json.MarshalIndent(doc, "", "  ")
+			if merr != nil {
+				return merr
+			}
+			out = string(merged)
+		}
 		fmt.Println(out)
 	default:
 		fmt.Print(gates.FormatText(report))
+		if designRes != nil {
+			fmt.Print(design.FormatText(*designRes))
+		}
 	}
 
-	if report.Blocked {
+	if report.Blocked || (designRes != nil && !designRes.Passed) {
 		return cliExit{code: 1}
 	}
 	return nil

@@ -10,7 +10,10 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
+
+	"github.com/paivot-ai/pvg/internal/design"
 )
 
 // Requirement represents a tagged item or section heading from a D&F document.
@@ -55,6 +58,28 @@ func CheckCoverage(projectRoot, vaultDir string) (RTMResult, error) {
 		result.Requirements = append(result.Requirements, reqs...)
 	}
 
+	// The design substrate contributes deterministic requirements: every
+	// oracle stable id is a transition the backlog must cover. Coverage for
+	// these is exact whole-token matching, not the keyword heuristic.
+	if cfg, managed := design.Load(projectRoot); managed {
+		ids, derr := design.StableIDs(projectRoot, cfg)
+		if derr != nil {
+			return result, fmt.Errorf("read design oracles: %w", derr)
+		}
+		ordered := make([]string, 0, len(ids))
+		for id := range ids {
+			ordered = append(ordered, id)
+		}
+		sort.Strings(ordered)
+		for _, id := range ordered {
+			result.Requirements = append(result.Requirements, Requirement{
+				Tag:    "[ORACLE]",
+				Text:   id,
+				Source: filepath.ToSlash(filepath.Join(cfg.Dir, "machines", ids[id])),
+			})
+		}
+	}
+
 	result.Total = len(result.Requirements)
 	if result.Total == 0 {
 		result.Passed = true
@@ -71,7 +96,12 @@ func CheckCoverage(projectRoot, vaultDir string) (RTMResult, error) {
 	// Check coverage: for each requirement, search for it in story bodies
 	for i := range result.Requirements {
 		req := &result.Requirements[i]
-		storyID := findCoveringStory(req.Text, storyBodies)
+		var storyID string
+		if req.Tag == "[ORACLE]" {
+			storyID = findStoryWithToken(req.Text, storyBodies)
+		} else {
+			storyID = findCoveringStory(req.Text, storyBodies)
+		}
 		if storyID != "" {
 			req.Covered = true
 			req.CoveredBy = storyID
@@ -139,6 +169,12 @@ func extractRequirements(path, sourceName string) ([]Requirement, error) {
 	}
 
 	return reqs, scanner.Err()
+}
+
+// LoadStoryBodies reads all non-closed issue files and returns a map of
+// ID -> body text plus the count. Shared with story sync-oracle.
+func LoadStoryBodies(vaultDir string) (map[string]string, int, error) {
+	return loadStoryBodies(vaultDir)
 }
 
 // loadStoryBodies reads all non-closed issue files and returns a map of ID -> body text.
@@ -220,6 +256,23 @@ func parseIssueForBody(path string) (id, status, body string, err error) {
 	}
 
 	return id, status, strings.Join(bodyLines, "\n"), nil
+}
+
+// findStoryWithToken returns a story whose body carries the exact token
+// (oracle stable ids are opaque; keyword matching would be meaningless).
+// Iteration order is sorted for deterministic CoveredBy attribution.
+func findStoryWithToken(token string, storyBodies map[string]string) string {
+	ids := make([]string, 0, len(storyBodies))
+	for id := range storyBodies {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		if design.TokenIn(token, storyBodies[id]) {
+			return id
+		}
+	}
+	return ""
 }
 
 // findCoveringStory searches story bodies for a requirement's key phrases.
