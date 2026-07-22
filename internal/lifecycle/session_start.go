@@ -18,9 +18,11 @@ import (
 
 // hookInput matches the JSON Claude Code sends to lifecycle hooks.
 // Source is one of "startup", "resume", "clear", or "compact".
+// SessionID is the id of the Claude Code session that fired the hook.
 type hookInput struct {
-	CWD    string `json:"cwd"`
-	Source string `json:"source"`
+	CWD       string `json:"cwd"`
+	Source    string `json:"source"`
+	SessionID string `json:"session_id"`
 }
 
 // SessionStart loads vault context and project-local knowledge at session start.
@@ -43,6 +45,7 @@ func SessionStart() error {
 
 	// Compaction mid-session: re-inject critical context, keep loop state.
 	if input.Source == "compact" {
+		stampLoopSession(input.CWD, input.SessionID, input.Source)
 		return sessionStartAfterCompact(input.CWD)
 	}
 
@@ -53,6 +56,11 @@ func SessionStart() error {
 	if shouldCleanupStaleLoop(input.Source) {
 		cleanupStaleLoop(input.CWD)
 	}
+
+	// 1c. Stamp the session id into any surviving loop state. A NEW id on a
+	// fresh boundary invalidates recorded agent handles: subagent resume is
+	// same-session only, so handles from the previous session are stale.
+	stampLoopSession(input.CWD, input.SessionID, input.Source)
 
 	// 2. Detect project name
 	project := detectProject(input.CWD)
@@ -348,6 +356,37 @@ func sessionStartAfterCompact(cwd string) error {
 
 	fmt.Print(staticOperatingMode())
 	return nil
+}
+
+// stampLoopSession records the Claude Code session id in the active loop
+// state. Recorded agent handles are same-session only (a stale handle fails
+// at the SendMessage layer), so a DIFFERENT id arriving on a fresh session
+// boundary (source startup/clear) clears every recorded handle along with
+// storing the new id. Compact and resume fire mid-session: handles stay
+// valid and the stored id is left untouched. Best-effort: no loop state or
+// an inactive loop is a silent no-op.
+func stampLoopSession(cwd, sessionID, source string) {
+	if sessionID == "" {
+		return
+	}
+	state, root, err := loop.ReadStateRoot(cwd)
+	if err != nil || !state.Active {
+		return
+	}
+	if state.SessionID == "" {
+		state.SessionID = sessionID
+		_ = loop.WriteState(root, state)
+		return
+	}
+	if state.SessionID == sessionID {
+		return
+	}
+	if source == "compact" || source == "resume" {
+		return
+	}
+	state.ClearAllAgentHandles()
+	state.SessionID = sessionID
+	_ = loop.WriteState(root, state)
 }
 
 // cleanupStaleLoop removes loop state left over from a previous session

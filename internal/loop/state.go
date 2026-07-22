@@ -43,6 +43,105 @@ type State struct {
 	// pre-loop posture by disabling it; a dispatcher the user enabled
 	// independently is left on.
 	DispatcherEnabledBySetup bool `json:"dispatcher_enabled_by_setup,omitempty"`
+	// SessionID is the Claude Code session id stamped by the session-start
+	// hook. Subagent resume is same-session only, so a different id arriving
+	// on a fresh session boundary (source startup/clear) invalidates every
+	// recorded agent handle below.
+	SessionID string `json:"session_id,omitempty"`
+	// AgentHandles records the semi-persistent story-agent handles the
+	// dispatcher reported back via `pvg loop agent set`, keyed by story ID
+	// then role (AgentRoleDeveloper | AgentRolePM). `pvg loop next` surfaces
+	// them as resume hints on rework and re-review actions.
+	AgentHandles map[string]map[string]AgentHandle `json:"agent_handles,omitempty"`
+}
+
+// Story-agent handle roles. The pm_review action role "pm_acceptor" maps to
+// AgentRolePM; developer_rework/developer_new map to AgentRoleDeveloper.
+const (
+	AgentRoleDeveloper = "developer"
+	AgentRolePM        = "pm"
+)
+
+// ValidAgentRole reports whether role is a recordable story-agent role.
+func ValidAgentRole(role string) bool {
+	return role == AgentRoleDeveloper || role == AgentRolePM
+}
+
+// AgentHandle records one semi-persistent subagent for a story+role: the
+// opaque resume handle the dispatcher reported back, and how many resumes
+// have been consumed against it. Handles are same-session only.
+type AgentHandle struct {
+	Handle  string `json:"handle"`
+	Resumes int    `json:"resumes"`
+}
+
+// SetAgentHandle records (or overwrites) the handle for a story+role and
+// resets its resume counter: a fresh handle has consumed no resumes.
+func (s *State) SetAgentHandle(storyID, role, handle string) {
+	if s.AgentHandles == nil {
+		s.AgentHandles = make(map[string]map[string]AgentHandle)
+	}
+	if s.AgentHandles[storyID] == nil {
+		s.AgentHandles[storyID] = make(map[string]AgentHandle)
+	}
+	s.AgentHandles[storyID][role] = AgentHandle{Handle: handle}
+}
+
+// AgentHandleFor returns the recorded handle for a story+role.
+func (s *State) AgentHandleFor(storyID, role string) (AgentHandle, bool) {
+	h, ok := s.AgentHandles[storyID][role]
+	return h, ok
+}
+
+// ClearAgentHandles removes the recorded handle for a story+role, or every
+// role for the story when role is empty. Clearing absent entries is a no-op
+// by design: the dispatcher clears unconditionally (e.g. on story accept).
+func (s *State) ClearAgentHandles(storyID, role string) {
+	roles, ok := s.AgentHandles[storyID]
+	if !ok {
+		return
+	}
+	if role == "" {
+		delete(s.AgentHandles, storyID)
+	} else {
+		delete(roles, role)
+		if len(roles) == 0 {
+			delete(s.AgentHandles, storyID)
+		}
+	}
+	if len(s.AgentHandles) == 0 {
+		s.AgentHandles = nil
+	}
+}
+
+// ClearAllAgentHandles drops every recorded handle. Used at session
+// boundaries: a new session id means every handle is stale.
+func (s *State) ClearAllAgentHandles() {
+	s.AgentHandles = nil
+}
+
+// incrementAgentResume consumes one resume for a recorded story+role handle.
+// No-op when nothing is recorded.
+func (s *State) incrementAgentResume(storyID, role string) {
+	if h, ok := s.AgentHandles[storyID][role]; ok {
+		h.Resumes++
+		s.AgentHandles[storyID][role] = h
+	}
+}
+
+// ClearStoryAgentHandles removes every recorded agent handle for one story
+// from the active loop state and persists it. Best-effort by design: no loop
+// state, an inactive loop, or an absent entry are all silent no-ops.
+func ClearStoryAgentHandles(projectRoot, storyID string) {
+	state, root, err := ReadStateRoot(projectRoot)
+	if err != nil || !state.Active {
+		return
+	}
+	if _, ok := state.AgentHandles[storyID]; !ok {
+		return
+	}
+	state.ClearAgentHandles(storyID, "")
+	_ = WriteState(root, state)
 }
 
 // NewState creates a new loop state with sensible defaults.

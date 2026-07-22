@@ -47,9 +47,14 @@ var defaults = map[string]string{
 	// or design/domain.modelith.yaml); on promises it; off disables it.
 	"design.machinery":             "auto",
 	"loop.persist_across_sessions": "true",
-	"lint.quality_gates":           "",
-	"lint.brownfield":              "false",
-	"update.nudge":                 "true",
+	// Resume hints for semi-persistent story agents: when "true" (default),
+	// `pvg loop agent set` handles make `pvg loop next` emit
+	// resume_agent/resume_count on developer_rework and pm_review actions
+	// (capped at 2 resumes per handle). "false" disables emission.
+	"loop.agent_resume":  "true",
+	"lint.quality_gates": "",
+	"lint.brownfield":    "false",
+	"update.nudge":       "true",
 	// Per-role model overrides for Paivot agents. Empty = no override
 	// (the agent's frontmatter model wins). See setSettings for validation.
 	"model.developer":            "",
@@ -186,6 +191,10 @@ func setSettings(projectRoot, path string, args []string) error {
 
 		if key == "design.machinery" && value != "auto" && value != "on" && value != "off" {
 			return fmt.Errorf("invalid value %q for design.machinery (allowed: auto, on, off)", value)
+		}
+
+		if key == "loop.agent_resume" && value != "true" && value != "false" {
+			return fmt.Errorf("invalid value %q for loop.agent_resume (allowed: true, false)", value)
 		}
 
 		settings[key] = value

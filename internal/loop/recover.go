@@ -636,6 +636,10 @@ func ExecuteRecover(projectRoot string, plan RecoverPlan) []string {
 			}
 
 		case ActionResetStory:
+			// The story's developer is presumed dead: any recorded resume
+			// handle for the story is stale. Clear it before the release so
+			// the loop never resumes a dead agent onto a reset story.
+			ClearStoryAgentHandles(projectRoot, action.StoryID)
 			// Mirror runND: resolve the shared vault and anchor the command to
 			// the project root so the mutation targets the right nd state.
 			// nd release clears the dead developer's claim (assignee) AND

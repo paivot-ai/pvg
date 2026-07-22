@@ -623,6 +623,126 @@ func TestHookInput_ParsesSource(t *testing.T) {
 	}
 }
 
+func TestHookInput_ParsesSessionID(t *testing.T) {
+	var input hookInput
+	if err := json.Unmarshal([]byte(`{"cwd":"/tmp/project","source":"startup","session_id":"sess-abc"}`), &input); err != nil {
+		t.Fatal(err)
+	}
+	if input.SessionID != "sess-abc" {
+		t.Errorf("SessionID = %q, want sess-abc", input.SessionID)
+	}
+}
+
+// writeLoopStateWithHandles writes an active loop state carrying a session id
+// and one recorded developer handle, returning the story id used.
+func writeLoopStateWithHandles(t *testing.T, dir, sessionID string) string {
+	t.Helper()
+	state := loop.NewState("epic", "PROJ-epic", 50)
+	state.SessionID = sessionID
+	state.SetAgentHandle("PROJ-s1", loop.AgentRoleDeveloper, "agent-dev")
+	if err := loop.WriteState(dir, state); err != nil {
+		t.Fatal(err)
+	}
+	return "PROJ-s1"
+}
+
+func TestStampLoopSession_StoresIDWhenEmpty(t *testing.T) {
+	dir := t.TempDir()
+	storyID := writeLoopStateWithHandles(t, dir, "")
+
+	stampLoopSession(dir, "sess-1", "startup")
+
+	state, err := loop.ReadState(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.SessionID != "sess-1" {
+		t.Errorf("expected session id stored, got %q", state.SessionID)
+	}
+	if _, ok := state.AgentHandleFor(storyID, loop.AgentRoleDeveloper); !ok {
+		t.Error("first stamp must not clear handles")
+	}
+}
+
+func TestStampLoopSession_NewIDOnStartupClearsHandles(t *testing.T) {
+	for _, source := range []string{"startup", "clear"} {
+		dir := t.TempDir()
+		storyID := writeLoopStateWithHandles(t, dir, "sess-old")
+
+		stampLoopSession(dir, "sess-new", source)
+
+		state, err := loop.ReadState(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if state.SessionID != "sess-new" {
+			t.Errorf("source %s: expected new session id stored, got %q", source, state.SessionID)
+		}
+		if _, ok := state.AgentHandleFor(storyID, loop.AgentRoleDeveloper); ok {
+			t.Errorf("source %s: expected stale handles cleared on new session", source)
+		}
+	}
+}
+
+func TestStampLoopSession_CompactAndResumeKeepHandles(t *testing.T) {
+	for _, source := range []string{"compact", "resume"} {
+		dir := t.TempDir()
+		storyID := writeLoopStateWithHandles(t, dir, "sess-old")
+
+		stampLoopSession(dir, "sess-new", source)
+
+		state, err := loop.ReadState(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, ok := state.AgentHandleFor(storyID, loop.AgentRoleDeveloper); !ok {
+			t.Errorf("source %s: expected handles preserved mid-session", source)
+		}
+		if state.SessionID != "sess-old" {
+			t.Errorf("source %s: expected stored session id untouched, got %q", source, state.SessionID)
+		}
+	}
+}
+
+func TestStampLoopSession_SameIDIsNoop(t *testing.T) {
+	dir := t.TempDir()
+	storyID := writeLoopStateWithHandles(t, dir, "sess-1")
+
+	stampLoopSession(dir, "sess-1", "startup")
+
+	state, err := loop.ReadState(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := state.AgentHandleFor(storyID, loop.AgentRoleDeveloper); !ok {
+		t.Error("same session id must keep handles")
+	}
+}
+
+func TestStampLoopSession_NoLoopStateOrEmptyIDIsNoop(t *testing.T) {
+	// No loop state: must not panic or create one.
+	dir := t.TempDir()
+	stampLoopSession(dir, "sess-1", "startup")
+	if _, err := os.Stat(loop.StatePath(dir)); !os.IsNotExist(err) {
+		t.Error("stamp must not create loop state")
+	}
+
+	// Empty session id: state untouched.
+	dir = t.TempDir()
+	storyID := writeLoopStateWithHandles(t, dir, "sess-old")
+	stampLoopSession(dir, "", "startup")
+	state, err := loop.ReadState(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.SessionID != "sess-old" {
+		t.Errorf("empty incoming id must not overwrite, got %q", state.SessionID)
+	}
+	if _, ok := state.AgentHandleFor(storyID, loop.AgentRoleDeveloper); !ok {
+		t.Error("empty incoming id must not clear handles")
+	}
+}
+
 func TestSessionStartAfterCompact_EmitsDispatcherAndLoopContext(t *testing.T) {
 	dir := t.TempDir()
 	if err := dispatcher.On(dir); err != nil {

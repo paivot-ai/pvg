@@ -367,6 +367,9 @@ pvg loop cancel                         # Cancel active loop
 pvg loop snapshot                       # Checkpoint active agent/worktree state
 pvg loop snapshot --agent ID=TYPE       # Include agent assignments
 pvg loop recover                        # Clean up after context loss
+pvg loop agent set ID ROLE HANDLE       # Record a story-agent resume handle (role: developer|pm)
+pvg loop agent clear ID [ROLE]          # Clear recorded handle(s) for a story (idempotent)
+pvg loop agent list [--json]            # Inspect recorded handles and resume counts
 ```
 
 `pvg loop setup` enables dispatcher mode when it is off (same code path as
@@ -390,6 +393,19 @@ In `--epic` mode it drains the priority epic first, then falls back to the rest 
 The selector is intentionally additive. `paivot-graph` keeps its existing Claude hook flow,
 while Codex and OpenCode can reuse the same evaluation logic instead of carrying their own
 parallel copies of the queue-selection rules.
+
+Semi-persistent story agents: after spawning a developer or PM subagent for a story, the
+dispatcher can report the completed agent's resume handle back with `pvg loop agent set`.
+On the next `developer_rework` or `pm_review` action for that story, `pvg loop next` emits
+`resume_agent` (the handle) and `resume_count` (prior resumes, omitted when 0) so the
+dispatcher resumes the original subagent, full conversation intact, instead of spawning
+fresh. Fresh `developer_new` spawns and first PM reviews are unchanged. Each handle allows
+at most 2 resumes (transcripts grow per resume); disable the hints entirely with
+`pvg settings loop.agent_resume=false`. Handles are same-session only: the session-start
+hook stamps the session id into the loop state and clears all recorded handles when a new
+session id arrives on a fresh boundary (startup/clear), while compaction and resume keep
+them. `pvg loop recover` clears handles for stories it resets, and `pvg loop agent clear`
+is idempotent so the dispatcher can clear unconditionally when a story closes.
 
 ### Worktree safety
 

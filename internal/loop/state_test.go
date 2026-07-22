@@ -358,3 +358,177 @@ func TestRotate_FailsWhenNoState(t *testing.T) {
 		t.Error("expected Rotate() to fail when no state file exists")
 	}
 }
+
+func TestValidAgentRole(t *testing.T) {
+	valid := []string{AgentRoleDeveloper, AgentRolePM}
+	for _, role := range valid {
+		if !ValidAgentRole(role) {
+			t.Errorf("ValidAgentRole(%q) = false, want true", role)
+		}
+	}
+	invalid := []string{"", "pm_acceptor", "Developer", "PM", "anchor"}
+	for _, role := range invalid {
+		if ValidAgentRole(role) {
+			t.Errorf("ValidAgentRole(%q) = true, want false", role)
+		}
+	}
+}
+
+func TestNewState_HasNoAgentHandles(t *testing.T) {
+	s := NewState("epic", "PROJ-e", 50)
+	if s.AgentHandles != nil {
+		t.Errorf("fresh state must have no agent handles, got %v", s.AgentHandles)
+	}
+	if s.SessionID != "" {
+		t.Errorf("fresh state must have empty session id, got %q", s.SessionID)
+	}
+}
+
+func TestSetAgentHandle_RecordsAndResetsResumes(t *testing.T) {
+	s := NewState("epic", "PROJ-e", 50)
+
+	s.SetAgentHandle("PROJ-s1", AgentRoleDeveloper, "agent-abc")
+	h, ok := s.AgentHandleFor("PROJ-s1", AgentRoleDeveloper)
+	if !ok || h.Handle != "agent-abc" || h.Resumes != 0 {
+		t.Fatalf("expected handle agent-abc with 0 resumes, got %+v (ok=%v)", h, ok)
+	}
+
+	// Consume a resume, then overwrite: the counter must reset to 0.
+	s.incrementAgentResume("PROJ-s1", AgentRoleDeveloper)
+	s.SetAgentHandle("PROJ-s1", AgentRoleDeveloper, "agent-new")
+	h, _ = s.AgentHandleFor("PROJ-s1", AgentRoleDeveloper)
+	if h.Handle != "agent-new" || h.Resumes != 0 {
+		t.Fatalf("expected overwrite to reset resumes, got %+v", h)
+	}
+
+	// Roles are independent for the same story.
+	s.SetAgentHandle("PROJ-s1", AgentRolePM, "agent-pm")
+	if h, _ := s.AgentHandleFor("PROJ-s1", AgentRolePM); h.Handle != "agent-pm" {
+		t.Fatalf("expected independent pm handle, got %+v", h)
+	}
+	if h, _ := s.AgentHandleFor("PROJ-s1", AgentRoleDeveloper); h.Handle != "agent-new" {
+		t.Fatalf("pm set must not disturb developer handle, got %+v", h)
+	}
+}
+
+func TestIncrementAgentResume_NoopWhenAbsent(t *testing.T) {
+	s := NewState("epic", "PROJ-e", 50)
+	s.incrementAgentResume("PROJ-none", AgentRoleDeveloper) // must not panic
+	if s.AgentHandles != nil {
+		t.Errorf("increment on absent entry must not create one, got %v", s.AgentHandles)
+	}
+}
+
+func TestClearAgentHandles_RoleStoryAndIdempotency(t *testing.T) {
+	s := NewState("epic", "PROJ-e", 50)
+	s.SetAgentHandle("PROJ-s1", AgentRoleDeveloper, "agent-dev")
+	s.SetAgentHandle("PROJ-s1", AgentRolePM, "agent-pm")
+	s.SetAgentHandle("PROJ-s2", AgentRoleDeveloper, "agent-other")
+
+	// Clear a single role: the other role survives.
+	s.ClearAgentHandles("PROJ-s1", AgentRolePM)
+	if _, ok := s.AgentHandleFor("PROJ-s1", AgentRolePM); ok {
+		t.Fatal("expected pm handle cleared")
+	}
+	if _, ok := s.AgentHandleFor("PROJ-s1", AgentRoleDeveloper); !ok {
+		t.Fatal("expected developer handle preserved")
+	}
+
+	// Clear the whole story (role omitted): both roles gone.
+	s.ClearAgentHandles("PROJ-s1", "")
+	if _, ok := s.AgentHandleFor("PROJ-s1", AgentRoleDeveloper); ok {
+		t.Fatal("expected all handles for PROJ-s1 cleared")
+	}
+	if _, ok := s.AgentHandleFor("PROJ-s2", AgentRoleDeveloper); !ok {
+		t.Fatal("expected PROJ-s2 handle untouched")
+	}
+
+	// Idempotent: clearing absent entries must not panic or error.
+	s.ClearAgentHandles("PROJ-s1", "")
+	s.ClearAgentHandles("PROJ-s1", AgentRoleDeveloper)
+	s.ClearAgentHandles("PROJ-missing", AgentRolePM)
+
+	// Clearing the last story drops the map back to nil.
+	s.ClearAgentHandles("PROJ-s2", AgentRoleDeveloper)
+	if s.AgentHandles != nil {
+		t.Errorf("expected nil map after clearing everything, got %v", s.AgentHandles)
+	}
+}
+
+func TestClearAllAgentHandles_DropsEverything(t *testing.T) {
+	s := NewState("epic", "PROJ-e", 50)
+	s.SetAgentHandle("PROJ-s1", AgentRoleDeveloper, "agent-dev")
+	s.SetAgentHandle("PROJ-s2", AgentRolePM, "agent-pm")
+
+	s.ClearAllAgentHandles()
+	if s.AgentHandles != nil {
+		t.Errorf("expected nil map after ClearAllAgentHandles, got %v", s.AgentHandles)
+	}
+}
+
+func TestAgentHandles_StatePersistRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+
+	original := NewState("epic", "PROJ-e", 50)
+	original.SessionID = "sess-1"
+	original.SetAgentHandle("PROJ-s1", AgentRoleDeveloper, "agent-dev")
+	original.SetAgentHandle("PROJ-s1", AgentRolePM, "agent-pm")
+	original.incrementAgentResume("PROJ-s1", AgentRolePM)
+
+	if err := WriteState(dir, original); err != nil {
+		t.Fatalf("WriteState() error: %v", err)
+	}
+	restored, err := ReadState(dir)
+	if err != nil {
+		t.Fatalf("ReadState() error: %v", err)
+	}
+
+	if restored.SessionID != "sess-1" {
+		t.Errorf("session_id mismatch: %q", restored.SessionID)
+	}
+	dev, ok := restored.AgentHandleFor("PROJ-s1", AgentRoleDeveloper)
+	if !ok || dev.Handle != "agent-dev" || dev.Resumes != 0 {
+		t.Errorf("developer handle mismatch: %+v (ok=%v)", dev, ok)
+	}
+	pm, ok := restored.AgentHandleFor("PROJ-s1", AgentRolePM)
+	if !ok || pm.Handle != "agent-pm" || pm.Resumes != 1 {
+		t.Errorf("pm handle mismatch: %+v (ok=%v)", pm, ok)
+	}
+}
+
+func TestClearStoryAgentHandles_PersistsAndTolerant(t *testing.T) {
+	dir := t.TempDir()
+
+	// No state at all: silent no-op.
+	ClearStoryAgentHandles(dir, "PROJ-s1")
+
+	state := NewState("epic", "PROJ-e", 50)
+	state.SetAgentHandle("PROJ-s1", AgentRoleDeveloper, "agent-dev")
+	state.SetAgentHandle("PROJ-s2", AgentRolePM, "agent-pm")
+	if err := WriteState(dir, state); err != nil {
+		t.Fatal(err)
+	}
+
+	// Absent story: state on disk stays untouched.
+	ClearStoryAgentHandles(dir, "PROJ-none")
+	restored, err := ReadState(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := restored.AgentHandleFor("PROJ-s1", AgentRoleDeveloper); !ok {
+		t.Fatal("clearing an absent story must not disturb recorded handles")
+	}
+
+	// Present story: cleared and persisted, other stories untouched.
+	ClearStoryAgentHandles(dir, "PROJ-s1")
+	restored, err = ReadState(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := restored.AgentHandleFor("PROJ-s1", AgentRoleDeveloper); ok {
+		t.Fatal("expected PROJ-s1 handles cleared on disk")
+	}
+	if _, ok := restored.AgentHandleFor("PROJ-s2", AgentRolePM); !ok {
+		t.Fatal("expected PROJ-s2 handles preserved")
+	}
+}

@@ -675,6 +675,62 @@ func TestDefaultGatesKeys(t *testing.T) {
 	}
 }
 
+func TestDefaultLoopAgentResume(t *testing.T) {
+	val, ok := defaults["loop.agent_resume"]
+	if !ok {
+		t.Fatal("loop.agent_resume missing from defaults")
+	}
+	if val != "true" {
+		t.Fatalf("expected loop.agent_resume default 'true', got %q", val)
+	}
+}
+
+func TestRunSetLoopAgentResume_AcceptsTrueFalse(t *testing.T) {
+	dir := t.TempDir()
+	oldWD, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Chdir(oldWD) }()
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, val := range []string{"true", "false"} {
+		if _, runErr := captureStdout(t, func() error { return Run([]string{"loop.agent_resume=" + val}) }); runErr != nil {
+			t.Fatalf("loop.agent_resume=%s rejected: %v", val, runErr)
+		}
+	}
+	loaded := LoadFile(filepath.Join(dir, ".vault", "knowledge", ".settings.yaml"))
+	if loaded["loop.agent_resume"] != "false" {
+		t.Errorf("expected loop.agent_resume 'false', got %q", loaded["loop.agent_resume"])
+	}
+}
+
+func TestRunSetLoopAgentResume_RejectsInvalidValue(t *testing.T) {
+	dir := t.TempDir()
+	oldWD, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Chdir(oldWD) }()
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+
+	_, runErr := captureStdout(t, func() error { return Run([]string{"loop.agent_resume=maybe"}) })
+	if runErr == nil {
+		t.Fatal("expected loop.agent_resume=maybe to be rejected")
+	}
+	if !strings.Contains(runErr.Error(), "loop.agent_resume") {
+		t.Fatalf("unexpected error: %v", runErr)
+	}
+	loaded := LoadFile(filepath.Join(dir, ".vault", "knowledge", ".settings.yaml"))
+	if _, ok := loaded["loop.agent_resume"]; ok {
+		t.Errorf("rejected value should not persist, got %q", loaded["loop.agent_resume"])
+	}
+}
+
 func TestRunSetGateMode_AcceptsValidModes(t *testing.T) {
 	dir := t.TempDir()
 	oldWD, err := os.Getwd()

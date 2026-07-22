@@ -827,6 +827,52 @@ func TestExecuteRecover_ResetStoryResolvesVaultAndAnchorsToProjectRoot(t *testin
 	}
 }
 
+func TestExecuteRecover_ResetStoryClearsAgentHandles(t *testing.T) {
+	oldExec := execCommand
+	execCommand = func(name string, args ...string) *exec.Cmd {
+		return exec.Command("true")
+	}
+	defer func() { execCommand = oldExec }()
+
+	override := filepath.Join(t.TempDir(), "shared-vault")
+	if err := os.Setenv("ND_VAULT_DIR", override); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Unsetenv("ND_VAULT_DIR") }()
+
+	projectRoot := t.TempDir()
+	state := NewState("epic", "PROJ-epic", 50)
+	state.SetAgentHandle("PROJ-a1b", AgentRoleDeveloper, "agent-dead")
+	state.SetAgentHandle("PROJ-a1b", AgentRolePM, "agent-pm")
+	state.SetAgentHandle("PROJ-x2c", AgentRoleDeveloper, "agent-alive")
+	if err := WriteState(projectRoot, state); err != nil {
+		t.Fatal(err)
+	}
+
+	plan := RecoverPlan{
+		Actions: []RecoverAction{
+			{Kind: ActionResetStory, StoryID: "PROJ-a1b", Reason: "test"},
+		},
+	}
+	if errs := ExecuteRecover(projectRoot, plan); len(errs) != 0 {
+		t.Fatalf("ExecuteRecover() errors: %v", errs)
+	}
+
+	restored, err := ReadState(projectRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := restored.AgentHandleFor("PROJ-a1b", AgentRoleDeveloper); ok {
+		t.Error("expected reset story's developer handle cleared")
+	}
+	if _, ok := restored.AgentHandleFor("PROJ-a1b", AgentRolePM); ok {
+		t.Error("expected reset story's pm handle cleared")
+	}
+	if _, ok := restored.AgentHandleFor("PROJ-x2c", AgentRoleDeveloper); !ok {
+		t.Error("expected other story's handle preserved")
+	}
+}
+
 // writeEnvrStub installs an executable .paivot/envr under projectRoot that
 // appends its argv to logFile. exitCode lets tests exercise the best-effort
 // failure path.

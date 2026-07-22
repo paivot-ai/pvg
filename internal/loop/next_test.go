@@ -726,6 +726,238 @@ func TestDetectStall_NoLoopStateIsNoOp(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// Agent resume hints
+// ---------------------------------------------------------------------------
+
+// actResult builds an "act" NextResult whose Next mirrors the first action,
+// matching how EvaluateNext wires the two (Next points into Actions).
+func actResult(actions ...NextAction) NextResult {
+	result := NextResult{Decision: "act", Actions: actions}
+	if len(actions) > 0 {
+		result.Next = &result.Actions[0]
+	}
+	return result
+}
+
+func TestApplyAgentResume_StampsDeveloperRework(t *testing.T) {
+	root := t.TempDir()
+	state := NewState("epic", "PROJ-epic", 50)
+	state.SetAgentHandle("PROJ-s1", AgentRoleDeveloper, "agent-dev")
+	if err := WriteState(root, state); err != nil {
+		t.Fatal(err)
+	}
+
+	result := actResult(NextAction{Kind: "developer_rework", Role: "developer", StoryID: "PROJ-s1", Queue: "rejected", Scope: "epic"})
+	ApplyAgentResume(root, &result)
+
+	if result.Actions[0].ResumeAgent != "agent-dev" {
+		t.Fatalf("expected resume_agent=agent-dev, got %q", result.Actions[0].ResumeAgent)
+	}
+	if result.Actions[0].ResumeCount != 0 {
+		t.Fatalf("expected resume_count=0 on first resume, got %d", result.Actions[0].ResumeCount)
+	}
+	if result.Next.ResumeAgent != "agent-dev" {
+		t.Fatal("expected Next to mirror the stamped wave action")
+	}
+
+	// The consumed resume must be persisted.
+	updated, err := ReadState(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h, _ := updated.AgentHandleFor("PROJ-s1", AgentRoleDeveloper); h.Resumes != 1 {
+		t.Fatalf("expected persisted resumes=1, got %d", h.Resumes)
+	}
+}
+
+func TestApplyAgentResume_StampsPMReview(t *testing.T) {
+	root := t.TempDir()
+	state := NewState("epic", "PROJ-epic", 50)
+	state.SetAgentHandle("PROJ-s1", AgentRolePM, "agent-pm")
+	if err := WriteState(root, state); err != nil {
+		t.Fatal(err)
+	}
+
+	result := actResult(NextAction{Kind: "pm_review", Role: "pm_acceptor", StoryID: "PROJ-s1", Queue: "delivered", Scope: "epic"})
+	ApplyAgentResume(root, &result)
+
+	if result.Actions[0].ResumeAgent != "agent-pm" {
+		t.Fatalf("expected pm_review to resolve the pm role handle, got %q", result.Actions[0].ResumeAgent)
+	}
+}
+
+func TestApplyAgentResume_JSONFieldNames(t *testing.T) {
+	root := t.TempDir()
+	state := NewState("epic", "PROJ-epic", 50)
+	state.SetAgentHandle("PROJ-s1", AgentRoleDeveloper, "agent-dev")
+	if err := WriteState(root, state); err != nil {
+		t.Fatal(err)
+	}
+
+	// First resume: resume_agent present, resume_count omitted (0 + omitempty).
+	result := actResult(NextAction{Kind: "developer_rework", Role: "developer", StoryID: "PROJ-s1"})
+	ApplyAgentResume(root, &result)
+	data, err := json.Marshal(result.Actions[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), `"resume_agent":"agent-dev"`) {
+		t.Fatalf("expected resume_agent in JSON, got %s", data)
+	}
+	if strings.Contains(string(data), `"resume_count"`) {
+		t.Fatalf("expected resume_count omitted on first resume, got %s", data)
+	}
+
+	// Second resume: resume_count:1 present.
+	result = actResult(NextAction{Kind: "developer_rework", Role: "developer", StoryID: "PROJ-s1"})
+	ApplyAgentResume(root, &result)
+	data, err = json.Marshal(result.Actions[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), `"resume_count":1`) {
+		t.Fatalf("expected resume_count:1 on second resume, got %s", data)
+	}
+}
+
+func TestApplyAgentResume_CapStopsEmission(t *testing.T) {
+	root := t.TempDir()
+	state := NewState("epic", "PROJ-epic", 50)
+	state.SetAgentHandle("PROJ-s1", AgentRoleDeveloper, "agent-dev")
+	if err := WriteState(root, state); err != nil {
+		t.Fatal(err)
+	}
+
+	// Two resumes are allowed; the third dispatch spawns fresh.
+	for i := 0; i < MaxAgentResumes; i++ {
+		result := actResult(NextAction{Kind: "developer_rework", Role: "developer", StoryID: "PROJ-s1"})
+		ApplyAgentResume(root, &result)
+		if result.Actions[0].ResumeAgent != "agent-dev" || result.Actions[0].ResumeCount != i {
+			t.Fatalf("resume %d: expected handle with count %d, got %+v", i, i, result.Actions[0])
+		}
+	}
+
+	result := actResult(NextAction{Kind: "developer_rework", Role: "developer", StoryID: "PROJ-s1"})
+	ApplyAgentResume(root, &result)
+	if result.Actions[0].ResumeAgent != "" {
+		t.Fatalf("expected no resume hint at the cap, got %q", result.Actions[0].ResumeAgent)
+	}
+
+	// The counter must not grow past the cap.
+	updated, err := ReadState(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h, _ := updated.AgentHandleFor("PROJ-s1", AgentRoleDeveloper); h.Resumes != MaxAgentResumes {
+		t.Fatalf("expected resumes to stay at %d, got %d", MaxAgentResumes, h.Resumes)
+	}
+}
+
+func TestApplyAgentResume_SettingFalseDisables(t *testing.T) {
+	root := t.TempDir()
+	state := NewState("epic", "PROJ-epic", 50)
+	state.SetAgentHandle("PROJ-s1", AgentRoleDeveloper, "agent-dev")
+	if err := WriteState(root, state); err != nil {
+		t.Fatal(err)
+	}
+	writeSettingsFile(t, root, "loop.agent_resume: false")
+
+	result := actResult(NextAction{Kind: "developer_rework", Role: "developer", StoryID: "PROJ-s1"})
+	ApplyAgentResume(root, &result)
+	if result.Actions[0].ResumeAgent != "" {
+		t.Fatalf("expected no resume hint with loop.agent_resume=false, got %q", result.Actions[0].ResumeAgent)
+	}
+
+	// The counter must not be consumed either.
+	updated, err := ReadState(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h, _ := updated.AgentHandleFor("PROJ-s1", AgentRoleDeveloper); h.Resumes != 0 {
+		t.Fatalf("expected resumes untouched when disabled, got %d", h.Resumes)
+	}
+}
+
+func TestApplyAgentResume_NoHandleLeavesActionUnchanged(t *testing.T) {
+	root := t.TempDir()
+	state := NewState("epic", "PROJ-epic", 50)
+	state.SetAgentHandle("PROJ-other", AgentRoleDeveloper, "agent-dev")
+	if err := WriteState(root, state); err != nil {
+		t.Fatal(err)
+	}
+
+	result := actResult(
+		NextAction{Kind: "developer_rework", Role: "developer", StoryID: "PROJ-s1"},
+		NextAction{Kind: "pm_review", Role: "pm_acceptor", StoryID: "PROJ-s2"},
+	)
+	ApplyAgentResume(root, &result)
+	for i, a := range result.Actions {
+		if a.ResumeAgent != "" || a.ResumeCount != 0 {
+			t.Fatalf("action %d: expected no resume fields without a recorded handle, got %+v", i, a)
+		}
+	}
+}
+
+func TestApplyAgentResume_DeveloperNewNeverResumes(t *testing.T) {
+	// Even with a recorded developer handle, a developer_new action means the
+	// story was reset or released -- it must spawn fresh, never resume.
+	root := t.TempDir()
+	state := NewState("epic", "PROJ-epic", 50)
+	state.SetAgentHandle("PROJ-s1", AgentRoleDeveloper, "agent-dev")
+	if err := WriteState(root, state); err != nil {
+		t.Fatal(err)
+	}
+
+	result := actResult(NextAction{Kind: "developer_new", Role: "developer", StoryID: "PROJ-s1", Queue: "ready"})
+	ApplyAgentResume(root, &result)
+	if result.Actions[0].ResumeAgent != "" {
+		t.Fatalf("developer_new must never carry a resume hint, got %q", result.Actions[0].ResumeAgent)
+	}
+
+	updated, err := ReadState(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h, _ := updated.AgentHandleFor("PROJ-s1", AgentRoleDeveloper); h.Resumes != 0 {
+		t.Fatalf("expected resumes untouched for developer_new, got %d", h.Resumes)
+	}
+}
+
+func TestApplyAgentResume_StampsOnlyMatchingActionsInWave(t *testing.T) {
+	root := t.TempDir()
+	state := NewState("epic", "PROJ-epic", 50)
+	state.SetAgentHandle("PROJ-r1", AgentRoleDeveloper, "agent-dev")
+	if err := WriteState(root, state); err != nil {
+		t.Fatal(err)
+	}
+
+	result := actResult(
+		NextAction{Kind: "pm_review", Role: "pm_acceptor", StoryID: "PROJ-d1"},      // first review: no pm handle
+		NextAction{Kind: "developer_rework", Role: "developer", StoryID: "PROJ-r1"}, // recorded handle
+		NextAction{Kind: "developer_new", Role: "developer", StoryID: "PROJ-n1"},    // fresh spawn
+	)
+	ApplyAgentResume(root, &result)
+
+	if result.Actions[0].ResumeAgent != "" {
+		t.Fatalf("first pm review must not resume, got %q", result.Actions[0].ResumeAgent)
+	}
+	if result.Actions[1].ResumeAgent != "agent-dev" {
+		t.Fatalf("rework with recorded handle must resume, got %q", result.Actions[1].ResumeAgent)
+	}
+	if result.Actions[2].ResumeAgent != "" {
+		t.Fatalf("developer_new must not resume, got %q", result.Actions[2].ResumeAgent)
+	}
+}
+
+func TestApplyAgentResume_NoLoopStateIsNoOp(t *testing.T) {
+	result := actResult(NextAction{Kind: "developer_rework", Role: "developer", StoryID: "PROJ-s1"})
+	ApplyAgentResume(t.TempDir(), &result)
+	if result.Actions[0].ResumeAgent != "" {
+		t.Fatalf("expected no resume hint without loop state, got %q", result.Actions[0].ResumeAgent)
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Rejection cap
 // ---------------------------------------------------------------------------
 

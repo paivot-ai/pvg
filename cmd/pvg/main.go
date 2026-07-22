@@ -26,6 +26,7 @@
 //	pvg loop next --json         # Select the next orchestration action
 //	pvg loop snapshot            # Checkpoint agent/worktree state
 //	pvg loop recover             # Clean up after context loss
+//	pvg loop agent set|clear|list # Track story-agent resume handles
 //	pvg worktree add <path> <branch>  # Create a worktree + stamp ownership marker
 //	pvg worktree remove <path>   # Safely remove a worktree (CWD-independent)
 //	pvg setup                    # One-command machine bootstrap (channel-pinned)
@@ -46,6 +47,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime/debug"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -215,6 +217,7 @@ Commands:
   loop next              Select the next orchestration action
   loop snapshot          Checkpoint active agent/worktree state
   loop recover           Clean up after context loss
+  loop agent set|clear|list  Track story-agent resume handles (see pvg loop help)
   dispatcher on|off|status  Manage dispatcher mode
   nd root [--ensure]       Print (and optionally initialize) the shared live nd vault
   nd sync [--status|--no-push]  Sync the backlog via the nd/backlog branch (--status reports position; --out DIR keeps the legacy archival export)
@@ -957,6 +960,8 @@ func runLoop(args []string) error {
 		return loopRecover(cwd, args[1:])
 	case "rotate":
 		return loopRotate(cwd, args[1:])
+	case "agent":
+		return loopAgent(cwd, args[1:])
 	default:
 		loopUsage()
 		return fmt.Errorf("unknown loop subcommand %q", args[0])
@@ -974,6 +979,9 @@ Subcommands:
 	rotate EPIC_ID  Rotate loop to the next epic after completion gate
 	snapshot        Checkpoint active agent/worktree state
 	recover         Clean up after context loss
+  agent set STORY_ID ROLE HANDLE  Record a story-agent handle for resume (role: developer|pm)
+  agent clear STORY_ID [ROLE]     Clear recorded handle(s) for a story (idempotent)
+  agent list [--json]             List recorded agent handles with resume counts
 
 Setup flags:
   (no flags)               Auto-select highest-priority epic (DEFAULT)
@@ -1011,6 +1019,14 @@ Next decisions:
 Recover flags:
   --json                   Output as JSON
 
+Agent resume:
+  Handles recorded with "pvg loop agent set" make "pvg loop next" emit
+  resume_agent (the handle) and resume_count (prior resumes) on
+  developer_rework and pm_review actions so the dispatcher resumes the
+  original subagent instead of spawning fresh. Capped at 2 resumes per
+  handle; disable with "pvg settings loop.agent_resume=false". Handles are
+  same-session only: the session-start hook clears them on a new session id.
+
 Examples:
   pvg loop setup --all
   pvg loop setup --epic PROJ-a1b
@@ -1019,7 +1035,10 @@ Examples:
   pvg loop setup PROJ-a1b --max 10
   pvg loop setup --all --max-iterations 25
   pvg loop snapshot --agent PROJ-a1b=developer
-  pvg loop recover`)
+  pvg loop recover
+  pvg loop agent set PROJ-a1b developer agent-123
+  pvg loop agent clear PROJ-a1b
+  pvg loop agent list --json`)
 }
 
 func loopSetup(cwd string, args []string) error {
@@ -1341,6 +1360,12 @@ func loopNext(cwd string, args []string) error {
 	result.ActiveLoop = activeLoop
 	result.ScopeSource = scopeSource
 
+	// Resume hints: stamp recorded story-agent handles onto rework and
+	// re-review actions (consuming one resume each) so the dispatcher can
+	// resume the original subagent instead of spawning fresh. Gated by the
+	// loop.agent_resume setting and the per-handle resume cap.
+	loop.ApplyAgentResume(scopeRoot, &result)
+
 	// Stalled-claim detection: a dead developer that left its worktree on
 	// disk parks the story in_progress forever (orphan healing only covers
 	// GONE worktrees). Three consecutive wait evaluations over the identical
@@ -1405,6 +1430,9 @@ func printNextResult(result loop.NextResult, jsonOutput bool) error {
 		}
 		if result.Next.HardTDD {
 			fmt.Print(", hard-tdd")
+		}
+		if result.Next.ResumeAgent != "" {
+			fmt.Printf(", resume=%s (resumed %dx)", result.Next.ResumeAgent, result.Next.ResumeCount)
 		}
 		fmt.Println(")")
 	}
@@ -1619,6 +1647,155 @@ func loopRecover(cwd string, args []string) error {
 		}
 	}
 
+	return nil
+}
+
+// loopAgent dispatches the `pvg loop agent` subcommand group: bookkeeping for
+// semi-persistent story-agent resume handles. The dispatcher records handles
+// after spawning (set), clears them when they die or the story closes
+// (clear), and inspects them for debugging (list). `pvg loop next` reads the
+// recorded handles to emit resume hints on rework/re-review actions.
+func loopAgent(cwd string, args []string) error {
+	if len(args) < 1 {
+		loopUsage()
+		return fmt.Errorf("missing agent subcommand (set, clear, list)")
+	}
+
+	switch args[0] {
+	case "help", "--help", "-h":
+		loopUsage()
+		return nil
+	case "set":
+		return loopAgentSet(cwd, args[1:])
+	case "clear":
+		return loopAgentClear(cwd, args[1:])
+	case "list":
+		return loopAgentList(cwd, args[1:])
+	default:
+		loopUsage()
+		return fmt.Errorf("unknown loop agent subcommand %q", args[0])
+	}
+}
+
+func loopAgentSet(cwd string, args []string) error {
+	if len(args) != 3 {
+		return fmt.Errorf("pvg loop agent set requires STORY_ID ROLE HANDLE arguments")
+	}
+	storyID, role, handle := args[0], args[1], args[2]
+	if !loop.ValidAgentRole(role) {
+		return fmt.Errorf("invalid role %q (allowed: %s, %s)", role, loop.AgentRoleDeveloper, loop.AgentRolePM)
+	}
+	if handle == "" {
+		return fmt.Errorf("handle must not be empty")
+	}
+
+	state, root, err := loop.ReadStateRoot(cwd)
+	if err != nil || !state.Active {
+		return fmt.Errorf("no active loop -- agent handles are tracked only while a loop is running")
+	}
+
+	state.SetAgentHandle(storyID, role, handle)
+	if err := loop.WriteState(root, state); err != nil {
+		return fmt.Errorf("write loop state: %w", err)
+	}
+	fmt.Printf("[LOOP] Recorded %s agent for %s (handle %s, resumes reset)\n", role, storyID, handle)
+	return nil
+}
+
+func loopAgentClear(cwd string, args []string) error {
+	if len(args) < 1 || len(args) > 2 {
+		return fmt.Errorf("pvg loop agent clear requires STORY_ID [ROLE] arguments")
+	}
+	storyID := args[0]
+	role := ""
+	if len(args) == 2 {
+		role = args[1]
+		if !loop.ValidAgentRole(role) {
+			return fmt.Errorf("invalid role %q (allowed: %s, %s)", role, loop.AgentRoleDeveloper, loop.AgentRolePM)
+		}
+	}
+
+	// Idempotent by design: the dispatcher clears unconditionally (e.g. after
+	// `pvg story accept`), so an absent loop or absent entry is not an error.
+	state, root, err := loop.ReadStateRoot(cwd)
+	if err != nil || !state.Active {
+		fmt.Println("[LOOP] No active loop -- nothing to clear.")
+		return nil
+	}
+
+	state.ClearAgentHandles(storyID, role)
+	if err := loop.WriteState(root, state); err != nil {
+		return fmt.Errorf("write loop state: %w", err)
+	}
+	if role == "" {
+		fmt.Printf("[LOOP] Cleared agent handles for %s\n", storyID)
+	} else {
+		fmt.Printf("[LOOP] Cleared %s agent handle for %s\n", role, storyID)
+	}
+	return nil
+}
+
+func loopAgentList(cwd string, args []string) error {
+	jsonOutput := false
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--help", "-h":
+			loopUsage()
+			return nil
+		case "--json":
+			jsonOutput = true
+		default:
+			if len(args[i]) > 1 && args[i][0] == '-' {
+				return fmt.Errorf("unknown flag %q", args[i])
+			}
+			return fmt.Errorf("unexpected argument: %s", args[i])
+		}
+	}
+
+	state, _, err := loop.ReadStateRoot(cwd)
+	if err != nil || !state.Active {
+		if jsonOutput {
+			fmt.Println("{}")
+		} else {
+			fmt.Println("[LOOP] No active loop.")
+		}
+		return nil
+	}
+
+	if jsonOutput {
+		handles := state.AgentHandles
+		if handles == nil {
+			handles = map[string]map[string]loop.AgentHandle{}
+		}
+		data, err := json.MarshalIndent(handles, "", "  ")
+		if err != nil {
+			return fmt.Errorf("marshal agent handles: %w", err)
+		}
+		fmt.Println(string(data))
+		return nil
+	}
+
+	if len(state.AgentHandles) == 0 {
+		fmt.Println("[LOOP] No recorded agent handles.")
+		return nil
+	}
+	fmt.Println("[LOOP] Recorded agent handles:")
+	storyIDs := make([]string, 0, len(state.AgentHandles))
+	for id := range state.AgentHandles {
+		storyIDs = append(storyIDs, id)
+	}
+	sort.Strings(storyIDs)
+	for _, id := range storyIDs {
+		roles := make([]string, 0, len(state.AgentHandles[id]))
+		for role := range state.AgentHandles[id] {
+			roles = append(roles, role)
+		}
+		sort.Strings(roles)
+		for _, role := range roles {
+			h := state.AgentHandles[id][role]
+			fmt.Printf("  %s  %s  handle=%s  resumes=%d/%d\n", id, role, h.Handle, h.Resumes, loop.MaxAgentResumes)
+		}
+	}
 	return nil
 }
 

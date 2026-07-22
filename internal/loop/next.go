@@ -31,6 +31,16 @@ type NextAction struct {
 	// `pvg settings model.<role>`. Empty (omitted) means "no override" --
 	// the agent's frontmatter default wins. See applyModelOverrides.
 	Model string `json:"model,omitempty"`
+	// ResumeAgent is the recorded same-session subagent handle for this
+	// story+role: the dispatcher should RESUME that agent (conversation
+	// intact) instead of spawning a fresh one. Stamped by ApplyAgentResume
+	// on developer_rework and pm_review actions only; omitted on fresh
+	// spawns and first reviews.
+	ResumeAgent string `json:"resume_agent,omitempty"`
+	// ResumeCount is the number of resumes already consumed for the handle
+	// BEFORE this one (0 on the first resume, which omitempty drops from the
+	// JSON). Only meaningful when ResumeAgent is set.
+	ResumeCount int `json:"resume_count,omitempty"`
 }
 
 // StalledStory identifies one in_progress story whose developer is presumed
@@ -90,6 +100,15 @@ const DecisionEscalate = "escalate"
 // a story to the user instead of dispatching another rework cycle. `pvg story
 // reject` maintains the counter labels (rejected-x2, rejected-x3) this reads.
 const RejectionCap = 3
+
+// MaxAgentResumes caps how many times a recorded story-agent handle may be
+// resumed. Every resume replays into a growing transcript, so past the cap
+// the loop stops emitting resume hints and the dispatcher spawns fresh.
+const MaxAgentResumes = 2
+
+// agentResumeSetting is the settings key that disables resume-hint emission
+// when set to the literal "false". Default is "true" (emit hints).
+const agentResumeSetting = "loop.agent_resume"
 
 // NoActiveLoopResult builds the refusal returned when no loop scope can be
 // resolved and none was passed explicitly. Global counts are populated
@@ -590,6 +609,77 @@ func stalledCandidateIDs(projectRoot, mode, targetEpic string) []string {
 	}
 	sort.Strings(ids)
 	return ids
+}
+
+// ApplyAgentResume stamps recorded story-agent resume handles onto the
+// selected actions and consumes one resume per stamped action, persisting the
+// updated counters. Only developer_rework and pm_review actions can resume
+// (kindAgentRole): a rework returns to the developer that built the story and
+// a re-review returns to the PM that already reviewed it, full conversation
+// intact. developer_new spawns and first PM reviews (no recorded pm handle)
+// are never stamped. Gated three ways: a handle must be recorded for the
+// story+role, its consumed resumes must be below MaxAgentResumes, and the
+// loop.agent_resume setting must not be "false". No-op without an active
+// loop state -- resume hints only exist inside a loop.
+func ApplyAgentResume(projectRoot string, result *NextResult) {
+	if result == nil || (len(result.Actions) == 0 && result.Next == nil) {
+		return
+	}
+	state, root, err := ReadStateRoot(projectRoot)
+	if err != nil || !state.Active || len(state.AgentHandles) == 0 {
+		return
+	}
+	if !agentResumeEnabled(root) {
+		return
+	}
+
+	changed := false
+	stamp := func(action *NextAction) {
+		role := kindAgentRole(action.Kind)
+		if role == "" {
+			return
+		}
+		handle, ok := state.AgentHandleFor(action.StoryID, role)
+		if !ok || handle.Handle == "" || handle.Resumes >= MaxAgentResumes {
+			return
+		}
+		action.ResumeAgent = handle.Handle
+		action.ResumeCount = handle.Resumes
+		state.incrementAgentResume(action.StoryID, role)
+		changed = true
+	}
+
+	// result.Next points into result.Actions' backing array, so stamping the
+	// wave also updates Next. Stamp Next directly only when no wave exists.
+	for i := range result.Actions {
+		stamp(&result.Actions[i])
+	}
+	if len(result.Actions) == 0 && result.Next != nil {
+		stamp(result.Next)
+	}
+
+	if changed {
+		_ = WriteState(root, state)
+	}
+}
+
+// kindAgentRole maps an action kind to the stored agent-handle role, or ""
+// for kinds that never resume (developer_new always spawns fresh).
+func kindAgentRole(kind string) string {
+	switch kind {
+	case "developer_rework":
+		return AgentRoleDeveloper
+	case "pm_review":
+		return AgentRolePM
+	}
+	return ""
+}
+
+// agentResumeEnabled reads the loop.agent_resume project setting. Only the
+// literal "false" disables resume-hint emission; absent means enabled.
+func agentResumeEnabled(projectRoot string) bool {
+	s := settings.LoadFile(filepath.Join(projectRoot, ".vault", "knowledge", ".settings.yaml"))
+	return s[agentResumeSetting] != "false"
 }
 
 func reasonForAction(action *NextAction) string {
