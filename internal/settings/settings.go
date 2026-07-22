@@ -32,8 +32,10 @@ var defaults = map[string]string{
 	"workflow.sequence":        "open,in_progress,closed",
 	"workflow.exit_rules":      "blocked:open,in_progress;deferred:open,in_progress",
 	"workflow.custom_statuses": "",
-	"dnf.specialist_review":    "false",
-	"dnf.max_iterations":       "3",
+	// D&F specialist challengers default ON: production posture assumes each
+	// BLT document gets a challenge pass unless the project opts out.
+	"dnf.specialist_review": "true",
+	"dnf.max_iterations":    "3",
 	// Deprecated pair, kept for existing projects: the machinery design
 	// substrate (design.machinery) supersedes both. The adapter skills read
 	// design.machinery; these two only gate the legacy narrative-twin flow.

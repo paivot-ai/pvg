@@ -3,8 +3,6 @@ package guard
 import (
 	"regexp"
 	"strings"
-
-	"github.com/paivot-ai/pvg/internal/dispatcher"
 )
 
 // worktreeCdRe matches cd commands that navigate into .claude/worktrees/.
@@ -31,9 +29,10 @@ func CheckWorktreeCd(projectRoot, command string) Result {
 		return Result{Allowed: true}
 	}
 
-	// Only enforce when Paivot dispatcher mode is active.
-	state, _, err := dispatcher.ReadStateRoot(projectRoot)
-	if err != nil || !state.Enabled {
+	// Only enforce while an execution session is live (dispatcher mode OR an
+	// active loop) -- never on the settings file alone. The loop dispatcher
+	// must not cd into worktrees either, so the loop leg stays.
+	if !executionActive(projectRoot) {
 		return Result{Allowed: true}
 	}
 

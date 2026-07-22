@@ -18,6 +18,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/paivot-ai/pvg/internal/design"
 	"github.com/paivot-ai/pvg/internal/settings"
 )
 
@@ -95,9 +96,10 @@ var checkRank = map[string]int{
 	"atomicity":            8,
 	"vertical-slice":       9,
 	"duplicate-sections":   10,
-	"dep-cycles":           11,
-	"release-gate":         12,
-	"paths-exist":          13,
+	"hard-tdd-oracle":      11,
+	"dep-cycles":           12,
+	"release-gate":         13,
+	"paths-exist":          14,
 }
 
 // scope restricts story-level and epic-level checks when --epic is given.
@@ -148,6 +150,7 @@ func CheckBacklog(opts BacklogOptions) (BacklogResult, error) {
 	findings = append(findings, checkAtomicity(b, sc)...)
 	findings = append(findings, checkVerticalSlice(b, sc)...)
 	findings = append(findings, checkDuplicateSections(b, sc)...)
+	findings = append(findings, checkHardTDDOracle(b, sc, opts.ProjectRoot, sett)...)
 	// Graph-level checks stay global even under --epic: a cycle or a
 	// mis-pointed release gate breaks dispatch regardless of which epic
 	// is being fixed.
@@ -1002,6 +1005,58 @@ func checkDuplicateSections(b *Backlog, sc scope) []Finding {
 				})
 			}
 		}
+	}
+	return findings
+}
+
+// --- check: hard-tdd-oracle -------------------------------------------------------------
+
+// checkHardTDDOracle enforces the machinery/hard-TDD fusion at authoring
+// time: when the design substrate applies (same predicate as `pvg story
+// approve-red`), a non-closed, non-epic story whose body cites at least one
+// oracle stable id derives locked RED tests from the spec -- dispatching it
+// without the `hard-tdd` label would skip the RED/GREEN gate entirely, so a
+// missing label is an ERROR. The substrate not applying (or no oracles yet)
+// disables the check.
+func checkHardTDDOracle(b *Backlog, sc scope, projectRoot string, sett map[string]string) []Finding {
+	cfg, applies, _ := design.Applies(projectRoot, sett["design.machinery"])
+	if !applies {
+		return nil
+	}
+	ids, err := design.StableIDs(projectRoot, cfg)
+	if err != nil || len(ids) == 0 {
+		return nil
+	}
+	sortedIDs := make([]string, 0, len(ids))
+	for id := range ids {
+		sortedIDs = append(sortedIDs, id)
+	}
+	sort.Strings(sortedIDs)
+
+	var findings []Finding
+	for _, issue := range b.ordered {
+		if isClosed(issue) || isEpic(issue) || !sc.storyInScope(issue.ID) {
+			continue
+		}
+		if hasIssueLabel(issue, "hard-tdd") {
+			continue
+		}
+		var cited []string
+		for _, id := range sortedIDs {
+			if design.TokenIn(id, issue.Body) {
+				cited = append(cited, id)
+			}
+		}
+		if len(cited) == 0 {
+			continue
+		}
+		findings = append(findings, Finding{
+			Check:    "hard-tdd-oracle",
+			Severity: SeverityError,
+			IssueID:  issue.ID,
+			Message: fmt.Sprintf("story cites oracle stable id(s) %s but is missing the 'hard-tdd' label; oracle-derived stories must run the RED/GREEN gate",
+				strings.Join(cited, ", ")),
+		})
 	}
 	return findings
 }

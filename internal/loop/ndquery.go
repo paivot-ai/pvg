@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os/exec"
+	"sort"
 	"strings"
 
 	"github.com/paivot-ai/pvg/internal/ndvault"
@@ -32,11 +33,18 @@ type ndIssue struct {
 
 var execCommand = exec.Command
 
-// QueryWorkCounts returns work counts across the live backlog.
+// QueryWorkCounts returns the work counts that drive stop decisions.
 //
-// Even in epic mode, stop decisions stay backlog-wide so the loop can continue
-// past a single epic instead of terminating when that epic empties.
+// In epic mode the counts are scoped to the TARGET epic's recursive subtree
+// (--epic, consistent with the dispatch queues in queryQueues). This is what
+// lets the epic completion gate fire when the target epic drains regardless
+// of other epics' state: with backlog-wide counts, a blocked sibling epic
+// kept the total above zero and the drained target epic could be abandoned
+// unmerged with its loop state deleted.
 func QueryWorkCounts(projectRoot, mode, targetEpic string) (WorkCounts, error) {
+	if mode == "epic" && targetEpic != "" {
+		return queryEpicSubtreeCounts(projectRoot, targetEpic)
+	}
 	return queryAllCounts(projectRoot)
 }
 
@@ -99,7 +107,90 @@ func queryAllCounts(projectRoot string) (WorkCounts, error) {
 	return wc, nil
 }
 
+// queryEpicSubtreeCounts mirrors queryAllCounts with every count scoped to
+// the target epic's recursive subtree via --epic (the same filter the
+// dispatch queues use). Epic-type issues -- the target epic itself plus any
+// nested sub-epics, which --epic includes in the subtree -- are containers,
+// never dispatchable work, so they are excluded from every bucket: counting
+// the still-open target epic would keep the subtree total above zero forever
+// and the completion gate could never fire.
+//
+// `nd blocked` has no --epic flag, so the graph-blocked set is fetched
+// globally and intersected with the subtree membership.
+func queryEpicSubtreeCounts(projectRoot, epicID string) (WorkCounts, error) {
+	var wc WorkCounts
+	scope := []string{"--epic", epicID}
+
+	deliveredIssues, err := runND(projectRoot, append([]string{"list", "--status", "!closed", "--label", "delivered", "--limit", "0", "--json"}, scope...)...)
+	if err != nil {
+		return wc, fmt.Errorf("query delivered work: %w", err)
+	}
+	deliveredIssues = filterOutType(deliveredIssues, "epic")
+	wc.Delivered = len(deliveredIssues)
+
+	readyIssues, err := runND(projectRoot, append([]string{"ready", "--json"}, scope...)...)
+	if err != nil {
+		return wc, fmt.Errorf("query ready work: %w", err)
+	}
+	// Same corrections as queryAllCounts (delivered label is authoritative,
+	// claimed stories belong to InProgress), plus the epic-container filter.
+	readyIssues = filterOutType(filterOutStatus(filterOutLabel(readyIssues, "delivered"), "in_progress"), "epic")
+	wc.Ready = len(readyIssues)
+
+	ipIssues, err := runND(projectRoot, append([]string{"list", "--status", "in_progress", "--limit", "0", "--json"}, scope...)...)
+	if err != nil {
+		return wc, fmt.Errorf("query in-progress work: %w", err)
+	}
+	ipIssues = filterOutType(ipIssues, "epic")
+	for _, issue := range ipIssues {
+		if !hasLabel(issue.Labels, "delivered") {
+			wc.InProgress++
+		}
+	}
+
+	rejectedIssues, err := runND(projectRoot, append([]string{"list", "--status", "open", "--label", "rejected", "--limit", "0", "--json"}, scope...)...)
+	if err != nil {
+		return wc, fmt.Errorf("query rejected work: %w", err)
+	}
+	wc.Rejected = len(filterOutType(filterOutLabel(rejectedIssues, "delivered"), "epic"))
+
+	allIssues, err := runND(projectRoot, append([]string{"list", "--status", "!closed", "--limit", "0", "--json"}, scope...)...)
+	if err != nil {
+		return wc, fmt.Errorf("query non-closed work: %w", err)
+	}
+	allIssues = filterOutType(allIssues, "epic")
+	memberSet := make(map[string]bool, len(allIssues))
+	for _, issue := range allIssues {
+		memberSet[issue.ID] = true
+	}
+
+	blockedGlobal, err := runND(projectRoot, "blocked", "--json")
+	if err != nil {
+		return wc, fmt.Errorf("query blocked work: %w", err)
+	}
+	var blockedIssues []ndIssue
+	for _, issue := range blockedGlobal {
+		if memberSet[issue.ID] {
+			blockedIssues = append(blockedIssues, issue)
+		}
+	}
+	wc.Blocked = len(blockedIssues)
+
+	wc.Other = countOtherIssues(append(append([]ndIssue{}, readyIssues...), deliveredIssues...), ipIssues, blockedIssues, allIssues)
+
+	return wc, nil
+}
+
 // queryEpicCounts uses nd children to count work within a specific epic.
+//
+// DIRECT-CHILDREN ASSUMPTION: `nd children` returns direct children only,
+// deliberately NOT the recursive subtree the dispatch queues use (--epic).
+// A nested sub-epic is counted here as a single child issue whose own status
+// stands in for its subtree: the parent epic cannot reach epic_complete
+// (epicTotal == 0) until the sub-epic itself is closed by its completion
+// gate. Making this recursive would change rotation semantics (when
+// epic_complete fires) in ways the current tests do not cover, so the
+// counting stays direct on purpose.
 //
 // nd has 5 statuses: open, in_progress, blocked, deferred, closed. There is
 // no "ready" status -- readiness is a graph property. An open child with open
@@ -238,6 +329,29 @@ func QueryInProgress(projectRoot string) ([]ndIssue, error) {
 	return runND(projectRoot, "list", "--status", "in_progress", "--limit", "0", "--json")
 }
 
+// QueryInProgressIDs returns the sorted ids of in_progress issues, scoped to
+// the target epic's subtree in epic mode. Best-effort: returns nil on error
+// (callers use it for work-state signatures, where a missing set degrades to
+// counts-only fingerprinting).
+func QueryInProgressIDs(projectRoot, mode, targetEpic string) []string {
+	args := []string{"list", "--status", "in_progress", "--limit", "0", "--json"}
+	if mode == "epic" && targetEpic != "" {
+		args = append(args, "--epic", targetEpic)
+	}
+	issues, err := runND(projectRoot, args...)
+	if err != nil {
+		return nil
+	}
+	ids := make([]string, 0, len(issues))
+	for _, issue := range issues {
+		if issue.ID != "" {
+			ids = append(ids, issue.ID)
+		}
+	}
+	sort.Strings(ids)
+	return ids
+}
+
 // QueryDelivered returns non-closed stories labeled delivered. Status is
 // deliberately NOT restricted to in_progress: a developer that labeled the
 // story without claiming it (status open) has still delivered.
@@ -270,6 +384,11 @@ func QueryRejected(projectRoot string, filters ...string) ([]ndIssue, error) {
 // double-dispatch window, so a claimed story must leave the ready queue.
 // Hard-TDD GREEN dispatch is unaffected: `pvg story approve-red` returns the
 // story to status open, so it re-enters the queue for the GREEN phase.
+//
+// Epic-type issues are filtered out: with `--epic` scoping the epic itself
+// (and any nested sub-epics) are inside the recursive subtree and nd ready
+// does not exclude them, but an epic is a container, never dispatchable
+// developer work.
 func QueryReady(projectRoot string, filters ...string) ([]ndIssue, error) {
 	args := []string{"ready", "--sort", "priority", "--json"}
 	args = append(args, filters...)
@@ -278,6 +397,7 @@ func QueryReady(projectRoot string, filters ...string) ([]ndIssue, error) {
 		return nil, err
 	}
 	issues = filterOutLabel(filterOutLabel(issues, "rejected"), "delivered")
+	issues = filterOutType(issues, "epic")
 	return filterOutStatus(issues, "in_progress"), nil
 }
 
@@ -334,6 +454,22 @@ func filterOutLabel(issues []ndIssue, label string) []ndIssue {
 	filtered := make([]ndIssue, 0, len(issues))
 	for _, issue := range issues {
 		if hasLabel(issue.Labels, label) {
+			continue
+		}
+		filtered = append(filtered, issue)
+	}
+	return filtered
+}
+
+// filterOutType drops issues whose type matches (case-insensitive).
+func filterOutType(issues []ndIssue, issueType string) []ndIssue {
+	if len(issues) == 0 {
+		return nil
+	}
+
+	filtered := make([]ndIssue, 0, len(issues))
+	for _, issue := range issues {
+		if strings.EqualFold(issue.Type, issueType) {
 			continue
 		}
 		filtered = append(filtered, issue)

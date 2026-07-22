@@ -28,6 +28,21 @@ type State struct {
 	MaxConsecutiveWaits int      `json:"max_consecutive_waits"`
 	WaitIterations      int      `json:"wait_iterations"`
 	StartedAt           string   `json:"started_at"`
+	// LastStopSignature is the work-state signature recorded at the previous
+	// stop evaluation (ComputeWorkSignature). EvaluateStop resets the
+	// consecutive-wait counter when the current signature differs.
+	LastStopSignature string `json:"last_stop_signature,omitempty"`
+	// WaitStorySet / WaitStoryStreak track stalled-claim detection for
+	// `pvg loop next`: the comma-joined sorted in_progress story-id set seen
+	// at the last wait decision, and how many consecutive wait evaluations
+	// observed that identical set (see DetectStall).
+	WaitStorySet    string `json:"wait_story_set,omitempty"`
+	WaitStoryStreak int    `json:"wait_story_streak,omitempty"`
+	// DispatcherEnabledBySetup records that `pvg loop setup` was what enabled
+	// dispatcher mode for this loop. `pvg loop cancel` then restores the
+	// pre-loop posture by disabling it; a dispatcher the user enabled
+	// independently is left on.
+	DispatcherEnabledBySetup bool `json:"dispatcher_enabled_by_setup,omitempty"`
 }
 
 // NewState creates a new loop state with sensible defaults.

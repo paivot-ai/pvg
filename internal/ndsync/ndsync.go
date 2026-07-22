@@ -1,8 +1,14 @@
-// Package ndsync mirrors the live nd vault into a git-tracked snapshot
-// directory (.vault/backlog-snapshot/) and restores it after a fresh clone
-// or vault loss. The live vault lives under the git common dir (or a
-// gitignored local .vault/) and is NOT part of git history; the snapshot
-// gives the backlog git durability.
+// Package ndsync bridges pvg to nd's git-native backlog durability.
+//
+// Since nd v0.11.0 the backlog persists on a dedicated branch (default
+// nd/backlog): every mutating nd command auto-snapshots the vault locally and
+// `nd sync` reconciles it with the remote. GitSync delegates to that
+// mechanism against the resolved vault.
+//
+// The tracked snapshot directory (.vault/backlog-snapshot/) is the LEGACY
+// model: a point-in-time filesystem export committed to code branches. It is
+// kept for archival exports (`pvg nd sync --out DIR`) and as the restore
+// fallback for repos that predate the backlog branch.
 package ndsync
 
 import (
@@ -20,17 +26,20 @@ var execCommand = exec.Command
 const snapshotRelDir = ".vault/backlog-snapshot"
 const ndConfigName = ".nd.yaml"
 
-const readmeContent = `# Backlog Snapshot
+const readmeContent = `# Backlog Snapshot (legacy)
 
-This directory is a point-in-time EXPORT of the live nd vault, committed to
-git for durability. It is NOT the live queue: the live queue is the shared
-nd vault (resolved by ` + "`pvg nd root`" + `), which lives outside git history.
+This directory is a point-in-time EXPORT of the live nd vault. It is NOT the
+live queue: the live queue is the shared nd vault (resolved by
+` + "`pvg nd root`" + `), which lives outside git history.
+
+Backlog durability now comes from nd's dedicated git branch (nd/backlog),
+synced with ` + "`pvg nd sync`" + `. This export remains for archival use only.
 
 - Never hand-edit files in this directory. They are overwritten by the next
   export and never read by nd at runtime.
-- Refresh this snapshot with ` + "`pvg nd sync`" + `.
-- After a fresh clone (or any vault loss), restore the live vault from this
-  snapshot with ` + "`pvg nd restore`" + `.
+- Refresh this export with ` + "`pvg nd sync --out DIR`" + `.
+- ` + "`pvg nd restore`" + ` falls back to this snapshot only when the
+  nd/backlog branch does not exist locally or on the remote.
 `
 
 // SyncResult summarizes a sync operation.
@@ -48,9 +57,49 @@ type RestoreResult struct {
 	ConfigRestored bool   // .nd.yaml copied because the vault lacked one
 }
 
+// backlogBranch is nd's git-sync branch. Vaults can override sync.branch in
+// nd config; pvg's restore-fallback detection intentionally checks only the
+// default.
+const backlogBranch = "nd/backlog"
+
 // SnapshotDir returns the snapshot directory for a project root.
 func SnapshotDir(projectRoot string) string {
 	return filepath.Join(projectRoot, filepath.FromSlash(snapshotRelDir))
+}
+
+// GitSync runs a full `nd sync` (snapshot + fetch + field-aware merge + push)
+// against vaultDir and returns nd's trimmed combined output.
+func GitSync(vaultDir string) (string, error) {
+	cmd := execCommand("nd", "--vault", vaultDir, "sync")
+	out, err := cmd.CombinedOutput()
+	msg := strings.TrimSpace(string(out))
+	if err != nil {
+		if msg != "" {
+			return msg, fmt.Errorf("nd sync: %w: %s", err, msg)
+		}
+		return msg, fmt.Errorf("nd sync: %w", err)
+	}
+	return msg, nil
+}
+
+// BacklogBranchAvailable reports whether the nd backlog branch exists locally
+// or on the origin remote of the repository at projectRoot. Refs live in the
+// git common dir, so this works from any worktree.
+func BacklogBranchAvailable(projectRoot string) bool {
+	ref := "refs/heads/" + backlogBranch
+	local := execCommand("git", "-C", projectRoot, "rev-parse", "--verify", "--quiet", ref)
+	if local.Run() == nil {
+		return true
+	}
+	remote := execCommand("git", "-C", projectRoot, "ls-remote", "--exit-code", "origin", ref)
+	return remote.Run() == nil
+}
+
+// HasLegacySnapshot reports whether the deprecated tracked snapshot directory
+// (.vault/backlog-snapshot/) exists for projectRoot.
+func HasLegacySnapshot(projectRoot string) bool {
+	info, err := os.Stat(SnapshotDir(projectRoot))
+	return err == nil && info.IsDir()
 }
 
 // Sync mirrors the live vault into the default tracked snapshot directory
@@ -185,9 +234,10 @@ func Restore(projectRoot, vaultDir string, force bool) (RestoreResult, error) {
 	return res, nil
 }
 
-// CommitSnapshot stages and commits the snapshot directory, making
-// `pvg nd sync --commit` one atomic durability step. Returns false with no
-// error when the snapshot already matches HEAD -- a perpetually dirty
+// CommitSnapshot stages and commits the snapshot directory. Legacy: it backed
+// the retired `pvg nd sync --commit` durability step (now an alias for a full
+// `nd sync`); kept for repos still carrying a tracked snapshot. Returns false
+// with no error when the snapshot already matches HEAD -- a perpetually dirty
 // tracked snapshot breaks worktree-cleanliness checks mid-loop, so sync
 // and commit must never be separated in unattended runs.
 func CommitSnapshot(projectRoot string) (bool, error) {

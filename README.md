@@ -203,7 +203,9 @@ they fan out best-effort to mirrors. Available adapters in this build:
 ### Issues abstraction
 
 ```bash
-pvg issues create "Title" --body "..." --labels x,y --parent EPIC-1
+pvg issues create "Title" --body "..." --labels x,y --parent EPIC-1 --priority P1
+                                                # --priority accepts P0-P4 or 0-4 (0 = highest); adapters without
+                                                # priority support ignore it with a stderr warning
 pvg issues show <id> [--json]
 pvg issues list [--status S] [--label L] [--parent ID] [--limit N] [--json]
 pvg issues update <id> [--title T] [--body B] [--status S] [--add-label x] [--remove-label x]
@@ -272,14 +274,31 @@ pvg nd update PROJ-a1b --status=open     # Any nd command works without remember
 pvg nd dep add <issue> <depends-on>      # <issue> depends on <depends-on>
 pvg nd dep cycles                        # Detect circular dependencies
 pvg nd stale --days=14                   # Surface stale issues
-pvg nd sync [--commit|--out DIR]         # Export the live nd vault snapshot (--commit commits it)
-pvg nd restore [--force]                 # Restore the live nd vault from the committed snapshot
+pvg nd sync [--status|--no-push]         # Sync the backlog via the nd/backlog branch
+pvg nd restore                           # Rebuild the live nd vault from the nd/backlog branch
 ```
 
 `pvg nd` is a thin passthrough: it resolves the correct vault path and injects
 `--vault` automatically, then runs `nd <args...>` verbatim. Argument order and
 flags match `nd` exactly. Use it for nd-only operations that have no
 provider-abstracted equivalent.
+
+#### Backlog durability (nd git sync)
+
+Since nd v0.11.0 the backlog persists on a dedicated git branch (default
+`nd/backlog`): every mutating nd command auto-snapshots the resolved vault
+locally, and `pvg nd sync` delegates to `nd sync` (snapshot + fetch +
+field-aware merge + push) against the shared vault. `pvg nd sync --status`
+reports the sync position without changing anything; `--no-push` skips the
+push. `pvg nd restore` delegates to `nd sync --restore`, which rebuilds a
+wiped or freshly cloned vault from the branch.
+
+Legacy flags: `--commit` is a deprecated alias for a full sync (the tracked
+`.vault/backlog-snapshot/` export is no longer the durability mechanism);
+`--out DIR` still writes a filesystem export for archival automation, with a
+deprecation warning. `pvg nd restore` falls back to importing
+`.vault/backlog-snapshot/` only when the `nd/backlog` branch exists neither
+locally nor on the remote (pre-branch repos).
 
 #### Vault resolution order
 
@@ -299,7 +318,12 @@ Without this file, pvg always uses the local `.vault/` directory. Run `pvg docto
 ### Story helpers
 
 ```bash
-pvg story claim PROJ-a1b                 # Mark in_progress at dispatch (closes the duplicate-dispatch window)
+pvg story claim PROJ-a1b                 # Atomic claim at dispatch via `nd claim` (agent dev-PROJ-a1b): sets
+                                         # assignee + in_progress in one step under the vault lock and fails if
+                                         # another agent already holds the claim (closes the duplicate-dispatch window)
+pvg story release PROJ-a1b               # Give a claimed story back: clears the claim (assignee), returns the
+                                         # story to open, drops delivered/rejected labels. For developers that hit
+                                         # a hard blocker; also used by `pvg loop recover`
 pvg story deliver PROJ-a1b
 pvg story accept PROJ-a1b --reason "Accepted: tests and AC matched" [--next PROJ-c3d]
 pvg story reject PROJ-a1b --feedback "EXPECTED: ... DELIVERED: ... GAP: ... FIX: ..."
@@ -344,6 +368,13 @@ pvg loop snapshot                       # Checkpoint active agent/worktree state
 pvg loop snapshot --agent ID=TYPE       # Include agent assignments
 pvg loop recover                        # Clean up after context loss
 ```
+
+`pvg loop setup` enables dispatcher mode when it is off (same code path as
+`pvg dispatcher on`), so the coordination guards and agent tracking are always
+live for a loop run; `pvg loop cancel` disables dispatcher mode only when
+setup was what enabled it, and `pvg loop recover` never toggles it. Setup also
+runs a best-effort `nd sync` against the resolved vault so the loop starts
+from the latest cross-clone backlog state (failure is a warning, never fatal).
 
 `pvg loop next --json` is the host-agnostic queue selector. It tells Codex/OpenCode-style
 dispatchers what to do next without re-implementing the workflow in prompts:
@@ -409,14 +440,19 @@ pvg doctor --json       # Structured output
 pvg doctor --fix        # Auto-repair fixable issues (prune worktrees, nd doctor --fix)
 ```
 
-Checks: vault-resolution, nd-reachable, shared-config-consistency, vault-divergence, nd-doctor, loop-state, worktree-hygiene, code-quality-analyzers, snapshot-drift.
+Checks: vault-resolution, nd-reachable, shared-config-consistency, vault-divergence, nd-sync-status, nd-doctor, loop-state, worktree-hygiene, code-quality-analyzers (plus legacy-snapshot-drift when `.vault/backlog-snapshot/` exists).
 
-`snapshot-drift` warns (never fails) when the live nd vault holds issues not
-present in `.vault/backlog-snapshot/` -- or when a live vault has never been
-exported. The committed snapshot is a point-in-time export, not the source of
-truth, so mid-epic story/bug creations are expected to lag it until the next
-export. Remedy: run `pvg nd sync --commit` on main. Non-snapshot projects are
-skipped, not nagged.
+`nd-sync-status` is the primary backlog durability check: it runs `nd sync
+--status` against the resolved vault and warns (never fails) when the vault
+has unsnapshotted changes, when the local `nd/backlog` branch is behind or
+diverged from its remote, or when the branch does not exist yet. Remedy: run
+`pvg nd sync`.
+
+`legacy-snapshot-drift` appears only in repos still carrying the deprecated
+tracked snapshot (`.vault/backlog-snapshot/`); it warns when that archival
+export lags the live vault, so a stale archive is never mistaken for current
+state. Refresh it with `pvg nd sync --out .vault/backlog-snapshot` or delete
+the directory.
 
 ### Quality gates
 

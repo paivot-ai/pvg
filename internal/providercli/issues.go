@@ -73,7 +73,7 @@ func issuesUsage(w io.Writer) {
 	fmt.Fprintln(w, `pvg issues -- normalized issue tracker CLI
 
 Subcommands:
-  create [title] [--body B] [--labels x,y] [--parent ID] [--assignee A] [--blocked-by IDs] [--project P] [--milestone M]
+  create [title] [--body B] [--labels x,y] [--parent ID] [--assignee A] [--blocked-by IDs] [--project P] [--milestone M] [--priority P0-P4|0-4]
   show <id> [--json]
   list [--status S] [--label L] [--parent ID] [--project P] [--milestone M] [--type T] [--sort F] [--limit N] [--json]
   update <id> [--title T] [--body B] [--status S] [--add-label x] [--remove-label x]
@@ -182,14 +182,22 @@ func issuesCreate(ctx context.Context, r *providers.BacklogRouter, args []string
 	blockedByCSV := fs.String("blocked-by", "", "comma-separated blocker IDs")
 	project := fs.String("project", "", "project name or ID (Linear/Jira/Asana)")
 	milestone := fs.String("milestone", "", "milestone or sprint name within the project")
+	priority := fs.String("priority", "", "priority P0-P4 or 0-4 (0 = highest)")
 	jsonOut := fs.Bool("json", false, "emit JSON")
-	known := map[string]bool{"body": true, "labels": true, "parent": true, "assignee": true, "blocked-by": true, "project": true, "milestone": true}
+	known := map[string]bool{"body": true, "labels": true, "parent": true, "assignee": true, "blocked-by": true, "project": true, "milestone": true, "priority": true}
 	if err := fs.Parse(reorderArgs(known, args)); err != nil {
 		return err
 	}
 	title := strings.Join(fs.Args(), " ")
 	if title == "" {
 		return fmt.Errorf("create requires a title")
+	}
+	normalizedPriority, err := normalizePriority(*priority)
+	if err != nil {
+		return err
+	}
+	if normalizedPriority != "" && !r.Capabilities().Has(providers.CapPriority) {
+		fmt.Fprintf(os.Stderr, "WARN: adapter %q does not support --priority; ignoring\n", r.Name())
 	}
 	in := providers.CreateIssueInput{
 		Title:     title,
@@ -200,12 +208,29 @@ func issuesCreate(ctx context.Context, r *providers.BacklogRouter, args []string
 		BlockedBy: splitCSV(*blockedByCSV),
 		Project:   *project,
 		Milestone: *milestone,
+		Priority:  normalizedPriority,
 	}
 	out, err := r.Create(ctx, in)
 	if err != nil {
 		return err
 	}
 	return printIssue(out, *jsonOut)
+}
+
+// normalizePriority accepts P-prefixed (P0-P4, case-insensitive) and bare
+// numeric (0-4) priority forms and returns the bare numeral. Empty input
+// stays empty (adapter default).
+func normalizePriority(s string) (string, error) {
+	trimmed := strings.TrimSpace(s)
+	if trimmed == "" {
+		return "", nil
+	}
+	numeral := strings.TrimPrefix(strings.ToUpper(trimmed), "P")
+	switch numeral {
+	case "0", "1", "2", "3", "4":
+		return numeral, nil
+	}
+	return "", fmt.Errorf("invalid priority %q: expected P0-P4 or 0-4", s)
 }
 
 func issuesShow(ctx context.Context, r *providers.BacklogRouter, args []string) error {

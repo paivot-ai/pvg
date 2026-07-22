@@ -5,8 +5,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
-
-	"github.com/paivot-ai/pvg/internal/dispatcher"
 )
 
 // Matches checkout/switch of a story branch, including the branch-creating
@@ -41,8 +39,9 @@ func CheckStoryCheckoutAtRoot(projectRoot, command string) Result {
 		return Result{Allowed: true}
 	}
 
-	state, _, err := dispatcher.ReadStateRoot(projectRoot)
-	if err != nil || !state.Enabled {
+	// executionActive (loop OR dispatcher), never the settings file alone: the
+	// HEAD-at-root hazard exists only while a coordination session is live.
+	if !executionActive(projectRoot) {
 		return Result{Allowed: true}
 	}
 

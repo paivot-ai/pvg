@@ -8,7 +8,6 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/paivot-ai/pvg/internal/dispatcher"
 	"github.com/paivot-ai/pvg/internal/loop"
 	"github.com/paivot-ai/pvg/internal/ndvault"
 )
@@ -235,17 +234,7 @@ func containsStoryID(storyIDs []string, target string) bool {
 }
 
 func mergeGateEnabled(projectRoot string) bool {
-	if isLoopActiveFrom(projectRoot) {
-		return true
-	}
-
-	state, _, err := dispatcher.ReadStateRoot(projectRoot)
-	if err == nil && state.Enabled {
-		return true
-	}
-
-	_, root, found := findAncestorPath(projectRoot, filepath.Join(".vault", "knowledge", ".settings.yaml"))
-	return found && root != ""
+	return coordinationActive(projectRoot)
 }
 
 // ReadIssueLabels reads labels from an nd issue's frontmatter.

@@ -57,7 +57,10 @@ func RunAll(projectRoot string) Report {
 	r.Findings = append(r.Findings, checkMachinery())
 	r.Findings = append(r.Findings, checkSharedConfigConsistency(projectRoot))
 	r.Findings = append(r.Findings, checkVaultDivergence(projectRoot))
-	r.Findings = append(r.Findings, checkSnapshotDrift(projectRoot))
+	r.Findings = append(r.Findings, checkNDSyncStatus(projectRoot))
+	if legacy, ok := checkLegacySnapshotDrift(projectRoot); ok {
+		r.Findings = append(r.Findings, legacy)
+	}
 	r.Findings = append(r.Findings, checkNDDoctor(projectRoot))
 	r.Findings = append(r.Findings, checkLoopState(projectRoot))
 	r.Findings = append(r.Findings, checkWorktreeHygiene(projectRoot))
@@ -305,51 +308,87 @@ func fixVaultDivergence(projectRoot string) string {
 	return fmt.Sprintf("vault-divergence: removed legacy marker %s (legacy issue files left in place; live vault is %s)", marker, resolved)
 }
 
-// checkSnapshotDrift detects when the live nd vault has drifted from the
-// git-tracked backlog snapshot under .vault/backlog-snapshot/. The snapshot
-// only refreshes at epic close via `pvg nd sync --commit`, so mid-epic story
-// or bug creations silently lag the committed copy until the next export.
-// This surfaces that drift as a re-runnable signal rather than relying on a
-// human to notice the stale snapshot.
-//
-// It NEVER fails: the snapshot is a durability mirror, not the live queue, so
-// drift is informational. Projects that do not use a committed snapshot at all
-// (no snapshot dir AND no live vault) are skipped so the check never nags them.
-func checkSnapshotDrift(projectRoot string) Finding {
-	const name = "snapshot-drift"
+// checkNDSyncStatus is the primary backlog durability check: `nd sync
+// --status` reports where the live vault stands relative to the nd/backlog
+// branch and its remote (nd v0.11.0 git-native sync). Divergence never fails
+// the doctor -- the remedy is always a plain 'pvg nd sync'.
+func checkNDSyncStatus(projectRoot string) Finding {
+	const name = "nd-sync-status"
+
+	vaultDir, err := ndvault.Resolve(projectRoot)
+	if err != nil {
+		return Finding{Name: name, Status: StatusSkip, Message: "skipped (vault resolution failed)"}
+	}
+	if _, err := os.Stat(filepath.Join(vaultDir, ".nd.yaml")); err != nil {
+		return Finding{Name: name, Status: StatusSkip, Message: "skipped (vault not initialized)"}
+	}
+
+	cmd := execCommand("nd", "--vault", vaultDir, "sync", "--status", "--json")
+	out, err := cmd.Output()
+	if err != nil {
+		return Finding{Name: name, Status: StatusWarn, Message: fmt.Sprintf("nd sync --status failed (%v) -- backlog durability unverified; run 'pvg nd sync'", err)}
+	}
+
+	var st struct {
+		Branch       string `json:"Branch"`
+		BranchExists bool   `json:"BranchExists"`
+		Dirty        bool   `json:"Dirty"`
+		RemoteAbsent bool   `json:"RemoteAbsent"`
+		Ahead        int    `json:"Ahead"`
+		Behind       int    `json:"Behind"`
+	}
+	if err := json.Unmarshal(out, &st); err != nil {
+		return Finding{Name: name, Status: StatusWarn, Message: fmt.Sprintf("cannot parse nd sync --status output: %v", err)}
+	}
+
+	if !st.BranchExists {
+		return Finding{Name: name, Status: StatusWarn, Message: fmt.Sprintf("no %s branch yet -- the backlog has no git durability; run 'pvg nd sync' to create it", st.Branch)}
+	}
+
+	var problems []string
+	if st.Dirty {
+		problems = append(problems, "vault changes not yet snapshotted")
+	}
+	if st.Behind > 0 {
+		problems = append(problems, fmt.Sprintf("%d commit(s) behind the remote", st.Behind))
+	}
+	if !st.RemoteAbsent && st.Ahead > 0 {
+		problems = append(problems, fmt.Sprintf("%d commit(s) not pushed", st.Ahead))
+	}
+	if len(problems) > 0 {
+		return Finding{Name: name, Status: StatusWarn, Message: fmt.Sprintf("backlog %s: %s -- run 'pvg nd sync'", st.Branch, strings.Join(problems, "; "))}
+	}
+	if st.RemoteAbsent {
+		return Finding{Name: name, Status: StatusPass, Message: fmt.Sprintf("vault in sync with %s (no remote; local durability only)", st.Branch)}
+	}
+	return Finding{Name: name, Status: StatusPass, Message: fmt.Sprintf("vault in sync with %s and its remote", st.Branch)}
+}
+
+// checkLegacySnapshotDrift covers projects still carrying the deprecated
+// tracked snapshot (.vault/backlog-snapshot/). Durability now comes from the
+// nd/backlog branch (see nd-sync-status); this check only reports whether the
+// legacy export lags the live vault, so a stale archive is never mistaken for
+// current state. Returns ok=false when the project has no legacy snapshot --
+// the check simply does not apply then.
+func checkLegacySnapshotDrift(projectRoot string) (Finding, bool) {
+	const name = "legacy-snapshot-drift"
 
 	snapDir := ndsync.SnapshotDir(projectRoot)
+	if !dirExists(snapDir) {
+		return Finding{}, false
+	}
 	snapIDs := issueIDs(filepath.Join(snapDir, "issues"))
-	snapExists := dirExists(snapDir)
 
 	var liveIDs []string
-	liveExists := false
 	if vaultDir, err := ndvault.Resolve(projectRoot); err == nil {
 		if _, serr := os.Stat(filepath.Join(vaultDir, ".nd.yaml")); serr == nil {
-			liveExists = true
 			liveIDs = issueIDs(filepath.Join(vaultDir, "issues"))
-		}
-	}
-
-	// Neither a committed snapshot nor an initialized live vault: this project
-	// does not use the snapshot mechanism. Nothing to reconcile.
-	if !snapExists && !liveExists {
-		return Finding{Name: name, Status: StatusSkip, Message: "no backlog snapshot and no live vault -- nothing to reconcile"}
-	}
-
-	// Live vault exists but no snapshot has ever been written: the backlog has
-	// no git durability yet.
-	if liveExists && !snapExists {
-		return Finding{
-			Name:    name,
-			Status:  StatusWarn,
-			Message: fmt.Sprintf("no backlog snapshot yet: %d live issue(s) have never been exported to %s -- run 'pvg nd sync --commit' (on main) to create the tracked snapshot", len(liveIDs), snapshotRelPath),
 		}
 	}
 
 	missingFromSnapshot, extraInSnapshot := snapshotDrift(liveIDs, snapIDs)
 	if len(missingFromSnapshot) == 0 && len(extraInSnapshot) == 0 {
-		return Finding{Name: name, Status: StatusPass, Message: fmt.Sprintf("snapshot in sync (%d issue(s))", len(snapIDs))}
+		return Finding{Name: name, Status: StatusPass, Message: fmt.Sprintf("legacy snapshot in sync (%d issue(s)); durability now comes from the nd/backlog branch", len(snapIDs))}, true
 	}
 
 	var parts []string
@@ -362,8 +401,8 @@ func checkSnapshotDrift(projectRoot string) Finding {
 	return Finding{
 		Name:    name,
 		Status:  StatusWarn,
-		Message: "snapshot drift: " + strings.Join(parts, "; ") + " -- run 'pvg nd sync --commit' (on main) to refresh the tracked snapshot",
-	}
+		Message: "legacy snapshot drift: " + strings.Join(parts, "; ") + " -- the tracked snapshot is deprecated (durability comes from the nd/backlog branch via 'pvg nd sync'); refresh it with 'pvg nd sync --out " + snapshotRelPath + "' or delete it",
+	}, true
 }
 
 // snapshotRelPath is the slash-form snapshot directory used in messages.

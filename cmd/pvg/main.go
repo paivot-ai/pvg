@@ -14,8 +14,8 @@
 //	pvg guard                    # PreToolUse scope guard (stdin: JSON)
 //	pvg nd root --ensure         # Resolve/init shared nd vault
 //	pvg nd ready --json          # Run nd against shared live vault
-//	pvg nd sync [--commit|--out DIR] # Export live vault snapshot (commit it, or write out-of-tree)
-//	pvg nd restore [--force]     # Restore live vault from the snapshot
+//	pvg nd sync [--status|--no-push] # Sync the backlog via the nd/backlog branch
+//	pvg nd restore [--force]     # Rebuild the live vault from the nd/backlog branch
 //	pvg seed [--force]           # Seed vault with agent prompts
 //	pvg story verify-delivery ID # Check delivery-proof completeness
 //	pvg story merge ID           # Merge an accepted story branch
@@ -217,8 +217,8 @@ Commands:
   loop recover           Clean up after context loss
   dispatcher on|off|status  Manage dispatcher mode
   nd root [--ensure]       Print (and optionally initialize) the shared live nd vault
-  nd sync [--commit|--out DIR]  Export the live nd vault snapshot; --commit commits the tracked copy, --out writes outside the repo (automation)
-  nd restore [--force]     Restore the live nd vault from .vault/backlog-snapshot/
+  nd sync [--status|--no-push]  Sync the backlog via the nd/backlog branch (--status reports position; --out DIR keeps the legacy archival export)
+  nd restore [--force]     Rebuild the live nd vault from the nd/backlog branch (falls back to the legacy snapshot)
   nd <args...>             Run nd against the shared live vault
   issues <subcommand>      Backlog operations via configured adapter (nd, linear, ...)
   notes <subcommand>       Notes operations via configured adapter (vlt, confluence, ...)
@@ -385,7 +385,7 @@ func runDispatcher(args []string) error {
 
 func runND(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: pvg nd root [--ensure] | pvg nd sync [--commit] | pvg nd restore [--force] | pvg nd <nd-args...>")
+		return fmt.Errorf("usage: pvg nd root [--ensure] | pvg nd sync [--status|--no-push] | pvg nd restore [--force] | pvg nd <nd-args...>")
 	}
 
 	// resolveRoot returns the project root, preferring the main repo root
@@ -438,13 +438,19 @@ func runND(args []string) error {
 	}
 
 	if args[0] == "sync" {
-		commit := false
+		// Delegates to nd's git-native sync (nd v0.11.0+): the backlog lives
+		// on the nd/backlog branch, and `nd sync` = snapshot + fetch +
+		// field-aware merge + push against the resolved shared vault.
+		var passArgs []string
+		deprecatedCommit := false
 		outDir := ""
 		rest := args[1:]
 		for i := 0; i < len(rest); i++ {
 			switch rest[i] {
+			case "--status", "--no-push":
+				passArgs = append(passArgs, rest[i])
 			case "--commit":
-				commit = true
+				deprecatedCommit = true
 			case "--out":
 				if i+1 >= len(rest) {
 					return fmt.Errorf("--out requires a directory argument")
@@ -452,11 +458,11 @@ func runND(args []string) error {
 				i++
 				outDir = rest[i]
 			default:
-				return fmt.Errorf("usage: pvg nd sync [--commit] [--out DIR]")
+				return fmt.Errorf("usage: pvg nd sync [--status] [--no-push] [--out DIR]")
 			}
 		}
-		if commit && outDir != "" {
-			return fmt.Errorf("--commit applies to the tracked in-repo snapshot; it cannot be combined with --out")
+		if deprecatedCommit && outDir != "" {
+			return fmt.Errorf("--commit is a deprecated alias for a full sync; it cannot be combined with --out")
 		}
 		projectRoot, err := resolveRoot()
 		if err != nil {
@@ -466,30 +472,20 @@ func runND(args []string) error {
 		if err != nil {
 			return fmt.Errorf("resolve nd vault: %w", err)
 		}
-		var res ndsync.SyncResult
 		if outDir != "" {
-			// Out-of-tree export: automation (cron snapshots) must never
-			// dirty the tracked working tree -- that aborts agent checkouts.
-			res, err = ndsync.SyncTo(outDir, vaultDir)
-		} else {
-			res, err = ndsync.Sync(projectRoot, vaultDir)
-		}
-		if err != nil {
-			return err
-		}
-		fmt.Printf("[ND SYNC] %d issue(s) exported to %s\n", res.Issues, res.SnapshotDir)
-		if commit {
-			committed, err := ndsync.CommitSnapshot(projectRoot)
+			// Legacy out-of-tree export, kept for archival automation only.
+			fmt.Fprintln(os.Stderr, "deprecated: --out writes a filesystem export for archival use; the backlog now syncs via the nd/backlog branch")
+			res, err := ndsync.SyncTo(outDir, vaultDir)
 			if err != nil {
 				return err
 			}
-			if committed {
-				fmt.Println("[ND SYNC] snapshot committed")
-			} else {
-				fmt.Println("[ND SYNC] snapshot unchanged, nothing to commit")
-			}
+			fmt.Printf("[ND SYNC] %d issue(s) exported to %s\n", res.Issues, res.SnapshotDir)
+			return nil
 		}
-		return nil
+		if deprecatedCommit {
+			fmt.Fprintln(os.Stderr, "deprecated: the backlog now syncs via the nd/backlog branch; running nd sync")
+		}
+		return execND(vaultDir, append([]string{"sync"}, passArgs...)...)
 	}
 
 	if args[0] == "restore" {
@@ -509,18 +505,29 @@ func runND(args []string) error {
 		if err != nil {
 			return fmt.Errorf("resolve nd vault: %w", err)
 		}
-		res, err := ndsync.Restore(projectRoot, vaultDir, force)
-		if err != nil {
-			return err
+
+		// Legacy fallback: repos that predate the nd/backlog branch have only
+		// the tracked snapshot to restore from.
+		if !ndsync.BacklogBranchAvailable(projectRoot) && ndsync.HasLegacySnapshot(projectRoot) {
+			fmt.Fprintln(os.Stderr, "nd/backlog branch not found locally or on the remote; restoring from the legacy tracked snapshot (.vault/backlog-snapshot/)")
+			res, err := ndsync.Restore(projectRoot, vaultDir, force)
+			if err != nil {
+				return err
+			}
+			fmt.Printf("[ND RESTORE] %d issue(s) restored to %s\n", res.Issues, res.VaultDir)
+			if res.Replaced > 0 {
+				fmt.Printf("  Replaced %d pre-existing issue(s) (--force)\n", res.Replaced)
+			}
+			if res.ConfigRestored {
+				fmt.Println("  .nd.yaml restored from snapshot")
+			}
+			return nil
 		}
-		fmt.Printf("[ND RESTORE] %d issue(s) restored to %s\n", res.Issues, res.VaultDir)
-		if res.Replaced > 0 {
-			fmt.Printf("  Replaced %d pre-existing issue(s) (--force)\n", res.Replaced)
+
+		if force {
+			fmt.Fprintln(os.Stderr, "note: --force applies only to the legacy snapshot fallback; nd sync --restore does not need it")
 		}
-		if res.ConfigRestored {
-			fmt.Println("  .nd.yaml restored from snapshot")
-		}
-		return nil
+		return execND(vaultDir, "sync", "--restore")
 	}
 
 	for _, arg := range args {
@@ -539,9 +546,15 @@ func runND(args []string) error {
 		return fmt.Errorf("ensure nd vault: %w", err)
 	}
 
-	ndArgs := append([]string{"--vault", vaultDir}, args...)
+	return execND(vaultDir, args...)
+}
+
+// execND runs nd against vaultDir with --vault injected, streaming stdio.
+// nd's exit code is propagated verbatim.
+func execND(vaultDir string, ndArgs ...string) error {
+	full := append([]string{"--vault", vaultDir}, ndArgs...)
 	// #nosec G702 -- intentional argv-based passthrough to nd; no shell interpolation.
-	cmd := exec.Command("nd", ndArgs...)
+	cmd := exec.Command("nd", full...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -583,6 +596,17 @@ func runStory(args []string) error {
 			return fmt.Errorf("usage: pvg story claim <story-id>")
 		}
 		msg, err := story.Transition(cwd, "claim", args[1], story.TransitionOptions{})
+		if err != nil {
+			return err
+		}
+		fmt.Println(msg)
+		return nil
+	case "release":
+		if len(args) != 2 {
+			storyUsage()
+			return fmt.Errorf("usage: pvg story release <story-id>")
+		}
+		msg, err := story.Transition(cwd, "release", args[1], story.TransitionOptions{})
 		if err != nil {
 			return err
 		}
@@ -643,7 +667,10 @@ func storyUsage() {
 	fmt.Fprintln(os.Stderr, `pvg story -- shared workflow helpers
 
 Subcommands:
-  claim <story-id>                        Claim a story at dispatch (status in_progress)
+  claim <story-id>                        Atomically claim a story at dispatch (nd claim, agent dev-<story-id>);
+                                         fails if another agent already holds the claim
+  release <story-id>                      Give a claimed story back (clears assignee, status open,
+                                         drops delivered/rejected labels)
   deliver <story-id>                      Mark a story delivered (claims it if still open)
   approve-red <story-id>                  Hard-TDD: approve RED tests, advance to GREEN phase
   accept <story-id> [--reason TEXT] [--next STORY]
@@ -940,8 +967,8 @@ func loopUsage() {
 	fmt.Fprintln(os.Stderr, `pvg loop -- execution loop management
 
 Subcommands:
-	setup [flags]   Start an execution loop
-	cancel          Cancel active execution loop
+	setup [flags]   Start an execution loop (enables dispatcher mode when off)
+	cancel          Cancel active execution loop (disables dispatcher mode only if setup enabled it)
 	status          Show execution loop state
   next [--json] [--n N]  Select the next orchestration action(s) (N = wave size, default 1, max 6)
 	rotate EPIC_ID  Rotate loop to the next epic after completion gate
@@ -965,6 +992,21 @@ Next flags:
   --epic EPIC_ID           Prefer a priority epic, then fall back to the backlog
   --n N                    Select up to N distinct-story actions (wave; default 1, max 6)
   --json                   Output as JSON
+
+Next decisions:
+  act              Actionable work selected (see next/actions)
+  wait             Agents are working; nothing to dispatch right now
+  complete         All work complete (all mode)
+  blocked          All remaining work is blocked (all mode)
+  other            Only non-dispatcher workflow states remain (all mode)
+  epic_complete    All stories in the target epic closed; run the completion gate
+  epic_blocked     Target epic has only blocked stories; escalate to the user
+  stalled          Identical in_progress story set seen on 3 consecutive wait
+                   evaluations (dead developer, worktree still on disk); run
+                   pvg loop recover, then respawn or release the listed stories
+  escalate         A story hit the rejection cap (3 PM rejections); surface it
+                   to the user, never override the PM
+  no_active_loop   No active loop and no explicit scope; refusing to dispatch
 
 Recover flags:
   --json                   Output as JSON
@@ -1094,7 +1136,21 @@ func loopSetup(cwd string, args []string) error {
 	state := loop.NewState(mode, epicID, maxIter)
 	state.AutoRotate = autoRotate || mode == "epic" // always rotate in epic mode
 
+	// An execution loop IS a dispatcher-coordinated run, so setup enables
+	// dispatcher mode itself (same path as `pvg dispatcher on`). This closes
+	// the bare-/piv-loop gap where guards and agent tracking stayed dark
+	// because only the loop state existed. Recorded in the loop state so
+	// `pvg loop cancel` restores the pre-loop posture.
+	enabledBySetup, err := ensureLoopDispatcher(cwd)
+	if err != nil {
+		return fmt.Errorf("enable dispatcher mode: %w", err)
+	}
+	state.DispatcherEnabledBySetup = enabledBySetup
+
 	if err := loop.WriteState(cwd, state); err != nil {
+		if enabledBySetup {
+			_ = dispatcher.Off(cwd) // restore the pre-loop posture
+		}
 		return fmt.Errorf("write loop state: %w", err)
 	}
 
@@ -1108,7 +1164,38 @@ func loopSetup(cwd string, args []string) error {
 	} else {
 		fmt.Println("  Max iterations: unlimited")
 	}
+	if enabledBySetup {
+		fmt.Println("  Dispatcher mode: enabled by loop setup (restored on cancel)")
+	} else {
+		fmt.Println("  Dispatcher mode: already on (left as-is on cancel)")
+	}
+
+	// Best-effort backlog convergence: pull remote nd/backlog state into the
+	// live vault so the loop starts from the cross-clone truth. Failure is a
+	// warning, never fatal -- offline and remote-less repos still loop.
+	if vaultDir, verr := ndvault.Resolve(cwd); verr == nil {
+		if out, serr := ndsync.GitSync(vaultDir); serr != nil {
+			fmt.Fprintf(os.Stderr, "[LOOP] WARN: backlog sync failed (continuing): %v\n", serr)
+		} else if out != "" {
+			fmt.Printf("  Backlog: %s\n", out)
+		}
+	}
 	return nil
+}
+
+// ensureLoopDispatcher enables dispatcher mode for an execution loop when it
+// is not already enabled. Returns true when this call enabled it -- the loop
+// then owns the dispatcher lifecycle and `pvg loop cancel` restores it.
+// Never re-runs dispatcher.On over an enabled dispatcher: On resets agent
+// tracking, which would orphan active agents.
+func ensureLoopDispatcher(cwd string) (bool, error) {
+	if state, err := dispatcher.ReadState(cwd); err == nil && state.Enabled {
+		return false, nil
+	}
+	if err := dispatcher.On(cwd); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func loopCancel(cwd string) error {
@@ -1126,6 +1213,16 @@ func loopCancel(cwd string) error {
 	if state != nil {
 		fmt.Printf("  Completed iterations: %d\n", state.Iteration)
 		fmt.Printf("  Wait iterations: %d\n", state.WaitIterations)
+		// Restore the pre-loop dispatcher posture: only when loop setup was
+		// what enabled dispatcher mode. A dispatcher the user enabled
+		// independently is left on. `pvg loop recover` never toggles it.
+		if state.DispatcherEnabledBySetup {
+			if err := dispatcher.Off(cwd); err != nil {
+				fmt.Fprintf(os.Stderr, "[LOOP] WARN: could not disable dispatcher mode: %v\n", err)
+			} else {
+				fmt.Println("  Dispatcher mode: disabled (was enabled by loop setup)")
+			}
+		}
 	}
 	return nil
 }
@@ -1244,13 +1341,20 @@ func loopNext(cwd string, args []string) error {
 	result.ActiveLoop = activeLoop
 	result.ScopeSource = scopeSource
 
-	// At epic close, refresh the tracked backlog snapshot from the live vault
-	// so the committed snapshot cannot silently drift. Export only (the
-	// dispatcher commits at the gate). Safe here because all stories in the
-	// epic are closed -- no developer worktree is mid-checkout. Best-effort
-	// and breadcrumbed to stderr so it never blocks or corrupts --json stdout.
+	// Stalled-claim detection: a dead developer that left its worktree on
+	// disk parks the story in_progress forever (orphan healing only covers
+	// GONE worktrees). Three consecutive wait evaluations over the identical
+	// story set convert the wait into a "stalled" decision with recovery
+	// instructions.
+	loop.DetectStall(scopeRoot, &result)
+
+	// At epic close, run a full nd git sync so the completed epic's backlog
+	// state lands on the nd/backlog branch (and its remote) right away.
+	// Never touches the working tree (nd sync uses git plumbing), so it is
+	// safe from any branch. Best-effort and breadcrumbed to stderr so it
+	// never blocks or corrupts --json stdout.
 	if result.Decision == "epic_complete" {
-		if msg := autoExportSnapshot(scopeRoot); msg != "" {
+		if msg := autoSyncBacklog(scopeRoot); msg != "" {
 			fmt.Fprintln(os.Stderr, msg)
 		}
 	}
@@ -1258,20 +1362,19 @@ func loopNext(cwd string, args []string) error {
 	return printNextResult(result, jsonOutput)
 }
 
-// autoExportSnapshot refreshes the in-repo backlog snapshot from the live vault
-// (export only, never commit). Returns a one-line stderr breadcrumb, or "" when
-// the vault cannot be resolved -- best-effort, never fatal to the loop.
-func autoExportSnapshot(projectRoot string) string {
+// autoSyncBacklog runs a full `nd sync` against the resolved vault. Returns a
+// one-line stderr breadcrumb, or "" when the vault cannot be resolved --
+// best-effort, never fatal to the loop.
+func autoSyncBacklog(projectRoot string) string {
 	vaultDir, err := ndvault.Resolve(projectRoot)
 	if err != nil {
 		return ""
 	}
-	res, err := ndsync.Sync(projectRoot, vaultDir)
+	out, err := ndsync.GitSync(vaultDir)
 	if err != nil {
-		return fmt.Sprintf("[NEXT] snapshot export skipped: %v", err)
+		return fmt.Sprintf("[NEXT] backlog sync skipped: %v", err)
 	}
-	return fmt.Sprintf("[NEXT] epic close: exported %d issue(s) to %s (commit at the gate with `pvg nd sync --commit`)",
-		res.Issues, res.SnapshotDir)
+	return fmt.Sprintf("[NEXT] epic close: %s", out)
 }
 
 // printNextResult renders a loop-next decision as JSON (for host orchestrators)
@@ -1317,6 +1420,15 @@ func printNextResult(result loop.NextResult, jsonOutput bool) error {
 			fmt.Printf(" (%s)", result.NextEpicTitle)
 		}
 		fmt.Println()
+	}
+	if len(result.Stalled) > 0 {
+		fmt.Println("  Stalled stories:")
+		for _, s := range result.Stalled {
+			fmt.Printf("    %s (worktree: %s)\n", s.StoryID, s.WorktreePath)
+		}
+	}
+	if result.EscalatedStory != "" {
+		fmt.Printf("  Escalated story: %s\n", result.EscalatedStory)
 	}
 	return nil
 }
@@ -1535,7 +1647,9 @@ artifact (file path) claimed by more than one story.
 --backlog runs the artifact-collision check PLUS all backlog structure
 checks: walking-skeleton, capstone, mandatory-skills, consumes-signature,
 consumes-produces, stale-refs, external-integration, atomicity,
-vertical-slice, dep-cycles, release-gate, and paths-exist (brownfield only).
+vertical-slice, duplicate-sections, hard-tdd-oracle (when the machinery
+design substrate applies: stories citing oracle stable ids must carry the
+hard-tdd label), dep-cycles, release-gate, and paths-exist (brownfield only).
 Findings are 'error' (must fix; exit 1) or 'review' (judgment flag; exit 0).
 
 Usage:
@@ -2140,7 +2254,12 @@ func runDoctor(args []string) error {
 Checks:
   vault-resolution          Verify nd vault resolves and contains .nd.yaml
   nd-reachable              Verify nd binary is on PATH
+  modelith-reachable        Check modelith binary (domain-model tooling) on PATH
+  machinery-reachable       Check machinery binary (design substrate) on PATH
   shared-config-consistency Check shared vault config consistency
+  vault-divergence          Detect a legacy local vault diverging from the shared vault
+  nd-sync-status            Report backlog position vs the nd/backlog branch and its remote
+  legacy-snapshot-drift     Legacy: drift vs .vault/backlog-snapshot/ (only when that dir exists)
   nd-doctor                 Run nd doctor and report findings
   loop-state                Verify loop state file is valid
   worktree-hygiene          Check for stale git worktrees

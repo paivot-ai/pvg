@@ -224,15 +224,26 @@ func ListWorktreeAgentBranches(projectRoot string) ([]string, error) {
 	return branches, nil
 }
 
-// EpicBranchExists checks whether a local branch named epic/<epicID> exists.
+// EpicBranchExists checks whether a branch named epic/<epicID> exists, either
+// locally or on origin. The remote ref matters: a session that fetched but
+// never checked out the epic branch (or deleted its local copy after pushing)
+// still has an unmerged epic pending its completion gate.
 // Returns false on any error (fail open).
 func EpicBranchExists(projectRoot, epicID string) bool {
 	if epicID == "" {
 		return false
 	}
-	cmd := exec.Command("git", "rev-parse", "--verify", "epic/"+epicID)
-	cmd.Dir = projectRoot
-	return cmd.Run() == nil
+	for _, ref := range []string{
+		"refs/heads/epic/" + epicID,
+		"refs/remotes/origin/epic/" + epicID,
+	} {
+		cmd := exec.Command("git", "rev-parse", "--verify", "--quiet", ref)
+		cmd.Dir = projectRoot
+		if cmd.Run() == nil {
+			return true
+		}
+	}
+	return false
 }
 
 // BuildSnapshot queries nd for in-progress issues, lists worktrees, and

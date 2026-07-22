@@ -59,6 +59,256 @@ func TestTransitionDeliverUsesSharedNDFlow(t *testing.T) {
 	}
 }
 
+func TestTransitionClaimUsesAtomicNDClaim(t *testing.T) {
+	repo := t.TempDir()
+	vault := filepath.Join(t.TempDir(), "nd-vault")
+	setupIssueEnv(t, vault)
+
+	logPath := filepath.Join(t.TempDir(), "calls.jsonl")
+	oldExec := execCommand
+	defer func() { execCommand = oldExec }()
+	execCommand = helperExecCommand(t, logPath)
+
+	if _, err := Transition(repo, "claim", "PROJ-a1b2", TransitionOptions{}); err != nil {
+		t.Fatalf("Transition() error: %v", err)
+	}
+
+	joined := flattenCalls(readCalls(t, logPath))
+	if !strings.Contains(joined, "claim PROJ-a1b2 --agent dev-PROJ-a1b2") {
+		t.Fatalf("expected atomic nd claim with deterministic agent, got:\n%s", joined)
+	}
+	if strings.Contains(joined, "--status=in_progress") {
+		t.Fatalf("claim must not fall back to nd update --status, got:\n%s", joined)
+	}
+}
+
+func TestTransitionClaimFailurePropagatesNDError(t *testing.T) {
+	repo := t.TempDir()
+	vault := filepath.Join(t.TempDir(), "nd-vault")
+	setupIssueEnv(t, vault)
+
+	logPath := filepath.Join(t.TempDir(), "calls.jsonl")
+	oldExec := execCommand
+	defer func() { execCommand = oldExec }()
+	execCommand = helperExecCommand(t, logPath)
+
+	t.Setenv("STORY_HELPER_FAIL_MATCH", " claim PROJ-a1b2 --agent dev-PROJ-a1b2")
+	t.Setenv("STORY_HELPER_FAIL_OUTPUT", "issue PROJ-a1b2 is already claimed by dev-other (use --force to steal)")
+
+	_, err := Transition(repo, "claim", "PROJ-a1b2", TransitionOptions{})
+	if err == nil {
+		t.Fatal("expected claim failure to surface as an error")
+	}
+	if !strings.Contains(err.Error(), "already claimed by dev-other") {
+		t.Fatalf("expected nd error passed through, got: %v", err)
+	}
+}
+
+func TestTransitionRejectReleasesClaim(t *testing.T) {
+	repo := t.TempDir()
+	vault := filepath.Join(t.TempDir(), "nd-vault")
+	setupIssueEnv(t, vault)
+
+	logPath := filepath.Join(t.TempDir(), "calls.jsonl")
+	oldExec := execCommand
+	defer func() { execCommand = oldExec }()
+	execCommand = helperExecCommand(t, logPath)
+
+	if _, err := Transition(repo, "reject", "PROJ-a1b2", TransitionOptions{Feedback: "GAP: missing tests"}); err != nil {
+		t.Fatalf("Transition() error: %v", err)
+	}
+
+	joined := flattenCalls(readCalls(t, logPath))
+	wantSubstrings := []string{
+		"release PROJ-a1b2 --force",
+		"labels rm PROJ-a1b2 delivered",
+		"labels rm PROJ-a1b2 accepted",
+		"labels add PROJ-a1b2 rejected",
+		"comments add PROJ-a1b2 GAP: missing tests",
+		"doctor --fix",
+	}
+	for _, want := range wantSubstrings {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("expected call containing %q, got:\n%s", want, joined)
+		}
+	}
+	if strings.Contains(joined, "--status=open") {
+		t.Fatalf("reject must use nd release, not nd update --status=open:\n%s", joined)
+	}
+}
+
+// rejectedContractBlock mirrors what appendContract writes on every reject:
+// the append-only record rejectionCount reads.
+const rejectedContractBlock = `
+
+## nd_contract
+status: rejected
+
+### evidence
+- PM rejection applied via pvg story reject on 2026-01-01.
+
+### proof
+- [ ] Story requires another developer delivery before it can be accepted.
+`
+
+func TestTransitionRejectFirstRejectionKeepsPlainLabelOnly(t *testing.T) {
+	repo := t.TempDir()
+	vault := filepath.Join(t.TempDir(), "nd-vault")
+	setupIssueEnv(t, vault)
+	writeIssue(t, vault, "PROJ-a1b2", "---\ntitle: Test\nstatus: in_progress\nlabels: [delivered]\n---\nBody\n")
+
+	logPath := filepath.Join(t.TempDir(), "calls.jsonl")
+	oldExec := execCommand
+	defer func() { execCommand = oldExec }()
+	execCommand = helperExecCommand(t, logPath)
+
+	if _, err := Transition(repo, "reject", "PROJ-a1b2", TransitionOptions{}); err != nil {
+		t.Fatalf("Transition() error: %v", err)
+	}
+
+	joined := flattenCalls(readCalls(t, logPath))
+	if !strings.Contains(joined, "labels add PROJ-a1b2 rejected") {
+		t.Fatalf("expected plain rejected label, got:\n%s", joined)
+	}
+	if strings.Contains(joined, "rejected-x") {
+		t.Fatalf("first rejection must not set a counter label:\n%s", joined)
+	}
+}
+
+func TestTransitionRejectSecondRejectionAddsX2(t *testing.T) {
+	repo := t.TempDir()
+	vault := filepath.Join(t.TempDir(), "nd-vault")
+	setupIssueEnv(t, vault)
+	// One prior rejection is recorded only in the contract history: deliver
+	// stripped the plain rejected label before this second PM review.
+	writeIssue(t, vault, "PROJ-a1b2",
+		"---\ntitle: Test\nstatus: in_progress\nlabels: [delivered]\n---\nBody\n"+rejectedContractBlock)
+
+	logPath := filepath.Join(t.TempDir(), "calls.jsonl")
+	oldExec := execCommand
+	defer func() { execCommand = oldExec }()
+	execCommand = helperExecCommand(t, logPath)
+
+	if _, err := Transition(repo, "reject", "PROJ-a1b2", TransitionOptions{}); err != nil {
+		t.Fatalf("Transition() error: %v", err)
+	}
+
+	joined := flattenCalls(readCalls(t, logPath))
+	if !strings.Contains(joined, "labels add PROJ-a1b2 rejected-x2") {
+		t.Fatalf("expected rejected-x2 on second rejection, got:\n%s", joined)
+	}
+	if strings.Contains(joined, "rejected-x3") {
+		t.Fatalf("second rejection must not reach x3:\n%s", joined)
+	}
+}
+
+func TestTransitionRejectThirdRejectionReplacesX2WithX3(t *testing.T) {
+	repo := t.TempDir()
+	vault := filepath.Join(t.TempDir(), "nd-vault")
+	setupIssueEnv(t, vault)
+	writeIssue(t, vault, "PROJ-a1b2",
+		"---\ntitle: Test\nstatus: in_progress\nlabels: [delivered, rejected-x2]\n---\nBody\n"+
+			rejectedContractBlock+rejectedContractBlock)
+
+	logPath := filepath.Join(t.TempDir(), "calls.jsonl")
+	oldExec := execCommand
+	defer func() { execCommand = oldExec }()
+	execCommand = helperExecCommand(t, logPath)
+
+	if _, err := Transition(repo, "reject", "PROJ-a1b2", TransitionOptions{}); err != nil {
+		t.Fatalf("Transition() error: %v", err)
+	}
+
+	joined := flattenCalls(readCalls(t, logPath))
+	if !strings.Contains(joined, "labels rm PROJ-a1b2 rejected-x2") {
+		t.Fatalf("expected previous counter label removed, got:\n%s", joined)
+	}
+	if !strings.Contains(joined, "labels add PROJ-a1b2 rejected-x3") {
+		t.Fatalf("expected rejected-x3 on third rejection, got:\n%s", joined)
+	}
+}
+
+func TestTransitionRejectCounterCapsAtThree(t *testing.T) {
+	repo := t.TempDir()
+	vault := filepath.Join(t.TempDir(), "nd-vault")
+	setupIssueEnv(t, vault)
+	writeIssue(t, vault, "PROJ-a1b2",
+		"---\ntitle: Test\nstatus: in_progress\nlabels: [delivered, rejected-x3]\n---\nBody\n"+
+			rejectedContractBlock+rejectedContractBlock+rejectedContractBlock)
+
+	logPath := filepath.Join(t.TempDir(), "calls.jsonl")
+	oldExec := execCommand
+	defer func() { execCommand = oldExec }()
+	execCommand = helperExecCommand(t, logPath)
+
+	if _, err := Transition(repo, "reject", "PROJ-a1b2", TransitionOptions{}); err != nil {
+		t.Fatalf("Transition() error: %v", err)
+	}
+
+	joined := flattenCalls(readCalls(t, logPath))
+	if !strings.Contains(joined, "labels add PROJ-a1b2 rejected-x3") {
+		t.Fatalf("expected counter to hold at rejected-x3, got:\n%s", joined)
+	}
+	if strings.Contains(joined, "rejected-x4") {
+		t.Fatalf("counter must cap at x%d, got:\n%s", 3, joined)
+	}
+}
+
+func TestTransitionReleaseGivesStoryBack(t *testing.T) {
+	repo := t.TempDir()
+	vault := filepath.Join(t.TempDir(), "nd-vault")
+	setupIssueEnv(t, vault)
+
+	logPath := filepath.Join(t.TempDir(), "calls.jsonl")
+	oldExec := execCommand
+	defer func() { execCommand = oldExec }()
+	execCommand = helperExecCommand(t, logPath)
+
+	msg, err := Transition(repo, "release", "PROJ-a1b2", TransitionOptions{})
+	if err != nil {
+		t.Fatalf("Transition() error: %v", err)
+	}
+	if !strings.Contains(msg, "release PROJ-a1b2") {
+		t.Fatalf("Transition() message = %q, want release confirmation", msg)
+	}
+
+	joined := flattenCalls(readCalls(t, logPath))
+	wantSubstrings := []string{
+		"show PROJ-a1b2",
+		"release PROJ-a1b2 --force",
+		"labels rm PROJ-a1b2 delivered",
+		"labels rm PROJ-a1b2 rejected",
+		"doctor --fix",
+	}
+	for _, want := range wantSubstrings {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("expected call containing %q, got:\n%s", want, joined)
+		}
+	}
+}
+
+func TestTransitionReleaseFailurePropagatesNDError(t *testing.T) {
+	repo := t.TempDir()
+	vault := filepath.Join(t.TempDir(), "nd-vault")
+	setupIssueEnv(t, vault)
+
+	logPath := filepath.Join(t.TempDir(), "calls.jsonl")
+	oldExec := execCommand
+	defer func() { execCommand = oldExec }()
+	execCommand = helperExecCommand(t, logPath)
+
+	t.Setenv("STORY_HELPER_FAIL_MATCH", " release PROJ-a1b2 --force")
+	t.Setenv("STORY_HELPER_FAIL_OUTPUT", "issue PROJ-a1b2 is closed; use reopen instead of release")
+
+	_, err := Transition(repo, "release", "PROJ-a1b2", TransitionOptions{})
+	if err == nil {
+		t.Fatal("expected release failure to surface as an error")
+	}
+	if !strings.Contains(err.Error(), "use reopen instead of release") {
+		t.Fatalf("expected nd error passed through, got: %v", err)
+	}
+}
+
 func TestVerifyDeliveryPassesWithAuthoritativeContract(t *testing.T) {
 	repo := t.TempDir()
 	vault := filepath.Join(t.TempDir(), "nd-vault")
@@ -283,7 +533,7 @@ func TestTransitionAcceptWarnsWhenNextStoryCannotStart(t *testing.T) {
 	defer func() { execCommand = oldExec }()
 	execCommand = helperExecCommand(t, logPath)
 
-	t.Setenv("STORY_HELPER_FAIL_MATCH", " update NOPE --status=in_progress")
+	t.Setenv("STORY_HELPER_FAIL_MATCH", " claim NOPE --agent dev-NOPE")
 	t.Setenv("STORY_HELPER_FAIL_OUTPUT", "next story cannot start")
 
 	msg, err := Transition(repo, "accept", "PROJ-a1b2", TransitionOptions{NextStory: "NOPE"})
@@ -301,7 +551,7 @@ func TestTransitionAcceptWarnsWhenNextStoryCannotStart(t *testing.T) {
 		"close PROJ-a1b2 --reason=Accepted via pvg story accept",
 		"labels add PROJ-a1b2 accepted",
 		"update PROJ-a1b2 --append-notes",
-		"update NOPE --status=in_progress",
+		"claim NOPE --agent dev-NOPE",
 		"doctor --fix",
 	}
 	for _, want := range wantSubstrings {

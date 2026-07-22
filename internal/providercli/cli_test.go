@@ -1,6 +1,7 @@
 package providercli
 
 import (
+	"context"
 	"encoding/json"
 	"flag"
 	"io"
@@ -8,8 +9,10 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 
+	"github.com/paivot-ai/pvg/internal/providers"
 	_ "github.com/paivot-ai/pvg/internal/providers/ndadapter"
 	_ "github.com/paivot-ai/pvg/internal/providers/vltadapter"
 )
@@ -196,6 +199,8 @@ echo "$*" >> "` + logFile + `"
 case "$*" in
   *" list "*|*" list") printf '[]' ;;
   *"blocked --json"*) printf '[{"ID":"VP-9","Title":"Blocked story","Status":"open"}]' ;;
+  *" create "*) printf '{"ID":"VP-1"}' ;;
+  *" show VP-1 --json"*) printf '{"ID":"VP-1","Title":"Created story","Status":"open"}' ;;
   *) printf '' ;;
 esac
 exit 0
@@ -250,6 +255,192 @@ func TestRunIssuesList_PassesTypeAndSortToND(t *testing.T) {
 		if !strings.Contains(logged, fragment) {
 			t.Errorf("nd invocation missing %q: %s", fragment, logged)
 		}
+	}
+}
+
+func TestNormalizePriority(t *testing.T) {
+	cases := []struct {
+		in      string
+		want    string
+		wantErr bool
+	}{
+		{"", "", false},
+		{"0", "0", false},
+		{"4", "4", false},
+		{"P0", "0", false},
+		{"P4", "4", false},
+		{"p2", "2", false},
+		{" P1 ", "1", false},
+		{"5", "", true},
+		{"P5", "", true},
+		{"-1", "", true},
+		{"high", "", true},
+		{"PP1", "", true},
+	}
+	for _, c := range cases {
+		got, err := normalizePriority(c.in)
+		if c.wantErr {
+			if err == nil {
+				t.Errorf("normalizePriority(%q) expected error, got %q", c.in, got)
+			}
+			continue
+		}
+		if err != nil {
+			t.Errorf("normalizePriority(%q) error: %v", c.in, err)
+			continue
+		}
+		if got != c.want {
+			t.Errorf("normalizePriority(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+func TestRunIssuesCreate_PassesNormalizedPriorityToND(t *testing.T) {
+	logFile := setupFakeND(t)
+
+	_, err := captureStdout(t, func() error {
+		return RunIssues([]string{"create", "Priority story", "--priority", "P1"})
+	})
+	if err != nil {
+		t.Fatalf("RunIssues create: %v", err)
+	}
+
+	logged := readArgsLog(t, logFile)
+	if !strings.Contains(logged, "--priority 1") {
+		t.Errorf("nd create missing normalized --priority 1: %s", logged)
+	}
+}
+
+func TestRunIssuesCreate_PassesBareNumericPriorityToND(t *testing.T) {
+	logFile := setupFakeND(t)
+
+	_, err := captureStdout(t, func() error {
+		return RunIssues([]string{"create", "Priority story", "--priority", "3"})
+	})
+	if err != nil {
+		t.Fatalf("RunIssues create: %v", err)
+	}
+
+	logged := readArgsLog(t, logFile)
+	if !strings.Contains(logged, "--priority 3") {
+		t.Errorf("nd create missing --priority 3: %s", logged)
+	}
+}
+
+func TestRunIssuesCreate_OmitsPriorityFlagWhenUnset(t *testing.T) {
+	logFile := setupFakeND(t)
+
+	_, err := captureStdout(t, func() error {
+		return RunIssues([]string{"create", "No priority story"})
+	})
+	if err != nil {
+		t.Fatalf("RunIssues create: %v", err)
+	}
+
+	logged := readArgsLog(t, logFile)
+	if strings.Contains(logged, "--priority") {
+		t.Errorf("unexpected --priority flag without input: %s", logged)
+	}
+}
+
+func TestRunIssuesCreate_InvalidPriorityErrors(t *testing.T) {
+	setupFakeND(t)
+
+	err := RunIssues([]string{"create", "Bad priority", "--priority", "P9"})
+	if err == nil {
+		t.Fatal("expected error for invalid priority")
+	}
+	if !strings.Contains(err.Error(), "invalid priority") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+// stubBacklog is a minimal BacklogAdapter without CapPriority, used to verify
+// the stderr warning when a provider cannot honor --priority.
+type stubBacklog struct{}
+
+func (s *stubBacklog) Name() string                          { return "stub-nopriority" }
+func (s *stubBacklog) Capabilities() providers.CapabilitySet { return providers.NewCapabilitySet() }
+func (s *stubBacklog) Create(_ context.Context, in providers.CreateIssueInput) (providers.Issue, error) {
+	return providers.Issue{ID: "STUB-1", Title: in.Title, Status: providers.StatusOpen}, nil
+}
+func (s *stubBacklog) Show(context.Context, string) (providers.Issue, error) {
+	return providers.Issue{}, providers.ErrNotFound
+}
+func (s *stubBacklog) List(context.Context, providers.ListFilter) ([]providers.Issue, error) {
+	return nil, nil
+}
+func (s *stubBacklog) Update(context.Context, string, providers.UpdateIssueInput) (providers.Issue, error) {
+	return providers.Issue{}, providers.ErrUnsupported
+}
+func (s *stubBacklog) Close(context.Context, string, string) error { return nil }
+func (s *stubBacklog) Reopen(context.Context, string) error        { return nil }
+func (s *stubBacklog) AddComment(context.Context, string, string) (providers.Comment, error) {
+	return providers.Comment{}, nil
+}
+func (s *stubBacklog) ListComments(context.Context, string) ([]providers.Comment, error) {
+	return nil, nil
+}
+func (s *stubBacklog) Link(context.Context, string, string, providers.LinkKind) error   { return nil }
+func (s *stubBacklog) Unlink(context.Context, string, string, providers.LinkKind) error { return nil }
+func (s *stubBacklog) Ready(context.Context, providers.ReadyFilter) ([]providers.Issue, error) {
+	return nil, nil
+}
+func (s *stubBacklog) Blocked(context.Context) ([]providers.Issue, error) { return nil, nil }
+func (s *stubBacklog) Prime(context.Context, providers.PrimeOptions) (string, error) {
+	return "", nil
+}
+
+var registerStubOnce sync.Once
+
+func registerStubBacklog() {
+	registerStubOnce.Do(func() {
+		providers.RegisterBacklog("stub-nopriority", func(map[string]interface{}) (providers.BacklogAdapter, error) {
+			return &stubBacklog{}, nil
+		})
+	})
+}
+
+func TestRunIssuesCreate_WarnsWhenAdapterLacksPrioritySupport(t *testing.T) {
+	registerStubBacklog()
+
+	dir := t.TempDir()
+	project := filepath.Join(dir, "project")
+	if err := os.MkdirAll(filepath.Join(project, ".paivot"), 0o755); err != nil {
+		t.Fatalf("mkdir project: %v", err)
+	}
+	config := "backlog:\n  primary:\n    adapter: stub-nopriority\n"
+	if err := os.WriteFile(filepath.Join(project, ".paivot", "config.yaml"), []byte(config), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	oldWD, _ := os.Getwd()
+	t.Cleanup(func() { _ = os.Chdir(oldWD) })
+	if err := os.Chdir(project); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+
+	// Capture stderr for the warning.
+	oldStderr := os.Stderr
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	os.Stderr = w
+	t.Cleanup(func() { os.Stderr = oldStderr })
+
+	_, runErr := captureStdout(t, func() error {
+		return RunIssues([]string{"create", "Stub story", "--priority", "P2"})
+	})
+	_ = w.Close()
+	os.Stderr = oldStderr
+
+	stderrBytes, _ := io.ReadAll(r)
+	if runErr != nil {
+		t.Fatalf("RunIssues create: %v", runErr)
+	}
+	if !strings.Contains(string(stderrBytes), "does not support --priority") {
+		t.Errorf("expected stderr warning about unsupported --priority, got %q", string(stderrBytes))
 	}
 }
 

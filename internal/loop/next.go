@@ -3,7 +3,9 @@ package loop
 import (
 	"fmt"
 	"path/filepath"
+	"sort"
 	"strconv"
+	"strings"
 
 	"github.com/paivot-ai/pvg/internal/settings"
 )
@@ -31,19 +33,28 @@ type NextAction struct {
 	Model string `json:"model,omitempty"`
 }
 
+// StalledStory identifies one in_progress story whose developer is presumed
+// dead with its worktree still on disk (see DetectStall).
+type StalledStory struct {
+	StoryID      string `json:"story_id"`
+	WorktreePath string `json:"worktree_path"`
+}
+
 // NextResult is the host-agnostic orchestration decision derived from nd state.
 type NextResult struct {
-	Mode          string       `json:"mode"`
-	TargetEpic    string       `json:"target_epic,omitempty"`
-	ActiveLoop    bool         `json:"active_loop"`
-	ScopeSource   string       `json:"scope_source,omitempty"`
-	Decision      string       `json:"decision"`
-	Reason        string       `json:"reason"`
-	Counts        WorkCounts   `json:"counts"`
-	Next          *NextAction  `json:"next,omitempty"`
-	Actions       []NextAction `json:"actions,omitempty"`   // full wave when --n > 1; Next stays the first action
-	NextEpic      string       `json:"next_epic,omitempty"` // populated on "epic_complete" when a next epic exists
-	NextEpicTitle string       `json:"next_epic_title,omitempty"`
+	Mode           string         `json:"mode"`
+	TargetEpic     string         `json:"target_epic,omitempty"`
+	ActiveLoop     bool           `json:"active_loop"`
+	ScopeSource    string         `json:"scope_source,omitempty"`
+	Decision       string         `json:"decision"`
+	Reason         string         `json:"reason"`
+	Counts         WorkCounts     `json:"counts"`
+	Next           *NextAction    `json:"next,omitempty"`
+	Actions        []NextAction   `json:"actions,omitempty"`   // full wave when --n > 1; Next stays the first action
+	NextEpic       string         `json:"next_epic,omitempty"` // populated on "epic_complete" when a next epic exists
+	NextEpicTitle  string         `json:"next_epic_title,omitempty"`
+	Stalled        []StalledStory `json:"stalled,omitempty"`         // populated on "stalled"
+	EscalatedStory string         `json:"escalated_story,omitempty"` // populated on "escalate"
 }
 
 // MaxWaveSize caps the number of actions a single `pvg loop next --n N` call
@@ -57,6 +68,28 @@ const MaxWaveSize = 6
 // asks the dispatcher to re-establish scope explicitly. Silent loss of
 // containment is the dangerous failure mode; this makes it loud.
 const DecisionNoActiveLoop = "no_active_loop"
+
+// DecisionStalled is returned by `pvg loop next` when the identical non-empty
+// in_progress story set has been observed on stalledWaitThreshold consecutive
+// wait evaluations. ReconcileOrphans only heals stories whose worktree is
+// GONE; a dead developer that left its worktree behind parks the story
+// in_progress forever, and epic mode would wait on it indefinitely.
+const DecisionStalled = "stalled"
+
+// stalledWaitThreshold is the number of consecutive wait evaluations that
+// must observe the identical non-empty in_progress story set before the loop
+// reports the claims as stalled.
+const stalledWaitThreshold = 3
+
+// DecisionEscalate is returned when a rejected story has reached RejectionCap
+// PM rejections: the loop stops dispatching automated rework and surfaces the
+// story to the user instead. The PM's verdict is never overridden.
+const DecisionEscalate = "escalate"
+
+// RejectionCap is the number of PM rejections after which the loop escalates
+// a story to the user instead of dispatching another rework cycle. `pvg story
+// reject` maintains the counter labels (rejected-x2, rejected-x3) this reads.
+const RejectionCap = 3
 
 // NoActiveLoopResult builds the refusal returned when no loop scope can be
 // resolved and none was passed explicitly. Global counts are populated
@@ -171,6 +204,12 @@ func evaluateEpicMode(projectRoot string, result NextResult, n int) (NextResult,
 		return result, err
 	}
 
+	// Rejection cap: a story the PM rejected RejectionCap times must not
+	// ping-pong through yet another automated rework cycle.
+	if escalated := applyRejectionCap(&result, epicQueues.Rejected); escalated {
+		return result, nil
+	}
+
 	// Update counts to reflect epic-scoped reality for the decision.
 	epicCounts, err := QueryEpicCounts(projectRoot, result.TargetEpic)
 	if err != nil {
@@ -253,6 +292,11 @@ func evaluateAllMode(projectRoot string, result NextResult, n int) (NextResult, 
 	result.Counts.Rejected = len(globalQueues.Rejected)
 	result.Counts.Ready = len(globalQueues.Ready)
 
+	// Rejection cap: same escalation rule as epic mode.
+	if escalated := applyRejectionCap(&result, globalQueues.Rejected); escalated {
+		return result, nil
+	}
+
 	if actions := chooseNextActions(globalQueues, "backlog", n); len(actions) > 0 {
 		applyModelOverrides(projectRoot, actions)
 		result.Decision = "act"
@@ -293,7 +337,11 @@ func queryQueues(projectRoot, parent string) (queueSnapshot, error) {
 	)
 
 	if parent != "" {
-		filters = append(filters, "--parent", parent)
+		// --epic scopes to the epic's whole subtree (recursive), unlike
+		// --parent which only matches direct children. Nested epics would
+		// otherwise hide their stories from the dispatch queues. Both
+		// nd ready and nd list support --epic.
+		filters = append(filters, "--epic", parent)
 	}
 
 	delivered, err := QueryDelivered(projectRoot, filters...)
@@ -420,6 +468,128 @@ func developerNewAction(issue ndIssue, scope string) NextAction {
 		Phase:    actionPhase(issue),
 		Priority: strconv.Itoa(issue.Priority),
 	}
+}
+
+// applyRejectionCap scans the rejected queue for a story whose rejection
+// counter has reached RejectionCap and, if found, converts the result into an
+// "escalate" decision instead of letting a developer_rework action be
+// selected for it. Returns true when the result was escalated.
+func applyRejectionCap(result *NextResult, rejected []ndIssue) bool {
+	for _, issue := range rejected {
+		if rejectionCountFromLabels(issue.Labels) < RejectionCap {
+			continue
+		}
+		result.Decision = DecisionEscalate
+		result.EscalatedStory = issue.ID
+		result.Reason = fmt.Sprintf("story %s rejected %d times; surface to the user; never override the PM", issue.ID, RejectionCap)
+		return true
+	}
+	return false
+}
+
+// rejectionCountFromLabels reads the deterministic rejection counter that
+// `pvg story reject` maintains via labels: plain "rejected" counts as 1, a
+// "rejected-xN" counter label counts as N (the highest wins).
+func rejectionCountFromLabels(labels []string) int {
+	count := 0
+	for _, label := range labels {
+		lower := strings.ToLower(label)
+		if lower == "rejected" && count < 1 {
+			count = 1
+			continue
+		}
+		if rest, ok := strings.CutPrefix(lower, "rejected-x"); ok {
+			if n, err := strconv.Atoi(rest); err == nil && n > count {
+				count = n
+			}
+		}
+	}
+	return count
+}
+
+// DetectStall updates the loop state's wait-set tracking after a `pvg loop
+// next` evaluation and converts a wait decision into DecisionStalled when the
+// identical non-empty in_progress story set has been observed on
+// stalledWaitThreshold consecutive wait evaluations. ReconcileOrphans (which
+// runs before every evaluation) already healed stories whose worktree is
+// gone, so a story still stuck in_progress at this point has its worktree on
+// disk with a presumed-dead developer -- epic mode would otherwise wait on it
+// forever. No-op when there is no persistent loop state to track across
+// evaluations. Any non-wait decision resets the streak.
+func DetectStall(projectRoot string, result *NextResult) {
+	state, root, err := ReadStateRoot(projectRoot)
+	if err != nil || !state.Active {
+		return
+	}
+
+	clear := func() {
+		if state.WaitStorySet != "" || state.WaitStoryStreak != 0 {
+			state.WaitStorySet = ""
+			state.WaitStoryStreak = 0
+			_ = WriteState(root, state)
+		}
+	}
+
+	if result.Decision != "wait" {
+		clear()
+		return
+	}
+
+	ids := stalledCandidateIDs(projectRoot, result.Mode, result.TargetEpic)
+	if len(ids) == 0 {
+		clear()
+		return
+	}
+
+	set := strings.Join(ids, ",")
+	if set == state.WaitStorySet {
+		state.WaitStoryStreak++
+	} else {
+		state.WaitStorySet = set
+		state.WaitStoryStreak = 1
+	}
+	_ = WriteState(root, state)
+
+	if state.WaitStoryStreak < stalledWaitThreshold {
+		return
+	}
+
+	base := ResolveWorktreeBase(root)
+	result.Decision = DecisionStalled
+	result.Stalled = result.Stalled[:0]
+	for _, id := range ids {
+		result.Stalled = append(result.Stalled, StalledStory{
+			StoryID:      id,
+			WorktreePath: filepath.Join(base, "dev-"+id),
+		})
+	}
+	result.Reason = fmt.Sprintf(
+		"%d consecutive wait evaluations observed the identical in_progress story set (%s); the owning developer(s) are presumed dead with their worktrees still on disk. Run `pvg loop recover`, then respawn a developer for each story or release it with `pvg story release <STORY_ID>`.",
+		state.WaitStoryStreak, set)
+}
+
+// stalledCandidateIDs returns the sorted in_progress story ids that a stalled
+// wait could be parked on, scoped to the target epic in epic mode. Stories
+// labeled delivered are excluded: they await PM review and need no live
+// developer (matching the orphan-healing rule in ReconcileOrphans).
+func stalledCandidateIDs(projectRoot, mode, targetEpic string) []string {
+	args := []string{"list", "--status", "in_progress", "--limit", "0", "--json"}
+	if mode == "epic" && targetEpic != "" {
+		args = append(args, "--epic", targetEpic)
+	}
+	issues, err := runND(projectRoot, args...)
+	if err != nil {
+		return nil
+	}
+	ids := make([]string, 0, len(issues))
+	for _, issue := range issues {
+		if issue.ID == "" || hasLabel(issue.Labels, "delivered") {
+			continue
+		}
+		ids = append(ids, issue.ID)
+	}
+	sort.Strings(ids)
+	return ids
 }
 
 func reasonForAction(action *NextAction) string {

@@ -407,6 +407,162 @@ func TestEvaluateStop_EpicPendingMerge_WithActiveWork_NoEffect(t *testing.T) {
 	}
 }
 
+// Abandonment regression (epic A drained, epic B blocked): with epic-scoped
+// counts the drained target epic yields an all-zero tuple no matter what
+// sibling epics look like, so the completion gate must BLOCK the stop (state
+// preserved) instead of the old backlog-wide path deciding "No actionable
+// work remains" and deleting the state with the epic unmerged.
+func TestEvaluateStop_DrainedEpicWithBlockedSibling_BlocksOnCompletionGate(t *testing.T) {
+	d := EvaluateStop(StopConfig{
+		Active:           true,
+		Mode:             "epic",
+		TargetEpic:       "PROJ-ea",
+		Iteration:        10,
+		MaxIterations:    50,
+		MaxConsecWaits:   3,
+		EpicPendingMerge: true,
+		// Epic-scoped counts: all zero -- epic B's blocked story is outside
+		// the target subtree and no longer pollutes the tuple.
+	})
+	if d.Allow {
+		t.Fatal("expected block: drained target epic must run its completion gate")
+	}
+	if d.Reason != "Epic completion gate pending -- merge epic to main before exit" {
+		t.Fatalf("expected completion-gate reason, got: %s", d.Reason)
+	}
+	if d.RemoveState {
+		t.Fatal("state must NOT be removed while the completion gate is pending")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Signature-based consecutive waits
+// ---------------------------------------------------------------------------
+
+func TestComputeWorkSignature_Deterministic(t *testing.T) {
+	wc := WorkCounts{Ready: 1, Delivered: 2, InProgress: 3}
+	a := ComputeWorkSignature(wc, []string{"PROJ-b", "PROJ-a"})
+	b := ComputeWorkSignature(wc, []string{"PROJ-a", "PROJ-b"})
+	if a != b {
+		t.Fatalf("signature must be order-independent: %q vs %q", a, b)
+	}
+	c := ComputeWorkSignature(WorkCounts{Ready: 2, Delivered: 2, InProgress: 3}, []string{"PROJ-a", "PROJ-b"})
+	if a == c {
+		t.Fatal("different counts must produce different signatures")
+	}
+}
+
+// A synchronously progressing loop (signature changes on every stop) must
+// never trip the escape valve, no matter how many blocked stops accumulate.
+func TestEvaluateStop_ProgressingSignaturesNeverTripValve(t *testing.T) {
+	consec := 0
+	prev := ""
+	for i := 0; i < 10; i++ {
+		sig := ComputeWorkSignature(WorkCounts{Ready: 1, InProgress: 10 - i}, nil)
+		d := EvaluateStop(StopConfig{
+			Active:         true,
+			Iteration:      i,
+			MaxIterations:  50,
+			ConsecWaits:    consec,
+			MaxConsecWaits: 3,
+			Ready:          1,
+			InProgress:     10 - i,
+			WorkSignature:  sig,
+			PrevSignature:  prev,
+		})
+		if d.Allow {
+			t.Fatalf("stop %d: progressing loop tripped the valve (reason: %s)", i, d.Reason)
+		}
+		if d.NewConsecWaits != 1 {
+			t.Fatalf("stop %d: expected counter reset to 1 on progress, got %d", i, d.NewConsecWaits)
+		}
+		consec = d.NewConsecWaits
+		prev = sig
+	}
+}
+
+// Identical signatures accumulate and trip the valve at MaxConsecutiveWaits,
+// preserving state (escape valve semantics unchanged).
+func TestEvaluateStop_IdenticalSignaturesTripValveAtMax(t *testing.T) {
+	sig := ComputeWorkSignature(WorkCounts{InProgress: 2}, []string{"PROJ-a", "PROJ-b"})
+	consec := 0
+	for i := 0; i < 2; i++ {
+		d := EvaluateStop(StopConfig{
+			Active:         true,
+			Iteration:      i,
+			MaxIterations:  50,
+			ConsecWaits:    consec,
+			MaxConsecWaits: 3,
+			PersistState:   true,
+			InProgress:     2,
+			WorkSignature:  sig,
+			PrevSignature:  sig,
+		})
+		if d.Allow {
+			t.Fatalf("stop %d: valve tripped early", i)
+		}
+		if d.NewConsecWaits != i+1 {
+			t.Fatalf("stop %d: expected counter %d, got %d", i, i+1, d.NewConsecWaits)
+		}
+		consec = d.NewConsecWaits
+	}
+
+	d := EvaluateStop(StopConfig{
+		Active:         true,
+		Iteration:      2,
+		MaxIterations:  50,
+		ConsecWaits:    consec,
+		MaxConsecWaits: 3,
+		PersistState:   true,
+		InProgress:     2,
+		WorkSignature:  sig,
+		PrevSignature:  sig,
+	})
+	if !d.Allow {
+		t.Fatal("expected valve to allow exit at MaxConsecutiveWaits identical stops")
+	}
+	if d.RemoveState {
+		t.Fatal("escape valve must PRESERVE state")
+	}
+	if d.NewConsecWaits != 0 {
+		t.Fatalf("expected counter reset by valve, got %d", d.NewConsecWaits)
+	}
+}
+
+// A progress event mid-streak resets the budget: identical, identical,
+// different, then identical again must not trip the valve on the fourth stop.
+func TestEvaluateStop_ProgressMidStreakResetsBudget(t *testing.T) {
+	stale := ComputeWorkSignature(WorkCounts{InProgress: 2}, []string{"PROJ-a"})
+	fresh := ComputeWorkSignature(WorkCounts{InProgress: 1}, []string{"PROJ-b"})
+
+	consec := 0
+	seq := []struct{ sig, prev string }{
+		{stale, ""},    // first stop: differs from empty prev -> reset to 1
+		{stale, stale}, // identical -> 2
+		{fresh, stale}, // progress -> reset to 1
+		{fresh, fresh}, // identical -> 2 (valve NOT tripped)
+	}
+	for i, s := range seq {
+		d := EvaluateStop(StopConfig{
+			Active:         true,
+			Iteration:      i,
+			MaxIterations:  50,
+			ConsecWaits:    consec,
+			MaxConsecWaits: 3,
+			InProgress:     2,
+			WorkSignature:  s.sig,
+			PrevSignature:  s.prev,
+		})
+		if d.Allow {
+			t.Fatalf("stop %d: valve must not trip after mid-streak progress", i)
+		}
+		consec = d.NewConsecWaits
+	}
+	if consec != 2 {
+		t.Fatalf("expected counter 2 after reset sequence, got %d", consec)
+	}
+}
+
 func TestEvaluateStop_IterationIncrement(t *testing.T) {
 	d := EvaluateStop(StopConfig{
 		Active:        true,

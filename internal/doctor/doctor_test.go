@@ -289,7 +289,7 @@ func writeIssues(t *testing.T, issuesDir string, ids ...string) {
 	}
 }
 
-func TestCheckSnapshotDrift_DriftWarns(t *testing.T) {
+func TestCheckLegacySnapshotDrift_DriftWarns(t *testing.T) {
 	root := t.TempDir()
 	// Live vault with 3 issues, snapshot with 2 of them -> 1 missing.
 	vaultDir := filepath.Join(root, ".vault")
@@ -299,18 +299,21 @@ func TestCheckSnapshotDrift_DriftWarns(t *testing.T) {
 	writeIssues(t, filepath.Join(vaultDir, "issues"), "TIX-1", "TIX-2", "TIX-3")
 	writeIssues(t, filepath.Join(root, ".vault", "backlog-snapshot", "issues"), "TIX-1", "TIX-2")
 
-	f := checkSnapshotDrift(root)
+	f, ok := checkLegacySnapshotDrift(root)
+	if !ok {
+		t.Fatal("expected the legacy check to apply when the snapshot dir exists")
+	}
 	if f.Status != StatusWarn {
 		t.Fatalf("expected warn, got %s: %s", f.Status, f.Message)
 	}
-	for _, want := range []string{"1 live issue(s) not in .vault/backlog-snapshot", "created since last export", "pvg nd sync --commit"} {
+	for _, want := range []string{"legacy snapshot drift", "1 live issue(s) not in .vault/backlog-snapshot", "created since last export", "nd/backlog branch", "pvg nd sync"} {
 		if !strings.Contains(f.Message, want) {
 			t.Errorf("warn message missing %q in %q", want, f.Message)
 		}
 	}
 }
 
-func TestCheckSnapshotDrift_InSyncPasses(t *testing.T) {
+func TestCheckLegacySnapshotDrift_InSyncPasses(t *testing.T) {
 	root := t.TempDir()
 	vaultDir := filepath.Join(root, ".vault")
 	if err := os.WriteFile(filepath.Join(mkdir(t, vaultDir), ".nd.yaml"), []byte("prefix: TIX\n"), 0o644); err != nil {
@@ -319,41 +322,152 @@ func TestCheckSnapshotDrift_InSyncPasses(t *testing.T) {
 	writeIssues(t, filepath.Join(vaultDir, "issues"), "TIX-1", "TIX-2")
 	writeIssues(t, filepath.Join(root, ".vault", "backlog-snapshot", "issues"), "TIX-1", "TIX-2")
 
-	f := checkSnapshotDrift(root)
+	f, ok := checkLegacySnapshotDrift(root)
+	if !ok {
+		t.Fatal("expected the legacy check to apply when the snapshot dir exists")
+	}
 	if f.Status != StatusPass {
 		t.Fatalf("expected pass, got %s: %s", f.Status, f.Message)
 	}
 }
 
-func TestCheckSnapshotDrift_NeverExportedWarns(t *testing.T) {
+func TestCheckLegacySnapshotDrift_NoSnapshotNotApplicable(t *testing.T) {
 	root := t.TempDir()
-	// Live vault populated, no snapshot dir at all.
+	// Live vault populated, no snapshot dir: the project never used the
+	// legacy export (or dropped it) -- the check must not apply, let alone
+	// nag. Durability is nd-sync-status's job now.
 	vaultDir := filepath.Join(root, ".vault")
 	if err := os.WriteFile(filepath.Join(mkdir(t, vaultDir), ".nd.yaml"), []byte("prefix: TIX\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	writeIssues(t, filepath.Join(vaultDir, "issues"), "TIX-1")
 
-	f := checkSnapshotDrift(root)
+	if _, ok := checkLegacySnapshotDrift(root); ok {
+		t.Fatal("expected the legacy check not to apply without a snapshot dir")
+	}
+}
+
+// --- nd-sync-status ---
+
+// ndSyncStatusJSON builds a gitsync.StatusResult JSON payload for mocks.
+func ndSyncStatusJSON(branchExists, dirty, remoteAbsent bool, ahead, behind int) string {
+	return fmt.Sprintf(
+		`{"Branch":"nd/backlog","BranchExists":%v,"Commit":"abc1234","Dirty":%v,"RemoteAbsent":%v,"Ahead":%d,"Behind":%d}`,
+		branchExists, dirty, remoteAbsent, ahead, behind)
+}
+
+// mockNDSyncStatus routes `nd ... sync --status --json` to echo the given
+// payload; every other command runs unmodified.
+func mockNDSyncStatus(t *testing.T, payload string) {
+	t.Helper()
+	orig := execCommand
+	t.Cleanup(func() { execCommand = orig })
+	execCommand = func(name string, args ...string) *exec.Cmd {
+		if name == "nd" {
+			return exec.Command("echo", payload)
+		}
+		return exec.Command(name, args...)
+	}
+}
+
+// initializedVaultRoot creates a project root whose local .vault is an
+// initialized nd vault.
+func initializedVaultRoot(t *testing.T) string {
+	t.Helper()
+	root := t.TempDir()
+	vaultDir := mkdir(t, filepath.Join(root, ".vault"))
+	if err := os.WriteFile(filepath.Join(vaultDir, ".nd.yaml"), []byte("prefix: TIX\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return root
+}
+
+func TestCheckNDSyncStatus_SkipsWhenVaultUninitialized(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, ".vault"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	f := checkNDSyncStatus(root)
+	if f.Status != StatusSkip {
+		t.Fatalf("expected skip, got %s: %s", f.Status, f.Message)
+	}
+}
+
+func TestCheckNDSyncStatus_PassInSync(t *testing.T) {
+	root := initializedVaultRoot(t)
+	mockNDSyncStatus(t, ndSyncStatusJSON(true, false, false, 0, 0))
+
+	f := checkNDSyncStatus(root)
+	if f.Status != StatusPass {
+		t.Fatalf("expected pass, got %s: %s", f.Status, f.Message)
+	}
+	if !strings.Contains(f.Message, "in sync with nd/backlog") {
+		t.Errorf("pass message missing branch reference: %q", f.Message)
+	}
+}
+
+func TestCheckNDSyncStatus_PassLocalOnly(t *testing.T) {
+	root := initializedVaultRoot(t)
+	mockNDSyncStatus(t, ndSyncStatusJSON(true, false, true, 3, 0))
+
+	// No remote: local-only durability is the best available; ahead-of-remote
+	// is meaningless and must not warn.
+	f := checkNDSyncStatus(root)
+	if f.Status != StatusPass {
+		t.Fatalf("expected pass, got %s: %s", f.Status, f.Message)
+	}
+	if !strings.Contains(f.Message, "no remote") {
+		t.Errorf("pass message missing local-only note: %q", f.Message)
+	}
+}
+
+func TestCheckNDSyncStatus_WarnsWhenDivergedOrDirty(t *testing.T) {
+	root := initializedVaultRoot(t)
+	mockNDSyncStatus(t, ndSyncStatusJSON(true, true, false, 1, 2))
+
+	f := checkNDSyncStatus(root)
 	if f.Status != StatusWarn {
 		t.Fatalf("expected warn, got %s: %s", f.Status, f.Message)
 	}
-	for _, want := range []string{"never been exported", "pvg nd sync --commit"} {
+	for _, want := range []string{"not yet snapshotted", "2 commit(s) behind", "1 commit(s) not pushed", "pvg nd sync"} {
 		if !strings.Contains(f.Message, want) {
 			t.Errorf("warn message missing %q in %q", want, f.Message)
 		}
 	}
 }
 
-func TestCheckSnapshotDrift_NoSnapshotNoLiveSkips(t *testing.T) {
-	root := t.TempDir()
-	// .vault exists but is not initialized (no .nd.yaml) and no snapshot dir.
-	if err := os.MkdirAll(filepath.Join(root, ".vault"), 0o755); err != nil {
-		t.Fatal(err)
+func TestCheckNDSyncStatus_WarnsWhenNoBranch(t *testing.T) {
+	root := initializedVaultRoot(t)
+	mockNDSyncStatus(t, ndSyncStatusJSON(false, false, true, 0, 0))
+
+	f := checkNDSyncStatus(root)
+	if f.Status != StatusWarn {
+		t.Fatalf("expected warn, got %s: %s", f.Status, f.Message)
 	}
-	f := checkSnapshotDrift(root)
-	if f.Status != StatusSkip {
-		t.Fatalf("expected skip, got %s: %s", f.Status, f.Message)
+	for _, want := range []string{"no nd/backlog branch yet", "pvg nd sync"} {
+		if !strings.Contains(f.Message, want) {
+			t.Errorf("warn message missing %q in %q", want, f.Message)
+		}
+	}
+}
+
+func TestCheckNDSyncStatus_WarnsWhenCommandFails(t *testing.T) {
+	root := initializedVaultRoot(t)
+	orig := execCommand
+	t.Cleanup(func() { execCommand = orig })
+	execCommand = func(name string, args ...string) *exec.Cmd {
+		if name == "nd" {
+			return exec.Command("false")
+		}
+		return exec.Command(name, args...)
+	}
+
+	f := checkNDSyncStatus(root)
+	if f.Status != StatusWarn {
+		t.Fatalf("expected warn (never fail) on nd error, got %s: %s", f.Status, f.Message)
+	}
+	if !strings.Contains(f.Message, "pvg nd sync") {
+		t.Errorf("warn message missing remedy: %q", f.Message)
 	}
 }
 
@@ -529,7 +643,13 @@ func TestRunAll_ProducesReport(t *testing.T) {
 		switch name {
 		case "nd":
 			if len(args) > 0 && args[0] == "--version" {
-				return exec.Command("echo", "nd version v0.10.5")
+				return exec.Command("echo", "nd version v0.11.0")
+			}
+			for _, arg := range args {
+				if arg == "sync" {
+					// nd sync --status --json -- clean local-only posture
+					return exec.Command("echo", ndSyncStatusJSON(true, false, true, 0, 0))
+				}
 			}
 			// nd doctor -- simulate success
 			return exec.Command("true")
@@ -572,10 +692,16 @@ func TestRunAll_ProducesReport(t *testing.T) {
 		t.Logf("[%s] %s: %s", f.Status, f.Name, f.Message)
 	}
 
-	for _, expected := range []string{"vault-resolution", "nd-reachable", "modelith-reachable", "machinery-reachable", "shared-config-consistency", "snapshot-drift", "nd-doctor", "loop-state", "worktree-hygiene", "code-quality-analyzers"} {
+	for _, expected := range []string{"vault-resolution", "nd-reachable", "modelith-reachable", "machinery-reachable", "shared-config-consistency", "nd-sync-status", "nd-doctor", "loop-state", "worktree-hygiene", "code-quality-analyzers"} {
 		if !names[expected] {
 			t.Errorf("missing check %q", expected)
 		}
+	}
+
+	// No legacy snapshot dir in this fixture, so the deprecated drift check
+	// must not appear at all.
+	if names["legacy-snapshot-drift"] {
+		t.Error("legacy-snapshot-drift reported without a .vault/backlog-snapshot directory")
 	}
 }
 

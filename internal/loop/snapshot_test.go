@@ -2,6 +2,7 @@ package loop
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 )
@@ -213,5 +214,47 @@ func TestSnapshotPath(t *testing.T) {
 func TestSnapshotFileName_Value(t *testing.T) {
 	if SnapshotFileName() != ".piv-loop-snapshot.json" {
 		t.Errorf("unexpected snapshot file name: %s", SnapshotFileName())
+	}
+}
+
+// EpicBranchExists must see local AND remote-tracking epic refs: a session
+// that fetched an unmerged epic branch without checking it out locally still
+// owes the completion gate.
+func TestEpicBranchExists_LocalAndRemoteRefs(t *testing.T) {
+	root := t.TempDir()
+	run := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", append([]string{"-C", root}, args...)...)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	run("init", "-q", "-b", "main")
+	run("config", "user.email", "t@t")
+	run("config", "user.name", "t")
+	if err := os.WriteFile(filepath.Join(root, "README.md"), []byte("x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	run("add", "-A")
+	run("commit", "-qm", "init")
+
+	if EpicBranchExists(root, "PROJ-e1") {
+		t.Fatal("expected false with no epic refs at all")
+	}
+
+	run("branch", "epic/PROJ-e1")
+	if !EpicBranchExists(root, "PROJ-e1") {
+		t.Fatal("expected true for local epic branch")
+	}
+
+	// Remote-only: delete the local ref, plant a remote-tracking one.
+	run("branch", "-D", "epic/PROJ-e1")
+	run("update-ref", "refs/remotes/origin/epic/PROJ-e1", "HEAD")
+	if !EpicBranchExists(root, "PROJ-e1") {
+		t.Fatal("expected true for remote-tracking epic ref (origin/epic/PROJ-e1)")
+	}
+
+	if EpicBranchExists(root, "") {
+		t.Fatal("expected false for empty epic id")
 	}
 }

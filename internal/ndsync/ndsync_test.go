@@ -343,3 +343,90 @@ func TestCommitSnapshot_CommitsAndIsIdempotent(t *testing.T) {
 		t.Fatal("expected no-op when snapshot matches HEAD")
 	}
 }
+
+func TestGitSync_DelegatesToND(t *testing.T) {
+	orig := execCommand
+	t.Cleanup(func() { execCommand = orig })
+
+	var gotName string
+	var gotArgs []string
+	execCommand = func(name string, args ...string) *exec.Cmd {
+		gotName = name
+		gotArgs = args
+		return exec.Command("echo", "Sync nd/backlog: pushed (abc1234)")
+	}
+
+	out, err := GitSync("/some/vault")
+	if err != nil {
+		t.Fatalf("GitSync() error: %v", err)
+	}
+	if out != "Sync nd/backlog: pushed (abc1234)" {
+		t.Errorf("unexpected output: %q", out)
+	}
+	if gotName != "nd" {
+		t.Errorf("expected nd invocation, got %q", gotName)
+	}
+	wantArgs := []string{"--vault", "/some/vault", "sync"}
+	if len(gotArgs) != len(wantArgs) {
+		t.Fatalf("args = %v, want %v", gotArgs, wantArgs)
+	}
+	for i := range wantArgs {
+		if gotArgs[i] != wantArgs[i] {
+			t.Fatalf("args = %v, want %v", gotArgs, wantArgs)
+		}
+	}
+}
+
+func TestGitSync_ErrorIncludesNDOutput(t *testing.T) {
+	orig := execCommand
+	t.Cleanup(func() { execCommand = orig })
+	execCommand = func(name string, args ...string) *exec.Cmd {
+		return exec.Command("sh", "-c", "echo push rejected; exit 1")
+	}
+
+	_, err := GitSync("/some/vault")
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "push rejected") {
+		t.Errorf("error missing nd output: %v", err)
+	}
+}
+
+func TestHasLegacySnapshot(t *testing.T) {
+	root := t.TempDir()
+	if HasLegacySnapshot(root) {
+		t.Fatal("expected no legacy snapshot in an empty root")
+	}
+	if err := os.MkdirAll(SnapshotDir(root), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if !HasLegacySnapshot(root) {
+		t.Fatal("expected legacy snapshot detected after creating the dir")
+	}
+}
+
+func TestBacklogBranchAvailable(t *testing.T) {
+	root := t.TempDir()
+	run := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", append([]string{"-C", root}, args...)...)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	run("init", "-q")
+	run("config", "user.email", "test@test")
+	run("config", "user.name", "test")
+
+	// No branch, no remote.
+	if BacklogBranchAvailable(root) {
+		t.Fatal("expected unavailable in a fresh repo")
+	}
+
+	run("commit", "-q", "--allow-empty", "-m", "init")
+	run("update-ref", "refs/heads/nd/backlog", "HEAD")
+	if !BacklogBranchAvailable(root) {
+		t.Fatal("expected available once refs/heads/nd/backlog exists")
+	}
+}

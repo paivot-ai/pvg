@@ -106,6 +106,9 @@ func Check(vaultDir, projectRoot string, input HookInput) Result {
 		if r := checkBashProjectIssues(projectRoot, input.ToolInput.Command); !r.Allowed {
 			return r
 		}
+		if r := CheckNDUpgrade(projectRoot, input.ToolInput.Command); !r.Allowed {
+			return r
+		}
 		if r := CheckFSM(projectRoot, input.ToolInput.Command); !r.Allowed {
 			return r
 		}
@@ -344,13 +347,13 @@ func checkBashProjectVault(projectRoot, command string) Result {
 		return Result{Allowed: true}
 	}
 
-	// Check redirect operators: protected path must be after the operator.
-	for _, op := range []string{">>", ">"} {
-		if idx := strings.Index(command, op); idx >= 0 {
-			afterOp := command[idx:]
-			if stringsContainAny(afterOp, vaultSegments) || strings.Contains(afterOp, projectVaultRelPath) {
-				return Result{Allowed: false, Reason: projectVaultBlockMsg}
-			}
+	// Check redirect TARGETS: only a redirect whose target token is inside
+	// the protected path is a write. A protected path merely appearing later
+	// in the command after an unrelated redirect (`ls .vault/knowledge/
+	// 2>/dev/null | head`) is a read and must pass.
+	for _, target := range redirectTargets(command) {
+		if stringsContainAny(target, vaultSegments) || strings.Contains(target, projectVaultRelPath) {
+			return Result{Allowed: false, Reason: projectVaultBlockMsg}
 		}
 	}
 
@@ -373,6 +376,80 @@ func checkBashProjectVault(projectRoot, command string) Result {
 	}
 
 	return Result{Allowed: true}
+}
+
+// redirectTargets returns the target token of every output redirection in
+// command: the token following `>`, `>>`, `>|`, or an fd-form like `2>`.
+// Surrounding quotes are stripped. Fd-duplication forms (`2>&1`, `>&2`) have
+// no path target and are skipped. This makes the redirect check precise: a
+// protected path appearing elsewhere in the command after an unrelated
+// redirect (e.g. `ls .vault/issues/ 2>/dev/null | head`) is not a write.
+func redirectTargets(command string) []string {
+	var targets []string
+	for i := 0; i < len(command); i++ {
+		if command[i] != '>' {
+			continue
+		}
+		j := i + 1
+		if j < len(command) && command[j] == '>' { // >>
+			j++
+		}
+		if j < len(command) && command[j] == '|' { // >| clobber
+			j++
+		}
+		if j < len(command) && command[j] == '&' {
+			// >&N / >&N- fd duplication: no path target.
+			k := j + 1
+			for k < len(command) && command[k] >= '0' && command[k] <= '9' {
+				k++
+			}
+			if k > j+1 {
+				i = k - 1
+				continue
+			}
+			// `>& file` (redirect both streams to a file): target follows.
+			j++
+		}
+		for j < len(command) && (command[j] == ' ' || command[j] == '\t') {
+			j++
+		}
+		if j >= len(command) {
+			break
+		}
+		target, next := readRedirectToken(command, j)
+		if target != "" {
+			targets = append(targets, target)
+		}
+		i = next - 1
+	}
+	return targets
+}
+
+// readRedirectToken reads one shell word starting at index i, honoring simple
+// single/double quoting. Returns the unquoted token and the index just past it.
+func readRedirectToken(s string, i int) (string, int) {
+	if s[i] == '\'' || s[i] == '"' {
+		quote := s[i]
+		end := strings.IndexByte(s[i+1:], quote)
+		if end < 0 {
+			return s[i+1:], len(s)
+		}
+		return s[i+1 : i+1+end], i + 2 + end
+	}
+	start := i
+	for i < len(s) && !isShellWordBoundary(s[i]) {
+		i++
+	}
+	return s[start:i], i
+}
+
+// isShellWordBoundary reports whether b terminates a bare shell word.
+func isShellWordBoundary(b byte) bool {
+	switch b {
+	case ' ', '\t', '\n', ';', '|', '&', '<', '>', ')':
+		return true
+	}
+	return false
 }
 
 func checkProjectIssues(projectRoot, filePath string) Result {
@@ -413,13 +490,11 @@ func checkBashProjectIssues(projectRoot, command string) Result {
 		return Result{Allowed: true}
 	}
 
-	// Check redirect operators: protected path must be after the operator.
-	for _, op := range []string{">>", ">"} {
-		if idx := strings.Index(command, op); idx >= 0 {
-			afterOp := command[idx:]
-			if stringsContainAny(afterOp, issueSegments) || strings.Contains(afterOp, projectIssuesRelPath) {
-				return Result{Allowed: false, Reason: projectIssuesBlockMsg}
-			}
+	// Check redirect TARGETS: only a redirect whose target token is inside
+	// the protected path is a write (see checkBashProjectVault).
+	for _, target := range redirectTargets(command) {
+		if stringsContainAny(target, issueSegments) || strings.Contains(target, projectIssuesRelPath) {
+			return Result{Allowed: false, Reason: projectIssuesBlockMsg}
 		}
 	}
 

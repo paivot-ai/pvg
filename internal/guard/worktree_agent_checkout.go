@@ -3,8 +3,6 @@ package guard
 import (
 	"regexp"
 	"strings"
-
-	"github.com/paivot-ai/pvg/internal/dispatcher"
 )
 
 var worktreeAgentCheckoutRe = regexp.MustCompile(
@@ -26,8 +24,9 @@ func CheckWorktreeAgentCheckout(projectRoot, command string) Result {
 		return Result{Allowed: true}
 	}
 
-	state, _, err := dispatcher.ReadStateRoot(projectRoot)
-	if err != nil || !state.Enabled {
+	// executionActive (loop OR dispatcher), never the settings file alone: the
+	// shared-HEAD hazard exists only while a coordination session is live.
+	if !executionActive(projectRoot) {
 		return Result{Allowed: true}
 	}
 

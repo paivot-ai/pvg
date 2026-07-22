@@ -120,3 +120,94 @@ func TestReconcileLanded_RoutesMergedStoryToPMReview(t *testing.T) {
 		t.Fatalf("landed stories must never be auto-closed:\n%s", all)
 	}
 }
+
+// Regression: substring matching marked PROJ-a1b delivered when a subject only
+// referenced PROJ-a1b2. The match must be token-bounded (no [A-Za-z0-9-]
+// adjacent to the id).
+func TestSubjectContainsStoryToken_Boundaries(t *testing.T) {
+	cases := []struct {
+		subject string
+		storyID string
+		want    bool
+	}{
+		{"merge(story/PROJ-a1b): integrate PROJ-a1b", "PROJ-a1b", true},
+		{"GREEN: Bootstrap OTP (PROJ-epic1/PROJ-a1b)", "PROJ-a1b", true},
+		{"PROJ-a1b at start", "PROJ-a1b", true},
+		{"ends with PROJ-a1b", "PROJ-a1b", true},
+		{"feat: finish PROJ-a1b2 slice", "PROJ-a1b", false},         // longer sibling id
+		{"feat: finish XPROJ-a1b slice", "PROJ-a1b", false},         // prefixed token
+		{"feat: finish PROJ-a1b-extra slice", "PROJ-a1b", false},    // dash continuation
+		{"child id PROJ-a1b.2 counts as bounded", "PROJ-a1b", true}, // '.' is a boundary
+		{"no mention at all", "PROJ-a1b", false},
+		{"", "PROJ-a1b", false},
+		{"anything", "", false},
+	}
+	for _, tc := range cases {
+		if got := subjectContainsStoryToken(tc.subject, tc.storyID); got != tc.want {
+			t.Errorf("subjectContainsStoryToken(%q, %q) = %v, want %v", tc.subject, tc.storyID, got, tc.want)
+		}
+	}
+}
+
+// End-to-end shape of the false positive: only PROJ-a1b2 landed; PROJ-a1b
+// must NOT be rerouted to PM review.
+func TestReconcileLanded_DoesNotMatchLongerSiblingID(t *testing.T) {
+	projectRoot := t.TempDir()
+	run := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", append([]string{"-C", projectRoot}, args...)...)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	run("init", "-q", "-b", "main")
+	run("config", "user.email", "t@t")
+	run("config", "user.name", "t")
+	if err := os.WriteFile(filepath.Join(projectRoot, "README.md"), []byte("x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	run("add", "-A")
+	run("commit", "-qm", "init")
+	run("checkout", "-q", "-b", "epic/PROJ-epic1")
+	if err := os.WriteFile(filepath.Join(projectRoot, "feature.txt"), []byte("done\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	run("add", "-A")
+	run("commit", "-qm", "feat: land PROJ-a1b2 slice (PROJ-epic1/PROJ-a1b2)")
+	run("checkout", "-q", "main")
+
+	override := filepath.Join(t.TempDir(), "shared-vault")
+	t.Setenv("ND_VAULT_DIR", override)
+
+	var mutations [][]string
+	oldExec := execCommand
+	execCommand = func(name string, args ...string) *exec.Cmd {
+		if name == "git" {
+			return exec.Command(name, args...)
+		}
+		joined := strings.Join(args, " ")
+		if strings.Contains(joined, "list --status open") {
+			return exec.Command("echo", `[
+				{"ID":"PROJ-a1b","Status":"open","Parent":"PROJ-epic1","Type":"task","Labels":[]},
+				{"ID":"PROJ-a1b2","Status":"open","Parent":"PROJ-epic1","Type":"task","Labels":[]}
+			]`)
+		}
+		mutations = append(mutations, append([]string{name}, args...))
+		return exec.Command("true")
+	}
+	t.Cleanup(func() { execCommand = oldExec })
+
+	reroutes, err := ReconcileLanded(projectRoot)
+	if err != nil {
+		t.Fatalf("ReconcileLanded() error: %v", err)
+	}
+	if len(reroutes) != 1 || reroutes[0].StoryID != "PROJ-a1b2" {
+		t.Fatalf("expected only PROJ-a1b2 rerouted, got %#v", reroutes)
+	}
+	for _, m := range mutations {
+		joined := strings.Join(m, " ")
+		if strings.Contains(joined, "PROJ-a1b ") || strings.HasSuffix(joined, "PROJ-a1b") {
+			t.Fatalf("PROJ-a1b must not be mutated (substring false positive): %s", joined)
+		}
+	}
+}

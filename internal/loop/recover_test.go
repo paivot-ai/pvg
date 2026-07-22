@@ -5,6 +5,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/paivot-ai/pvg/internal/worktree"
@@ -172,6 +174,128 @@ func TestEvaluateRecover_OrphanWorktree_NonDeliveredStoryBranchDeleted(t *testin
 	kinds := actionKinds(plan.Actions)
 	assertContains(t, kinds, ActionDeleteBranch, "delete_branch")
 	assertNotContains(t, kinds, ActionPreserveBranch, "preserve_branch")
+}
+
+// Committed-but-undelivered work: an owned orphan worktree's story branch with
+// commits reachable from neither main nor any epic branch must be PRESERVED
+// (reported as unmerged), while the worktree removal proceeds either way.
+func TestEvaluateRecover_OrphanWorktree_UnmergedStoryBranchPreserved(t *testing.T) {
+	cfg := RecoverConfig{
+		CurrentWorktrees: []Worktree{
+			{
+				Path:   "/project/.claude/worktrees/dev-PROJ-d4e",
+				Branch: "story/PROJ-d4e",
+				Owned:  true,
+			},
+		},
+		// Story is in_progress WITHOUT the delivered label: the old rule
+		// force-deleted the branch and lost the commits.
+		InProgressIssues: []ndIssue{
+			{ID: "PROJ-d4e", Status: "in_progress", Labels: nil},
+		},
+		UnmergedBranches: map[string]bool{"story/PROJ-d4e": true},
+	}
+
+	plan := EvaluateRecover(cfg)
+
+	kinds := actionKinds(plan.Actions)
+	assertContains(t, kinds, ActionRemoveWorktree, "remove_worktree")
+	assertContains(t, kinds, ActionPreserveBranch, "preserve_branch")
+	assertNotContains(t, kinds, ActionDeleteBranch, "delete_branch")
+
+	found := false
+	for _, a := range plan.Actions {
+		if a.Kind == ActionPreserveBranch && a.BranchName == "story/PROJ-d4e" {
+			found = true
+			if !strings.Contains(a.Reason, "preserved: unmerged commits") {
+				t.Errorf("expected 'preserved: unmerged commits' reason, got %q", a.Reason)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("expected preserve action for story/PROJ-d4e, got %#v", plan.Actions)
+	}
+	if plan.Summary.BranchesPreserved != 1 || plan.Summary.BranchesDeleted != 0 {
+		t.Errorf("expected 1 preserved / 0 deleted, got %+v", plan.Summary)
+	}
+}
+
+// Same rule on the snapshot path: a snapshot story branch with unmerged
+// commits survives even when the story is no longer delivered in nd.
+func TestEvaluateRecover_SnapshotUnmergedStoryBranchPreserved(t *testing.T) {
+	cfg := RecoverConfig{
+		SnapshotStories: []SnapshotEntry{
+			{
+				StoryID:      "PROJ-a1b",
+				NDStatus:     "in_progress",
+				WorktreePath: "/project/.claude/worktrees/dev-PROJ-a1b",
+				BranchName:   "story/PROJ-a1b",
+				Owned:        true,
+			},
+		},
+		InProgressIssues: []ndIssue{
+			{ID: "PROJ-a1b", Status: "in_progress", Labels: nil},
+		},
+		UnmergedBranches: map[string]bool{"story/PROJ-a1b": true},
+	}
+
+	plan := EvaluateRecover(cfg)
+
+	kinds := actionKinds(plan.Actions)
+	assertContains(t, kinds, ActionRemoveWorktree, "remove_worktree")
+	assertContains(t, kinds, ActionPreserveBranch, "preserve_branch")
+	assertNotContains(t, kinds, ActionDeleteBranch, "delete_branch")
+}
+
+// branchHasUnmergedCommits ground truth against a real git repo, and
+// BuildRecoverConfig's population of UnmergedBranches from it.
+func TestBranchHasUnmergedCommits_RealRepo(t *testing.T) {
+	root := t.TempDir()
+	run := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", append([]string{"-C", root}, args...)...)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	write := func(name, content string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(root, name), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	run("init", "-q", "-b", "main")
+	run("config", "user.email", "t@t")
+	run("config", "user.name", "t")
+	write("README.md", "x\n")
+	run("add", "-A")
+	run("commit", "-qm", "init")
+	run("branch", "epic/PROJ-e1")
+
+	// Merged story: commits landed on the epic branch.
+	run("checkout", "-q", "-b", "story/PROJ-merged", "epic/PROJ-e1")
+	write("merged.txt", "done\n")
+	run("add", "-A")
+	run("commit", "-qm", "feat: merged work")
+	run("checkout", "-q", "epic/PROJ-e1")
+	run("merge", "-q", "--no-ff", "story/PROJ-merged", "-m", "merge story/PROJ-merged")
+
+	// Unmerged story: a commit reachable from neither main nor the epic.
+	run("checkout", "-q", "-b", "story/PROJ-unmerged", "epic/PROJ-e1")
+	write("unmerged.txt", "wip\n")
+	run("add", "-A")
+	run("commit", "-qm", "feat: undelivered work")
+	run("checkout", "-q", "main")
+
+	if branchHasUnmergedCommits(root, "story/PROJ-merged") {
+		t.Error("merged story branch must not report unmerged commits")
+	}
+	if !branchHasUnmergedCommits(root, "story/PROJ-unmerged") {
+		t.Error("unmerged story branch must report unmerged commits")
+	}
+	if branchHasUnmergedCommits(root, "story/PROJ-missing") {
+		t.Error("missing branch must not report unmerged commits")
+	}
 }
 
 func TestEvaluateRecover_PreservedBranchNotRedeletedByStaleOrPMLoops(t *testing.T) {
@@ -694,12 +818,140 @@ func TestExecuteRecover_ResetStoryResolvesVaultAndAnchorsToProjectRoot(t *testin
 		t.Fatalf("ExecuteRecover() errors: %v", errs)
 	}
 
-	want := []string{"nd", "--vault", override, "update", "PROJ-a1b", "--status", "open"}
+	want := []string{"nd", "--vault", override, "release", "PROJ-a1b", "--force"}
 	if len(calls) != 1 || !reflect.DeepEqual(calls[0], want) {
 		t.Fatalf("unexpected nd call: got %#v want %#v", calls, want)
 	}
 	if cmds[0].Dir != projectRoot {
 		t.Fatalf("expected nd command Dir %q, got %q", projectRoot, cmds[0].Dir)
+	}
+}
+
+// writeEnvrStub installs an executable .paivot/envr under projectRoot that
+// appends its argv to logFile. exitCode lets tests exercise the best-effort
+// failure path.
+func writeEnvrStub(t *testing.T, projectRoot, logFile string, exitCode int) {
+	t.Helper()
+	dir := filepath.Join(projectRoot, ".paivot")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	script := "#!/bin/sh\necho \"$@\" >> " + logFile + "\nexit " + strconv.Itoa(exitCode) + "\n"
+	if err := os.WriteFile(filepath.Join(dir, "envr"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestExecuteRecover_RunsEnvrDownBeforeWorktreeRemoval(t *testing.T) {
+	projectRoot := t.TempDir()
+	logFile := filepath.Join(t.TempDir(), "envr.log")
+	writeEnvrStub(t, projectRoot, logFile, 0)
+
+	plan := RecoverPlan{
+		Actions: []RecoverAction{
+			{
+				Kind:         ActionRemoveWorktree,
+				StoryID:      "PROJ-a1b",
+				WorktreePath: filepath.Join(projectRoot, ".claude", "worktrees", "dev-PROJ-a1b"),
+				Reason:       "test",
+			},
+		},
+	}
+
+	errs := ExecuteRecover(projectRoot, plan)
+
+	data, err := os.ReadFile(logFile)
+	if err != nil {
+		t.Fatalf("envr stub was not invoked: %v", err)
+	}
+	if got := strings.TrimSpace(string(data)); got != "down PROJ-a1b" {
+		t.Fatalf("expected 'down PROJ-a1b', got %q", got)
+	}
+	for _, e := range errs {
+		if strings.Contains(e, "envr") {
+			t.Fatalf("envr must never contribute a recover error, got: %v", errs)
+		}
+	}
+}
+
+func TestExecuteRecover_EnvrFailureNeverFailsRecover(t *testing.T) {
+	projectRoot := t.TempDir()
+	logFile := filepath.Join(t.TempDir(), "envr.log")
+	writeEnvrStub(t, projectRoot, logFile, 3)
+
+	plan := RecoverPlan{
+		Actions: []RecoverAction{
+			{
+				Kind:         ActionRemoveWorktree,
+				StoryID:      "PROJ-a1b",
+				WorktreePath: filepath.Join(projectRoot, ".claude", "worktrees", "dev-PROJ-a1b"),
+				Reason:       "test",
+			},
+		},
+	}
+
+	errs := ExecuteRecover(projectRoot, plan)
+
+	if _, err := os.ReadFile(logFile); err != nil {
+		t.Fatalf("failing envr stub was not invoked: %v", err)
+	}
+	for _, e := range errs {
+		if strings.Contains(e, "envr") {
+			t.Fatalf("failing envr must be ignored, got recover error: %v", errs)
+		}
+	}
+}
+
+func TestExecuteRecover_SkipsEnvrWithoutStoryID(t *testing.T) {
+	projectRoot := t.TempDir()
+	logFile := filepath.Join(t.TempDir(), "envr.log")
+	writeEnvrStub(t, projectRoot, logFile, 0)
+
+	plan := RecoverPlan{
+		Actions: []RecoverAction{
+			{
+				Kind:         ActionRemoveWorktree,
+				WorktreePath: filepath.Join(projectRoot, ".claude", "worktrees", "foreign-x"),
+				Reason:       "test",
+			},
+		},
+	}
+
+	_ = ExecuteRecover(projectRoot, plan)
+
+	if _, err := os.ReadFile(logFile); err == nil {
+		t.Fatal("envr must not run without a story id")
+	}
+}
+
+func TestExecuteRecover_SkipsNonExecutableEnvr(t *testing.T) {
+	projectRoot := t.TempDir()
+	dir := filepath.Join(projectRoot, ".paivot")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	logFile := filepath.Join(t.TempDir(), "envr.log")
+	// Mode 0644: present but not executable -- must be skipped.
+	script := "#!/bin/sh\necho ran >> " + logFile + "\n"
+	if err := os.WriteFile(filepath.Join(dir, "envr"), []byte(script), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	plan := RecoverPlan{
+		Actions: []RecoverAction{
+			{
+				Kind:         ActionRemoveWorktree,
+				StoryID:      "PROJ-a1b",
+				WorktreePath: filepath.Join(projectRoot, ".claude", "worktrees", "dev-PROJ-a1b"),
+				Reason:       "test",
+			},
+		},
+	}
+
+	_ = ExecuteRecover(projectRoot, plan)
+
+	if _, err := os.ReadFile(logFile); err == nil {
+		t.Fatal("non-executable envr must not run")
 	}
 }
 

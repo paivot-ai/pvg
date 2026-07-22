@@ -94,9 +94,39 @@ func storyMergeCommit(projectRoot, branch, storyID string) string {
 	}
 	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
 		hash, subject, ok := strings.Cut(line, "\t")
-		if ok && strings.Contains(subject, storyID) {
+		if ok && subjectContainsStoryToken(subject, storyID) {
 			return hash
 		}
 	}
 	return ""
+}
+
+// subjectContainsStoryToken reports whether subject contains storyID as a
+// whole token: not preceded or followed by [A-Za-z0-9-]. Substring matching
+// falsely marked PROJ-a1b delivered when a subject referenced PROJ-a1b2 --
+// nd ids share prefixes, so the boundary must exclude id characters.
+func subjectContainsStoryToken(subject, storyID string) bool {
+	if storyID == "" {
+		return false
+	}
+	for start := 0; ; {
+		idx := strings.Index(subject[start:], storyID)
+		if idx < 0 {
+			return false
+		}
+		idx += start
+		end := idx + len(storyID)
+		boundedLeft := idx == 0 || !isStoryIDByte(subject[idx-1])
+		boundedRight := end == len(subject) || !isStoryIDByte(subject[end])
+		if boundedLeft && boundedRight {
+			return true
+		}
+		start = idx + 1
+	}
+}
+
+// isStoryIDByte reports whether b belongs to the story-id token alphabet.
+func isStoryIDByte(b byte) bool {
+	return b == '-' ||
+		(b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9')
 }

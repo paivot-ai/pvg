@@ -47,6 +47,12 @@ func CheckDispatcher(projectRoot string, input HookInput) Result {
 	// projectRoot may be a subagent worktree; settings live at root (the
 	// .vault/ tree is gitignored and absent from worktrees), while agent-vs-
 	// worktree matching still uses projectRoot.
+	//
+	// Enforce ONLY when dispatcher state exists and is enabled: without state
+	// there is no agent tracking, so enforcement would block legitimate
+	// subagent mutations (an Sr PM spawned by /intake could not run
+	// `pvg issues create`). `pvg loop setup` enables dispatcher mode itself,
+	// so loop runs are covered WITH tracking rather than without it.
 	state, root, err := dispatcher.ReadStateRoot(projectRoot)
 	if err != nil || !state.Enabled {
 		return Result{Allowed: true}

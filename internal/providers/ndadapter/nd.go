@@ -50,13 +50,15 @@ type Adapter struct {
 // Name reports the adapter name as registered.
 func (a *Adapter) Name() string { return adapterName }
 
-// Capabilities reports nd's optional features. nd supports defer, archive, and
-// doctor natively; cycles and attachments are not in the nd model.
+// Capabilities reports nd's optional features. nd supports defer, archive,
+// doctor, and create-time priority natively; cycles and attachments are not
+// in the nd model.
 func (a *Adapter) Capabilities() providers.CapabilitySet {
 	return providers.NewCapabilitySet(
 		providers.CapDefer,
 		providers.CapArchive,
 		providers.CapDoctor,
+		providers.CapPriority,
 	)
 }
 
@@ -78,6 +80,10 @@ func (a *Adapter) Create(ctx context.Context, in providers.CreateIssueInput) (pr
 	}
 	if len(in.Labels) > 0 {
 		args = append(args, "--labels", strings.Join(in.Labels, ","))
+	}
+	if in.Priority != "" {
+		// nd create accepts 0-4 and P0-P4; the CLI normalizes to bare 0-4.
+		args = append(args, "--priority", in.Priority)
 	}
 	args = append(args, "--json")
 

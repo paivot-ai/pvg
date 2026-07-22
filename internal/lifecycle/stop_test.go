@@ -129,6 +129,30 @@ func TestBuildContinuationPrompt_EpicScope(t *testing.T) {
 	}
 }
 
+func TestBuildContinuationPrompt_EpicModeHeaderNamesTargetEpic(t *testing.T) {
+	// In epic mode the counts are epic-scoped (QueryWorkCounts); the header
+	// must say so by naming the target epic, never presenting them as
+	// backlog-wide numbers.
+	state := &loop.State{Mode: "epic", TargetEpic: "PROJ-a1b"}
+	decision := &loop.StopDecision{
+		NewIteration: 2,
+		Reason:       "Actionable work remains",
+	}
+	wc := &loop.WorkCounts{Ready: 2}
+
+	prompt := BuildContinuationPrompt(state, decision, "50", wc)
+
+	if !strings.Contains(prompt, "Epic PROJ-a1b -- Ready: 2") {
+		t.Errorf("expected epic-scoped header naming the target epic, got:\n%s", prompt)
+	}
+
+	// All mode keeps the plain header.
+	allPrompt := BuildContinuationPrompt(&loop.State{Mode: "all"}, decision, "50", wc)
+	if strings.Contains(allPrompt, "Epic PROJ-a1b") {
+		t.Errorf("all mode must not carry an epic label, got:\n%s", allPrompt)
+	}
+}
+
 func TestBuildContinuationPrompt_Header(t *testing.T) {
 	state := &loop.State{Mode: "all"}
 	decision := &loop.StopDecision{

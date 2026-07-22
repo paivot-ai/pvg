@@ -833,6 +833,110 @@ MANDATORY SKILLS TO REVIEW: nd
 ` + extraBody
 }
 
+// writeOracleFixture makes projectRoot machinery-managed (via the
+// conventional design/domain.modelith.yaml marker) and writes a generated
+// oracle under design/machines/ carrying the given stable ids.
+func writeOracleFixture(t *testing.T, projectRoot string, stableIDs ...string) {
+	t.Helper()
+	designDir := filepath.Join(projectRoot, "design", "machines")
+	if err := os.MkdirAll(designDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(projectRoot, "design", "domain.modelith.yaml"), []byte("entities: {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	oracle := "# Transitions\n\n| stable id | from | event | to |\n| --- | --- | --- | --- |\n"
+	for _, id := range stableIDs {
+		oracle += "| " + id + " | draft | submit | pending |\n"
+	}
+	if err := os.WriteFile(filepath.Join(designDir, "order.oracle.md"), []byte(oracle), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCheckHardTDDOracle(t *testing.T) {
+	b := buildBacklog(t, map[string]string{
+		// Cites an oracle id, missing hard-tdd -> ERROR.
+		"PROJ-s1.md": "---\nid: PROJ-s1\nstatus: open\ntype: task\nlabels: []\n---\nDerives from ORD-T01.\n",
+		// Cites an oracle id WITH hard-tdd -> clean.
+		"PROJ-s2.md": "---\nid: PROJ-s2\nstatus: open\ntype: task\nlabels: [hard-tdd]\n---\nDerives from ORD-T02.\n",
+		// No oracle citation -> clean.
+		"PROJ-s3.md": "---\nid: PROJ-s3\nstatus: open\ntype: task\nlabels: []\n---\nPlain story body.\n",
+		// Closed story cites an id -> skipped.
+		"PROJ-s4.md": "---\nid: PROJ-s4\nstatus: closed\ntype: task\nlabels: []\n---\nDerives from ORD-T01.\n",
+		// Epic cites an id -> skipped (containers are not dispatched).
+		"PROJ-e1.md": "---\nid: PROJ-e1\nstatus: open\ntype: epic\nlabels: []\n---\nCovers ORD-T01 and ORD-T02.\n",
+		// Substring of an id must NOT count (token boundary).
+		"PROJ-s5.md": "---\nid: PROJ-s5\nstatus: open\ntype: task\nlabels: []\n---\nMentions ORD-T01X only.\n",
+		// Cites BOTH ids, missing hard-tdd -> ERROR naming both.
+		"PROJ-s6.md": "---\nid: PROJ-s6\nstatus: open\ntype: task\nlabels: []\n---\nCovers ORD-T01 and ORD-T02.\n",
+	})
+	projectRoot := t.TempDir()
+	writeOracleFixture(t, projectRoot, "ORD-T01", "ORD-T02")
+
+	findings := checkHardTDDOracle(b, scope{}, projectRoot, map[string]string{})
+
+	if len(findings) != 2 {
+		t.Fatalf("expected 2 findings, got %+v", findings)
+	}
+	if findings[0].IssueID != "PROJ-s1" || findings[0].Severity != SeverityError {
+		t.Errorf("finding 0 = %+v", findings[0])
+	}
+	if !strings.Contains(findings[0].Message, "ORD-T01") || !strings.Contains(findings[0].Message, "hard-tdd") {
+		t.Errorf("finding must name the cited ids and the missing label: %+v", findings[0])
+	}
+	if findings[1].IssueID != "PROJ-s6" {
+		t.Errorf("finding 1 = %+v", findings[1])
+	}
+	if !strings.Contains(findings[1].Message, "ORD-T01, ORD-T02") {
+		t.Errorf("finding must list all cited ids: %+v", findings[1])
+	}
+}
+
+func TestCheckHardTDDOracle_InactiveWithoutSubstrate(t *testing.T) {
+	b := buildBacklog(t, map[string]string{
+		"PROJ-s1.md": "---\nid: PROJ-s1\nstatus: open\ntype: task\nlabels: []\n---\nDerives from ORD-T01.\n",
+	})
+	// projectRoot is NOT machinery-managed: check must not run.
+	if findings := checkHardTDDOracle(b, scope{}, t.TempDir(), map[string]string{}); len(findings) != 0 {
+		t.Fatalf("expected no findings without the design substrate, got %+v", findings)
+	}
+
+	// Explicit off wins even on a machinery-managed project.
+	projectRoot := t.TempDir()
+	writeOracleFixture(t, projectRoot, "ORD-T01")
+	if findings := checkHardTDDOracle(b, scope{}, projectRoot, map[string]string{"design.machinery": "off"}); len(findings) != 0 {
+		t.Fatalf("expected no findings with design.machinery=off, got %+v", findings)
+	}
+}
+
+func TestCheckBacklog_RegistersHardTDDOracle(t *testing.T) {
+	vault := t.TempDir()
+	projectRoot := t.TempDir()
+	writeOracleFixture(t, projectRoot, "ORD-T01")
+
+	writeIssue(t, vault, "PROJ-s1.md", `---
+id: PROJ-s1
+title: "Oracle story"
+status: open
+type: task
+labels: []
+---
+MANDATORY SKILLS TO REVIEW: nd
+
+The endpoint returns data derived from ORD-T01.
+`)
+
+	result, err := CheckBacklog(BacklogOptions{VaultDir: vault, ProjectRoot: projectRoot})
+	if err != nil {
+		t.Fatalf("CheckBacklog: %v", err)
+	}
+	found := findingsFor(result.Findings, "hard-tdd-oracle")
+	if len(found) != 1 || found[0].IssueID != "PROJ-s1" || found[0].Severity != SeverityError {
+		t.Fatalf("expected 1 hard-tdd-oracle error for PROJ-s1, got %+v", found)
+	}
+}
+
 func TestCheckBacklog_EndToEnd(t *testing.T) {
 	vault := t.TempDir()
 	projectRoot := t.TempDir()

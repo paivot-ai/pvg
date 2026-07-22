@@ -37,13 +37,14 @@ func TestCheckDispatcher_AllowsWhenNoStateFile(t *testing.T) {
 	}
 }
 
-func TestCheckDispatcher_AllowsWhenDisabled(t *testing.T) {
+func TestCheckDispatcher_SilentOnPaivotManagedProjectAfterOff(t *testing.T) {
 	dir := t.TempDir()
 	knowledgeDir := filepath.Join(dir, ".vault", "knowledge")
 	if err := os.MkdirAll(knowledgeDir, 0755); err != nil {
 		t.Fatal(err)
 	}
-	// Create disabled state
+	// On writes the default .settings.yaml (the Paivot-managed marker);
+	// Off removes only the dispatcher state file.
 	if err := dispatcher.On(dir); err != nil {
 		t.Fatal(err)
 	}
@@ -55,10 +56,14 @@ func TestCheckDispatcher_AllowsWhenDisabled(t *testing.T) {
 		ToolName:  "Write",
 		ToolInput: ToolInput{FilePath: filepath.Join(dir, "BUSINESS.md")},
 	}
-	// State file removed by Off, so ReadState returns error -> fail-open
+	// Without dispatcher state there is no agent tracking, so enforcement
+	// would block legitimate subagent work (e.g. an Sr PM spawned by /intake
+	// running `pvg issues create`). The settings file alone must therefore
+	// leave CheckDispatcher silent -- the marker only arms the
+	// acceptance-contract checks (merge gate, label contract).
 	result := CheckDispatcher(dir, input)
 	if !result.Allowed {
-		t.Errorf("expected allowed when disabled, got blocked: %s", result.Reason)
+		t.Errorf("expected D&F write allowed after dispatcher off, got blocked: %s", result.Reason)
 	}
 }
 

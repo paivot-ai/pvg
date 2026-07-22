@@ -763,3 +763,106 @@ func TestCheckBash_AllowsReadFromIssues(t *testing.T) {
 		t.Errorf("expected read from .vault/issues/ allowed, got blocked: %s", result.Reason)
 	}
 }
+
+// Regression: the old check blocked any command where a protected path
+// appeared anywhere after the FIRST '>' -- so `2>/dev/null` before a
+// protected-path READ was a false positive. Only the redirect TARGET counts.
+func TestCheckBash_AllowsIssuesReadWithStderrRedirect(t *testing.T) {
+	input := HookInput{
+		ToolName:  "Bash",
+		ToolInput: ToolInput{Command: `ls .vault/issues/ 2>/dev/null | head`},
+	}
+	result := Check(testVaultDir, testProjectRoot, input)
+	if !result.Allowed {
+		t.Errorf("expected `ls .vault/issues/ 2>/dev/null | head` allowed, got blocked: %s", result.Reason)
+	}
+}
+
+func TestCheckBash_AllowsSharedIssuesFindWithStderrRedirect(t *testing.T) {
+	input := HookInput{
+		ToolName:  "Bash",
+		ToolInput: ToolInput{Command: `find ` + testProjectRoot + `/.git/paivot/nd-vault/issues/ -name '*.md' 2>/dev/null | wc -l`},
+	}
+	result := Check(testVaultDir, testProjectRoot, input)
+	if !result.Allowed {
+		t.Errorf("expected shared-issues read with stderr redirect allowed, got blocked: %s", result.Reason)
+	}
+}
+
+func TestCheckBash_AllowsVaultKnowledgeReadWithStderrRedirect(t *testing.T) {
+	input := HookInput{
+		ToolName:  "Bash",
+		ToolInput: ToolInput{Command: `grep -r "pattern" .vault/knowledge/ 2>/dev/null | head`},
+	}
+	result := Check(testVaultDir, testProjectRoot, input)
+	if !result.Allowed {
+		t.Errorf("expected vault-knowledge read with stderr redirect allowed, got blocked: %s", result.Reason)
+	}
+}
+
+func TestCheckBash_StillBlocksRedirectTargetAfterUnrelatedRedirect(t *testing.T) {
+	// A benign stderr redirect must not mask a later write INTO the
+	// protected path.
+	input := HookInput{
+		ToolName:  "Bash",
+		ToolInput: ToolInput{Command: `some-tool 2>/dev/null > .vault/issues/PROJ-001.md`},
+	}
+	result := Check(testVaultDir, testProjectRoot, input)
+	if result.Allowed {
+		t.Error("expected blocked when a later redirect targets .vault/issues/")
+	}
+}
+
+func TestCheckBash_BlocksFdRedirectIntoIssues(t *testing.T) {
+	input := HookInput{
+		ToolName:  "Bash",
+		ToolInput: ToolInput{Command: `some-tool 2> .vault/issues/errors.log`},
+	}
+	result := Check(testVaultDir, testProjectRoot, input)
+	if result.Allowed {
+		t.Error("expected blocked for fd-form redirect targeting .vault/issues/")
+	}
+}
+
+func TestCheckBash_BlocksQuotedRedirectTargetIntoKnowledge(t *testing.T) {
+	input := HookInput{
+		ToolName:  "Bash",
+		ToolInput: ToolInput{Command: `echo x > ".vault/knowledge/notes.md"`},
+	}
+	result := Check(testVaultDir, testProjectRoot, input)
+	if result.Allowed {
+		t.Error("expected blocked for quoted redirect target inside .vault/knowledge/")
+	}
+}
+
+func TestRedirectTargets(t *testing.T) {
+	cases := []struct {
+		command string
+		want    []string
+	}{
+		{`ls .vault/issues/ 2>/dev/null | head`, []string{"/dev/null"}},
+		{`echo x > out.txt`, []string{"out.txt"}},
+		{`echo x >> out.txt`, []string{"out.txt"}},
+		{`echo x >| out.txt`, []string{"out.txt"}},
+		{`cmd 2>&1`, nil},
+		{`cmd >&2`, nil},
+		{`cmd >& both.log`, []string{"both.log"}},
+		{`cmd 2>/dev/null > .vault/issues/x.md`, []string{"/dev/null", ".vault/issues/x.md"}},
+		{`echo x > "quoted file.md"`, []string{"quoted file.md"}},
+		{`echo x > 'single quoted.md'`, []string{"single quoted.md"}},
+		{`cat file | grep foo`, nil},
+		{`cmd > a.txt; other >> b.txt`, []string{"a.txt", "b.txt"}},
+	}
+	for _, tc := range cases {
+		got := redirectTargets(tc.command)
+		if len(got) != len(tc.want) {
+			t.Errorf("redirectTargets(%q) = %v, want %v", tc.command, got, tc.want)
+			continue
+		}
+		for i := range got {
+			if got[i] != tc.want[i] {
+				t.Errorf("redirectTargets(%q)[%d] = %q, want %q", tc.command, i, got[i], tc.want[i])
+			}
+		}
+	}
+}

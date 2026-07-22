@@ -1,5 +1,25 @@
 package loop
 
+import (
+	"fmt"
+	"sort"
+	"strings"
+)
+
+// ComputeWorkSignature fingerprints the observable work state for the
+// signature-based consecutive-wait rule: the stop-count tuple plus the sorted
+// set of in_progress story ids. Two consecutive blocked stops with different
+// signatures prove forward progress (a story changed bucket or hands), so the
+// wait counter resets; identical signatures accumulate toward the escape
+// valve. Deterministic: the id set is sorted before joining.
+func ComputeWorkSignature(wc WorkCounts, inProgressIDs []string) string {
+	ids := append([]string(nil), inProgressIDs...)
+	sort.Strings(ids)
+	return fmt.Sprintf("r%d.d%d.j%d.i%d.b%d.o%d|%s",
+		wc.Ready, wc.Delivered, wc.Rejected, wc.InProgress, wc.Blocked, wc.Other,
+		strings.Join(ids, ","))
+}
+
 // StopConfig holds all inputs needed for the stop decision.
 // This is a value struct -- no I/O, no side effects.
 type StopConfig struct {
@@ -18,6 +38,13 @@ type StopConfig struct {
 	Blocked          int
 	Other            int
 	EpicPendingMerge bool // true when the target epic branch exists but hasn't been merged to main
+	// WorkSignature is the current work-state fingerprint (counts tuple plus
+	// sorted in_progress story ids; see ComputeWorkSignature). PrevSignature
+	// is the fingerprint recorded at the previous blocked stop
+	// (State.LastStopSignature). Together they drive the signature-based
+	// consecutive-wait rule in EvaluateStop.
+	WorkSignature string
+	PrevSignature string
 }
 
 // StopDecision is the output of EvaluateStop.
@@ -98,10 +125,25 @@ func EvaluateStop(cfg StopConfig) StopDecision {
 	}
 
 	// Work exists but the dispatcher may be at capacity (agents running,
-	// concurrency limits reached). Track consecutive waits uniformly --
-	// after MaxConsecWaits iterations of no progress, allow exit.
-	// Background agent notifications will resume the loop.
+	// concurrency limits reached). Track consecutive waits by WORK-STATE
+	// SIGNATURE: when the signature (counts tuple + sorted in_progress story
+	// ids) differs from the previous stop's, the loop IS progressing
+	// synchronously (merges, PM reviews, the epic gate), so the counter
+	// resets to 1 instead of accumulating toward the escape valve -- a
+	// synchronously progressing loop must never be halted by the valve,
+	// because no background agent exists to resume it.
+	//
+	// Deliberate history (v1.34.0): both wait-like and actionable stops
+	// increment so the valve stays reachable when nothing changes; identical
+	// signatures therefore still increment, and after MaxConsecWaits
+	// identical stops the valve allows exit while PRESERVING state (see
+	// below) so background agent completions can resume the loop. An empty
+	// signature (caller could not compute one) is treated as identical --
+	// failing toward the valve keeps it reachable.
 	newConsec := cfg.ConsecWaits + 1
+	if cfg.WorkSignature != "" && cfg.WorkSignature != cfg.PrevSignature {
+		newConsec = 1
+	}
 	newWaitIters := cfg.WaitIterations + 1
 
 	if newConsec >= cfg.MaxConsecWaits {

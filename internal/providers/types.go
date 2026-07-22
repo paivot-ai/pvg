@@ -50,6 +50,9 @@ const (
 	CapAttachments Capability = "attachments"
 	CapCycles      Capability = "cycles"
 	CapDoctor      Capability = "doctor"
+	// CapPriority: the adapter honors CreateIssueInput.Priority. Adapters
+	// without it silently ignore the field; the CLI warns on stderr.
+	CapPriority Capability = "priority"
 )
 
 // CapabilitySet is an unordered set of supported optional capabilities.
@@ -117,7 +120,11 @@ type CreateIssueInput struct {
 	Assignee  string
 	Project   string // project name or ID; adapters that have no project concept ignore it
 	Milestone string // milestone or sprint name; adapters that have no milestone concept ignore it
-	Extras    map[string]interface{}
+	// Priority is the normalized priority as a bare numeral "0".."4"
+	// (0 = highest). Empty means "adapter default". Only adapters declaring
+	// CapPriority honor it; others ignore it.
+	Priority string
+	Extras   map[string]interface{}
 }
 
 // UpdateIssueInput is the typed payload for BacklogAdapter.Update. Pointer

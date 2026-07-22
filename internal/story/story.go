@@ -7,10 +7,12 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/paivot-ai/pvg/internal/guard"
+	"github.com/paivot-ai/pvg/internal/loop"
 	"github.com/paivot-ai/pvg/internal/ndvault"
 )
 
@@ -62,7 +64,13 @@ func Transition(projectRoot, action, storyID string, opts TransitionOptions) (st
 		// Claiming at dispatch closes the duplicate-dispatch window: the
 		// story leaves the ready queue the moment the dispatcher decides to
 		// spawn a developer, not when the developer eventually mutates nd.
-		if err := runND(projectRoot, "update", storyID, "--status=in_progress"); err != nil {
+		// nd claim is atomic under the vault lock (assignee + in_progress in
+		// one step) and fails non-zero when another agent already holds the
+		// claim or the story has open blockers -- the dispatcher treats that
+		// failure as "skip this story". The agent name is deterministic
+		// (dev-<story-id>) so a re-claim after approve-red or a session
+		// restart is an idempotent no-op instead of a steal.
+		if err := runND(projectRoot, "claim", storyID, "--agent", "dev-"+storyID); err != nil {
 			return "", err
 		}
 	case "approve-red":
@@ -144,7 +152,9 @@ func Transition(projectRoot, action, storyID string, opts TransitionOptions) (st
 			return "", err
 		}
 		if opts.NextStory != "" {
-			if err := runND(projectRoot, "update", opts.NextStory, "--status=in_progress"); err != nil {
+			// Same atomic claim as the "claim" action: if another agent got
+			// there first, surface the warning instead of double-dispatching.
+			if err := runND(projectRoot, "claim", opts.NextStory, "--agent", "dev-"+opts.NextStory); err != nil {
 				if runDoctorErr := runND(projectRoot, "doctor", "--fix"); runDoctorErr != nil {
 					return "", fmt.Errorf("accepted %s but could not start next story %s: %v (doctor also failed: %v)", storyID, opts.NextStory, err, runDoctorErr)
 				}
@@ -152,13 +162,36 @@ func Transition(projectRoot, action, storyID string, opts TransitionOptions) (st
 			}
 		}
 	case "reject":
-		if err := runND(projectRoot, "update", storyID, "--status=open"); err != nil {
+		// Deterministic rejection counter, read BEFORE any label mutation:
+		// the count of prior rejections comes from the counter labels plus
+		// the append-only rejected contract blocks (see rejectionCount).
+		priorRejections := rejectionCount(projectRoot, storyID)
+		// Release instead of a bare status update: rejection must clear the
+		// developer's claim (assignee) as well as return the story to open,
+		// or the next claim would look like a steal. --force releases the
+		// claim regardless of which agent identity runs the PM side. nd
+		// release routes the open transition through the same FSM validation
+		// as `nd update --status open`, so no separate fallback is needed.
+		if err := runND(projectRoot, "release", storyID, "--force"); err != nil {
 			return "", err
 		}
 		_ = runND(projectRoot, "labels", "rm", storyID, "delivered")
 		_ = runND(projectRoot, "labels", "rm", storyID, "accepted")
 		if err := runND(projectRoot, "labels", "add", storyID, "rejected"); err != nil {
 			return "", err
+		}
+		// First rejection keeps plain "rejected"; subsequent rejections also
+		// set the counter label rejected-x2, then rejected-x3 (replacing the
+		// previous counter label). The counter caps at loop.RejectionCap: at
+		// the cap `pvg loop next` escalates to the user instead of
+		// dispatching more rework, so higher labels never occur.
+		if count := min(priorRejections+1, loop.RejectionCap); count >= 2 {
+			if count > 2 {
+				_ = runND(projectRoot, "labels", "rm", storyID, fmt.Sprintf("rejected-x%d", count-1))
+			}
+			if err := runND(projectRoot, "labels", "add", storyID, fmt.Sprintf("rejected-x%d", count)); err != nil {
+				return "", err
+			}
 		}
 		if strings.TrimSpace(opts.Feedback) != "" {
 			if err := runND(projectRoot, "comments", "add", storyID, opts.Feedback); err != nil {
@@ -171,6 +204,16 @@ func Transition(projectRoot, action, storyID string, opts TransitionOptions) (st
 		); err != nil {
 			return "", err
 		}
+	case "release":
+		// A developer that hits a hard blocker gives the story back: clear
+		// the claim (assignee) and return the story to open so the dispatcher
+		// can re-queue it. Also used by recovery. Label cleanup is best
+		// effort -- a story released mid-flight may carry neither label.
+		if err := runND(projectRoot, "release", storyID, "--force"); err != nil {
+			return "", err
+		}
+		_ = runND(projectRoot, "labels", "rm", storyID, "delivered")
+		_ = runND(projectRoot, "labels", "rm", storyID, "rejected")
 	default:
 		return "", fmt.Errorf("unknown action %q", action)
 	}
@@ -464,6 +507,42 @@ func onlyNDManagedSectionsFollow(trailing string) bool {
 		}
 	}
 	return true
+}
+
+// rejectedContractMarker is the fingerprint appendContract leaves on every
+// rejection; the issue body accumulates one per reject, forming an
+// append-only record.
+const rejectedContractMarker = "## nd_contract\nstatus: rejected"
+
+// rejectionCount returns the number of PM rejections already recorded on a
+// story. Counter labels (rejected-x2, rejected-x3) are the primary record;
+// because `pvg story deliver` strips the plain rejected label, the FIRST
+// rejection's only durable trace after a redelivery is its appended
+// nd_contract block, so the append-only contract history backs the count
+// whenever it exceeds what the labels say. Deterministic: both sources are
+// written exclusively by this package's reject path.
+func rejectionCount(projectRoot, storyID string) int {
+	count := 0
+	if doc, err := readIssue(projectRoot, storyID); err == nil {
+		for _, label := range doc.Labels {
+			lower := strings.ToLower(label)
+			if lower == "rejected" && count < 1 {
+				count = 1
+				continue
+			}
+			if rest, ok := strings.CutPrefix(lower, "rejected-x"); ok {
+				if n, aerr := strconv.Atoi(rest); aerr == nil && n > count {
+					count = n
+				}
+			}
+		}
+	}
+	if content, err := issueContent(projectRoot, storyID); err == nil {
+		if n := strings.Count(content, rejectedContractMarker); n > count {
+			count = n
+		}
+	}
+	return count
 }
 
 func hasLabel(labels []string, target string) bool {

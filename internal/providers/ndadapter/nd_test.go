@@ -33,7 +33,7 @@ func TestNew_DefaultsVaultDir(t *testing.T) {
 func TestCapabilities_DeclaresExpectedFlags(t *testing.T) {
 	a, _ := New(map[string]interface{}{})
 	caps := a.Capabilities()
-	for _, want := range []providers.Capability{providers.CapDefer, providers.CapArchive, providers.CapDoctor} {
+	for _, want := range []providers.Capability{providers.CapDefer, providers.CapArchive, providers.CapDoctor, providers.CapPriority} {
 		if !caps.Has(want) {
 			t.Errorf("missing capability %s", want)
 		}
@@ -272,6 +272,48 @@ func TestAppendListFilter_OmitsTypeAndSortWhenEmpty(t *testing.T) {
 	got := strings.Join(args, " ")
 	if strings.Contains(got, "--type") || strings.Contains(got, "--sort") {
 		t.Errorf("empty Type/Sort must not emit flags: %s", got)
+	}
+}
+
+func TestCreate_PassesPriorityFlag(t *testing.T) {
+	var calls [][]string
+	old := execCommandContext
+	execCommandContext = func(_ context.Context, name string, args ...string) *exec.Cmd {
+		calls = append(calls, append([]string{name}, args...))
+		// First call is create; respond with a thin record so Create re-fetches
+		// via Show, which the stub also answers.
+		return exec.Command("echo", `{"ID":"VP-1","Title":"Prio","Status":"open"}`)
+	}
+	defer func() { execCommandContext = old }()
+
+	a, _ := New(map[string]interface{}{"vault": "/tmp/v"})
+	if _, err := a.Create(context.Background(), providers.CreateIssueInput{Title: "Prio", Priority: "1"}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	want := []string{"nd", "--vault", "/tmp/v", "create", "--title", "Prio", "--priority", "1", "--json"}
+	if len(calls) < 1 || strings.Join(calls[0], "\x00") != strings.Join(want, "\x00") {
+		t.Fatalf("unexpected nd create call: got %#v want %#v", calls, want)
+	}
+}
+
+func TestCreate_OmitsPriorityFlagWhenEmpty(t *testing.T) {
+	var calls [][]string
+	old := execCommandContext
+	execCommandContext = func(_ context.Context, name string, args ...string) *exec.Cmd {
+		calls = append(calls, append([]string{name}, args...))
+		return exec.Command("echo", `{"ID":"VP-1","Title":"NoPrio","Status":"open"}`)
+	}
+	defer func() { execCommandContext = old }()
+
+	a, _ := New(map[string]interface{}{"vault": "/tmp/v"})
+	if _, err := a.Create(context.Background(), providers.CreateIssueInput{Title: "NoPrio"}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	want := []string{"nd", "--vault", "/tmp/v", "create", "--title", "NoPrio", "--json"}
+	if len(calls) < 1 || strings.Join(calls[0], "\x00") != strings.Join(want, "\x00") {
+		t.Fatalf("unexpected nd create call: got %#v want %#v", calls, want)
 	}
 }
 

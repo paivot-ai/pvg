@@ -102,10 +102,16 @@ func checkLoop(cwd string) error {
 		return nil
 	}
 
-	// Check if the target epic branch still exists locally (unmerged).
-	// If all nd items are closed but the branch is still around, the
-	// completion gate (e2e + Anchor + merge to main + retro) hasn't run.
+	// Check if the target epic branch still exists (locally or on origin,
+	// unmerged). If all nd items are closed but the branch is still around,
+	// the completion gate (e2e + Anchor + merge to main + retro) hasn't run.
 	epicPending := loop.EpicBranchExists(root, state.TargetEpic)
+
+	// Work-state signature: lets EvaluateStop distinguish a synchronously
+	// progressing loop (signature changes between stops -> counter resets)
+	// from a genuinely stuck one (identical signature -> counter accumulates
+	// toward the escape valve).
+	signature := loop.ComputeWorkSignature(wc, loop.QueryInProgressIDs(root, state.Mode, state.TargetEpic))
 
 	cfg := loop.StopConfig{
 		Active:           state.Active,
@@ -123,6 +129,8 @@ func checkLoop(cwd string) error {
 		Blocked:          wc.Blocked,
 		Other:            wc.Other,
 		EpicPendingMerge: epicPending,
+		WorkSignature:    signature,
+		PrevSignature:    state.LastStopSignature,
 	}
 
 	decision := loop.EvaluateStop(cfg)
@@ -137,6 +145,7 @@ func checkLoop(cwd string) error {
 			state.Iteration = decision.NewIteration
 			state.ConsecutiveWaits = decision.NewConsecWaits
 			state.WaitIterations = decision.NewWaitIters
+			state.LastStopSignature = signature
 			_ = loop.WriteState(root, state)
 		}
 		return nil
@@ -146,6 +155,7 @@ func checkLoop(cwd string) error {
 	state.Iteration = decision.NewIteration
 	state.ConsecutiveWaits = decision.NewConsecWaits
 	state.WaitIterations = decision.NewWaitIters
+	state.LastStopSignature = signature
 	if err := loop.WriteState(root, state); err != nil {
 		fmt.Fprintf(os.Stderr, "[LOOP] Could not update state: %v -- allowing exit\n", err)
 		return nil
@@ -189,11 +199,17 @@ func isLoopPersistEnabled(cwd string) bool {
 
 // BuildContinuationPrompt creates the prompt for the next loop iteration.
 // Context-aware: minimal prompt when waiting for agents, fuller prompt when
-// there is actionable work the dispatcher can act on.
+// there is actionable work the dispatcher can act on. In epic mode the counts
+// are epic-scoped (QueryWorkCounts) and the header names the target epic so
+// the dispatcher never mistakes them for backlog-wide numbers.
 func BuildContinuationPrompt(state *loop.State, decision *loop.StopDecision, maxIterStr string, wc *loop.WorkCounts) string {
+	scopeLabel := ""
+	if state.Mode == "epic" && state.TargetEpic != "" {
+		scopeLabel = fmt.Sprintf("Epic %s -- ", state.TargetEpic)
+	}
 	header := fmt.Sprintf(
-		"[LOOP] Iteration %d/%s | Ready: %d, Delivered: %d, In-progress: %d, Blocked: %d, Other: %d | %s\n",
-		decision.NewIteration, maxIterStr,
+		"[LOOP] Iteration %d/%s | %sReady: %d, Delivered: %d, In-progress: %d, Blocked: %d, Other: %d | %s\n",
+		decision.NewIteration, maxIterStr, scopeLabel,
 		wc.Ready, wc.Delivered, wc.InProgress, wc.Blocked, wc.Other,
 		decision.Reason,
 	)

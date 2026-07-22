@@ -60,22 +60,34 @@ func CheckCWDDrift(projectRoot string) Result {
 		mainRoot = projectRoot
 	}
 
-	// Check if dispatcher mode is active.
+	// Dispatcher mode: only worktrees Paivot itself registered in
+	// AgentWorktrees are policed. If CWD is inside a worktree Paivot did NOT
+	// spawn, it was created by the Claude Code harness for an isolated
+	// subagent -- the hook is firing in that subagent's own session, not the
+	// dispatcher's. Allow.
 	state, _, stateErr := dispatcher.ReadStateRoot(mainRoot)
-	if stateErr != nil || !state.Enabled {
-		return Result{Allowed: true}
+	if stateErr == nil && state.Enabled {
+		if !isTrackedWorktreeCWD(state, cwd) {
+			return Result{Allowed: true}
+		}
+		return cwdDriftBlocked(cwd, mainRoot)
 	}
 
-	// Harness-managed worktree exemption: if CWD is inside a worktree that
-	// Paivot did NOT spawn (i.e., not registered in AgentWorktrees), it was
-	// created by the Claude Code harness for an isolated subagent. The hook
-	// is firing in that subagent's own session, not the dispatcher's. Allow.
-	if !isTrackedWorktreeCWD(state, cwd) {
+	// No dispatcher state: fall back to the loop-state leg of
+	// executionActive (defense in depth for loop states written by older
+	// setups that did not enable dispatcher mode). There is no
+	// AgentWorktrees registry to consult here, but harness worktrees
+	// (agent-*) were already exempted above, so any other CWD inside
+	// .claude/worktrees/ while a session is live is dispatcher drift. The
+	// settings file alone never triggers this guard.
+	if !executionActive(mainRoot) {
 		return Result{Allowed: true}
 	}
+	return cwdDriftBlocked(cwd, mainRoot)
+}
 
-	// CWD is inside a worktree Paivot tracks and dispatcher mode is on.
-	// This means CWD drifted from a completed Paivot-spawned subagent.
+// cwdDriftBlocked builds the block result for a drifted CWD.
+func cwdDriftBlocked(cwd, mainRoot string) Result {
 	return Result{
 		Allowed: false,
 		Reason: fmt.Sprintf(

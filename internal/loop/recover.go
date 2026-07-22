@@ -2,6 +2,7 @@ package loop
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -131,7 +132,13 @@ type RecoverConfig struct {
 	InProgressIssues    []ndIssue
 	StaleBranches       []string // local branches merged into main matching epic/*, story/*, worktree-*
 	PMIsolationBranches []string // local worktree-agent-* branches (never merged to main)
-	Warnings            []string
+	// UnmergedBranches marks story branches whose tip is reachable from
+	// NEITHER main NOR any epic branch: committed-but-undelivered work whose
+	// only record is the branch itself. Resolved by BuildRecoverConfig (I/O)
+	// so the pure EvaluateRecover can preserve them instead of emitting
+	// ActionDeleteBranch (worktree removal still proceeds).
+	UnmergedBranches map[string]bool
+	Warnings         []string
 	// WorktreeBase is the absolute path of the directory Paivot owns and is the
 	// ONLY place it may remove worktrees or delete their branches (default
 	// <projectRoot>/.claude/worktrees). Empty means "fall back to detecting the
@@ -213,6 +220,17 @@ func EvaluateRecover(cfg RecoverConfig) RecoverPlan {
 					Reason:     "story is delivered/accepted but not merged -- branch preserved as the record of the work",
 				})
 				plan.Summary.BranchesPreserved++
+			} else if cfg.UnmergedBranches[entry.BranchName] {
+				// Committed-but-undelivered work: the branch tip is reachable
+				// from neither main nor any epic branch, so deleting it would
+				// destroy the only record of the commits.
+				plan.Actions = append(plan.Actions, RecoverAction{
+					Kind:       ActionPreserveBranch,
+					StoryID:    entry.StoryID,
+					BranchName: entry.BranchName,
+					Reason:     "preserved: unmerged commits -- branch tip is reachable from neither main nor any epic branch",
+				})
+				plan.Summary.BranchesPreserved++
 			} else if isPaivotBranch(entry.BranchName) {
 				plan.Actions = append(plan.Actions, RecoverAction{
 					Kind:       ActionDeleteBranch,
@@ -262,8 +280,12 @@ func EvaluateRecover(cfg RecoverConfig) RecoverPlan {
 			continue
 		}
 
+		// Carry the story id (when derivable from the branch) so execution-time
+		// hooks like the .paivot/envr teardown know which environment to stop.
+		orphanStoryID, _ := storyIDFromStoryBranch(wt.Branch)
 		plan.Actions = append(plan.Actions, RecoverAction{
 			Kind:         ActionRemoveWorktree,
+			StoryID:      orphanStoryID,
 			WorktreePath: wt.Path,
 			Reason:       "orphan worktree not in snapshot",
 		})
@@ -277,6 +299,18 @@ func EvaluateRecover(cfg RecoverConfig) RecoverPlan {
 					StoryID:    storyID,
 					BranchName: wt.Branch,
 					Reason:     "story is delivered/accepted but not merged -- branch preserved as the record of the work",
+				})
+				plan.Summary.BranchesPreserved++
+			} else if cfg.UnmergedBranches[wt.Branch] {
+				// Committed-but-undelivered work on an owned orphan worktree's
+				// story branch: the worktree checkout is disposable (removed
+				// above), the branch is the record and must survive.
+				storyID, _ := storyIDFromStoryBranch(wt.Branch)
+				plan.Actions = append(plan.Actions, RecoverAction{
+					Kind:       ActionPreserveBranch,
+					StoryID:    storyID,
+					BranchName: wt.Branch,
+					Reason:     "preserved: unmerged commits -- branch tip is reachable from neither main nor any epic branch",
 				})
 				plan.Summary.BranchesPreserved++
 			} else if isPaivotBranch(wt.Branch) {
@@ -489,7 +523,91 @@ func BuildRecoverConfig(projectRoot string) (RecoverConfig, error) {
 		cfg.PMIsolationBranches = pmBranches
 	}
 
+	// Resolve unmerged-ness (I/O) for every story branch a delete could
+	// target (snapshot entries and current worktrees), so the pure
+	// EvaluateRecover can preserve committed-but-undelivered work.
+	cfg.UnmergedBranches = make(map[string]bool)
+	recordUnmerged := func(branch string) {
+		if !strings.HasPrefix(branch, "story/") {
+			return
+		}
+		if _, done := cfg.UnmergedBranches[branch]; done {
+			return
+		}
+		cfg.UnmergedBranches[branch] = branchHasUnmergedCommits(projectRoot, branch)
+	}
+	for _, entry := range cfg.SnapshotStories {
+		recordUnmerged(entry.BranchName)
+	}
+	for _, wt := range cfg.CurrentWorktrees {
+		recordUnmerged(wt.Branch)
+	}
+
 	return cfg, nil
+}
+
+// integrationBases returns the refs that count as "this work landed": main
+// plus every epic branch, local and remote-tracking. A story branch reachable
+// from any of them carries no unique commits and is safe to delete.
+func integrationBases(projectRoot string) []string {
+	bases := []string{}
+	for _, ref := range []string{"refs/heads/main", "refs/remotes/origin/main"} {
+		cmd := execCommand("git", "-C", projectRoot, "rev-parse", "--verify", "--quiet", ref)
+		if cmd.Run() == nil {
+			bases = append(bases, ref)
+		}
+	}
+	cmd := execCommand("git", "-C", projectRoot, "for-each-ref", "--format", "%(refname)",
+		"refs/heads/epic/", "refs/remotes/origin/epic/")
+	out, err := cmd.Output()
+	if err != nil {
+		return bases
+	}
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if ref := strings.TrimSpace(line); ref != "" {
+			bases = append(bases, ref)
+		}
+	}
+	return bases
+}
+
+// branchHasUnmergedCommits reports whether the local branch exists and its
+// tip is reachable from NEITHER main NOR any epic branch (local or
+// remote-tracking). A missing branch reports false: there is nothing left to
+// preserve.
+func branchHasUnmergedCommits(projectRoot, branch string) bool {
+	cmd := execCommand("git", "-C", projectRoot, "rev-parse", "--verify", "--quiet", "refs/heads/"+branch)
+	if cmd.Run() != nil {
+		return false
+	}
+	for _, base := range integrationBases(projectRoot) {
+		cmd := execCommand("git", "-C", projectRoot, "merge-base", "--is-ancestor", "refs/heads/"+branch, base)
+		if cmd.Run() == nil {
+			return false
+		}
+	}
+	return true
+}
+
+// runEnvTeardown runs `.paivot/envr down <story-id>` from the project root
+// when the script exists and is executable. Best-effort by design: recover
+// must never fail because an environment hook did -- failures go to stderr.
+// Skipped when no story id is known (nothing deterministic to tear down).
+func runEnvTeardown(projectRoot, storyID string) {
+	if storyID == "" {
+		return
+	}
+	script := filepath.Join(projectRoot, ".paivot", "envr")
+	info, err := os.Stat(script)
+	if err != nil || info.IsDir() || info.Mode()&0o111 == 0 {
+		return
+	}
+	cmd := execCommand(script, "down", storyID)
+	cmd.Dir = projectRoot
+	if out, err := cmd.CombinedOutput(); err != nil {
+		fmt.Fprintf(os.Stderr, "[RECOVER] envr down %s failed (ignored): %s (%v)\n",
+			storyID, strings.TrimSpace(string(out)), err)
+	}
 }
 
 // ExecuteRecover performs the recovery actions. Returns non-fatal error strings
@@ -500,6 +618,11 @@ func ExecuteRecover(projectRoot string, plan RecoverPlan) []string {
 	for _, action := range plan.Actions {
 		switch action.Kind {
 		case ActionRemoveWorktree:
+			// Best-effort environment teardown BEFORE the worktree goes away:
+			// a project-provided .paivot/envr can stop containers or free
+			// ports the dead developer left running. Failures are logged to
+			// stderr and never fail recover.
+			runEnvTeardown(projectRoot, action.StoryID)
 			result := worktree.SafeRemove(action.WorktreePath)
 			if result.Error != "" {
 				errors = append(errors, fmt.Sprintf("remove worktree %s: %s", action.WorktreePath, result.Error))
@@ -515,12 +638,17 @@ func ExecuteRecover(projectRoot string, plan RecoverPlan) []string {
 		case ActionResetStory:
 			// Mirror runND: resolve the shared vault and anchor the command to
 			// the project root so the mutation targets the right nd state.
+			// nd release clears the dead developer's claim (assignee) AND
+			// returns the story to open in one step; --force covers claims
+			// held under any agent identity. The open transition goes through
+			// the same FSM validation as `nd update --status open`, so no
+			// separate fallback path is needed.
 			vaultDir, err := ndvault.Resolve(projectRoot)
 			if err != nil {
 				errors = append(errors, fmt.Sprintf("reset story %s: resolve nd vault: %v", action.StoryID, err))
 				continue
 			}
-			cmd := execCommand("nd", "--vault", vaultDir, "update", action.StoryID, "--status", "open")
+			cmd := execCommand("nd", "--vault", vaultDir, "release", action.StoryID, "--force")
 			cmd.Dir = projectRoot
 			if out, err := cmd.CombinedOutput(); err != nil {
 				errors = append(errors, fmt.Sprintf("reset story %s: %s (%v)", action.StoryID, strings.TrimSpace(string(out)), err))
