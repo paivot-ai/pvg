@@ -17,12 +17,22 @@ func writeF(t *testing.T, path, content string) {
 	}
 }
 
-// TestOracleIDsBecomeRequirements: on a machinery-managed project, every
-// oracle stable id is a deterministic requirement checked by exact token
-// match, beside the keyword-matched D&F requirements.
+// optIn enables the design substrate for a fixture project: design.machinery
+// defaults to off, so tests exercising oracle-derived requirements must make
+// the user's explicit choice first.
+func optIn(t *testing.T, root, value string) {
+	t.Helper()
+	writeF(t, filepath.Join(root, ".vault", "knowledge", ".settings.yaml"), "design.machinery: "+value+"\n")
+}
+
+// TestOracleIDsBecomeRequirements: on a machinery-managed project with the
+// substrate explicitly enabled, every oracle stable id is a deterministic
+// requirement checked by exact token match, beside the keyword-matched D&F
+// requirements.
 func TestOracleIDsBecomeRequirements(t *testing.T) {
 	root := t.TempDir()
 	vault := t.TempDir()
+	optIn(t, root, "auto")
 	writeF(t, filepath.Join(root, "design", "domain.modelith.yaml"), "model: {}\n")
 	writeF(t, filepath.Join(root, "design", "machines", "Order.oracle.md"), `## Transitions
 
@@ -65,6 +75,7 @@ func TestOracleIDsBecomeRequirements(t *testing.T) {
 func TestExactTokenNotSubstring(t *testing.T) {
 	root := t.TempDir()
 	vault := t.TempDir()
+	optIn(t, root, "on")
 	writeF(t, filepath.Join(root, "design", "domain.modelith.yaml"), "model: {}\n")
 	writeF(t, filepath.Join(root, "design", "machines", "O.oracle.md"), `## Transitions
 
@@ -81,6 +92,45 @@ func TestExactTokenNotSubstring(t *testing.T) {
 	for _, r := range res.Requirements {
 		if r.Tag == "[ORACLE]" && r.Covered {
 			t.Fatalf("substring must not cover: %+v", r)
+		}
+	}
+}
+
+// TestOracleIDsIgnoredByDefault: design.machinery defaults to off, so
+// machinery artifacts alone must not contribute oracle requirements.
+func TestOracleIDsIgnoredByDefault(t *testing.T) {
+	root := t.TempDir()
+	vault := t.TempDir()
+	// No settings file: the default (off) governs despite the artifacts.
+	writeF(t, filepath.Join(root, "design", "domain.modelith.yaml"), "model: {}\n")
+	writeF(t, filepath.Join(root, "design", "machines", "O.oracle.md"), `## Transitions
+
+| test id | stable id | source | trigger | guard | target | actions |
+|---|---|---|---|---|---|---|
+| T-1 | ORD-aaaaaa | A | on:x | - | B | act |
+`)
+	res, err := CheckCoverage(root, vault)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range res.Requirements {
+		if r.Tag == "[ORACLE]" {
+			t.Fatalf("artifact presence alone must not enable the substrate: %+v", r)
+		}
+	}
+	if !res.Passed {
+		t.Fatalf("no requirements means the RTM passes: %+v", res)
+	}
+
+	// Explicit off behaves identically.
+	optIn(t, root, "off")
+	res, err = CheckCoverage(root, vault)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range res.Requirements {
+		if r.Tag == "[ORACLE]" {
+			t.Fatalf("explicit off must exclude oracle requirements: %+v", r)
 		}
 	}
 }

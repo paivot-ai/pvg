@@ -37,10 +37,13 @@ func fakeMachinery(t *testing.T, exitCode int) {
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 }
 
-// managedProject builds a machinery-managed fixture with one oracle.
+// managedProject builds a machinery-managed fixture with one oracle and the
+// user's explicit opt-in (design.machinery defaults to off; artifact
+// presence alone never enables the substrate).
 func managedProject(t *testing.T) string {
 	t.Helper()
 	root := t.TempDir()
+	writeFile(t, filepath.Join(root, ".vault", "knowledge", ".settings.yaml"), "design.machinery: auto\n")
 	writeFile(t, filepath.Join(root, "design", "domain.modelith.yaml"), "model: {}\n")
 	writeFile(t, filepath.Join(root, "design", "machines", "Deal.oracle.md"), oracleFixture)
 	return root
@@ -50,6 +53,25 @@ func TestDesignRedGateNotManagedIsNoop(t *testing.T) {
 	note, err := designRedGate(t.TempDir(), "S-1", "any body")
 	if err != nil || note != "" {
 		t.Fatalf("unmanaged project must be a no-op, got note=%q err=%v", note, err)
+	}
+}
+
+func TestDesignRedGateDefaultOffIsNoop(t *testing.T) {
+	// Machinery artifacts but no settings: design.machinery defaults to off,
+	// so the gate must not run.
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "design", "domain.modelith.yaml"), "model: {}\n")
+	writeFile(t, filepath.Join(root, "design", "machines", "Deal.oracle.md"), oracleFixture)
+	note, err := designRedGate(root, "S-1", "references DEAL-eb0c40")
+	if err != nil || note != "" {
+		t.Fatalf("default off must be a no-op despite artifacts, got note=%q err=%v", note, err)
+	}
+
+	// Explicit off behaves identically.
+	writeFile(t, filepath.Join(root, ".vault", "knowledge", ".settings.yaml"), "design.machinery: off\n")
+	note, err = designRedGate(root, "S-1", "references DEAL-eb0c40")
+	if err != nil || note != "" {
+		t.Fatalf("explicit off must be a no-op, got note=%q err=%v", note, err)
 	}
 }
 

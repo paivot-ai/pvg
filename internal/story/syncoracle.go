@@ -17,6 +17,7 @@ import (
 	"github.com/paivot-ai/pvg/internal/design"
 	"github.com/paivot-ai/pvg/internal/ndvault"
 	"github.com/paivot-ai/pvg/internal/rtm"
+	"github.com/paivot-ai/pvg/internal/settings"
 )
 
 // SyncEntry is one stable id whose transition changed between base and HEAD.
@@ -46,9 +47,13 @@ func SyncOracle(projectRoot, baseRef string) (*SyncReport, error) {
 	if !syncRefPattern.MatchString(baseRef) {
 		return nil, fmt.Errorf("invalid base ref %q (allowed: letters, digits, and . _ / - ~ ^, not starting with -)", baseRef)
 	}
-	cfg, managed := design.Load(projectRoot)
-	if !managed {
-		return nil, fmt.Errorf("project is not machinery-managed (no %s or %s/domain.modelith.yaml); nothing to sync", design.ConfigName, cfg.Dir)
+	// The design substrate is strictly user-opt-in (design.machinery,
+	// default off): sync-oracle only runs when the setting makes the
+	// substrate apply, never on artifact presence alone.
+	sett := settings.LoadFile(filepath.Join(projectRoot, ".vault", "knowledge", ".settings.yaml"))
+	cfg, applies, reason := design.Applies(projectRoot, design.MachinerySetting(sett))
+	if !applies {
+		return nil, fmt.Errorf("design substrate does not apply (%s); nothing to sync. Enabling it is a user decision: pvg settings design.machinery=on", reason)
 	}
 
 	current := map[string]map[string]string{} // oracle rel -> id -> row

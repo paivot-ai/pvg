@@ -24,6 +24,9 @@ func gitFixture(t *testing.T) string {
 	run("config", "user.email", "t@t")
 	run("config", "user.name", "t")
 
+	// The substrate is user-opt-in (default off): sync-oracle fixtures carry
+	// the explicit setting beside the machinery artifacts.
+	writeFile(t, filepath.Join(root, ".vault", "knowledge", ".settings.yaml"), "design.machinery: auto\n")
 	writeFile(t, filepath.Join(root, "design", "domain.modelith.yaml"), "model: {}\n")
 	v1 := `## Transitions
 
@@ -110,7 +113,25 @@ func TestSyncOracleRejectsBadRef(t *testing.T) {
 }
 
 func TestSyncOracleUnmanagedProject(t *testing.T) {
-	if _, err := SyncOracle(t.TempDir(), "HEAD"); err == nil || !strings.Contains(err.Error(), "not machinery-managed") {
+	// Even with an explicit auto, an unmanaged project has nothing to sync.
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, ".vault", "knowledge", ".settings.yaml"), "design.machinery: auto\n")
+	if _, err := SyncOracle(root, "HEAD"); err == nil || !strings.Contains(err.Error(), "not machinery-managed") {
 		t.Fatalf("unmanaged project must say so, got %v", err)
+	}
+}
+
+func TestSyncOracleDefaultOff(t *testing.T) {
+	// Machinery artifacts but no settings: design.machinery defaults to off,
+	// so sync-oracle refuses and points at the user decision.
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "design", "domain.modelith.yaml"), "model: {}\n")
+	writeFile(t, filepath.Join(root, "design", "machines", "Order.oracle.md"), "## Transitions\n")
+	_, err := SyncOracle(root, "HEAD")
+	if err == nil || !strings.Contains(err.Error(), "design.machinery=off") {
+		t.Fatalf("default off must refuse despite artifacts, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "user decision") {
+		t.Fatalf("refusal must say enabling is a user decision, got %v", err)
 	}
 }

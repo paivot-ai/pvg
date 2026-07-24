@@ -1019,7 +1019,7 @@ func checkDuplicateSections(b *Backlog, sc scope) []Finding {
 // missing label is an ERROR. The substrate not applying (or no oracles yet)
 // disables the check.
 func checkHardTDDOracle(b *Backlog, sc scope, projectRoot string, sett map[string]string) []Finding {
-	cfg, applies, _ := design.Applies(projectRoot, sett["design.machinery"])
+	cfg, applies, _ := design.Applies(projectRoot, design.MachinerySetting(sett))
 	if !applies {
 		return nil
 	}

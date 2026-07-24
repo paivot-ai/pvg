@@ -42,10 +42,12 @@ var defaults = map[string]string{
 	"dnf.domain_model": "false",
 	"architecture.c4":  "false",
 	// The machinery design substrate: domain model -> C4 contract -> state
-	// machines -> oracles, checked by `machinery check`. auto (default)
-	// applies it exactly when the repo is machinery-managed (.machinery.json
-	// or design/domain.modelith.yaml); on promises it; off disables it.
-	"design.machinery":             "auto",
+	// machines -> oracles, checked by `machinery check`. Strictly user-opt-in:
+	// off (default) disables it everywhere; on promises it (a missing design
+	// then fails loudly); auto is a deliberate, explicit choice to re-enable
+	// artifact detection (.machinery.json or design/domain.modelith.yaml).
+	// Artifact presence alone never enables the substrate.
+	"design.machinery":             "off",
 	"loop.persist_across_sessions": "true",
 	// Resume hints for semi-persistent story agents: when "true" (default),
 	// `pvg loop agent set` handles make `pvg loop next` emit

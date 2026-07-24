@@ -4,9 +4,12 @@
 // (`machinery check`) that pvg gates and story transitions call, and the
 // oracle stable-id parsing that the RTM and hard-TDD checks key on.
 //
-// Paivot's opinion sits in the `design.machinery` setting: `auto` (default)
-// applies the substrate exactly when the repo is machinery-managed, `on`
-// promises it (a missing design then fails loudly), `off` disables it.
+// Paivot's opinion sits in the `design.machinery` setting, which is strictly
+// user-opt-in: `off` (default) disables the substrate everywhere, `on`
+// promises it (a missing design then fails loudly), and `auto` is a
+// deliberate, explicit choice to re-enable artifact detection (a repo made
+// machinery-managed by .machinery.json or design/domain.modelith.yaml).
+// Artifact presence alone never enables the substrate.
 package design
 
 import (
@@ -17,6 +20,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/paivot-ai/pvg/internal/settings"
 )
 
 // Overridable for tests.
@@ -63,9 +68,25 @@ func Load(projectRoot string) (Config, bool) {
 	return cfg, true
 }
 
-// Applies resolves the design.machinery setting ("auto" | "on" | "off";
-// empty means auto) against the project. It returns the config, whether the
-// substrate applies, and a one-line reason for reports.
+// MachinerySetting resolves the effective design.machinery value from a
+// loaded settings map: the user's explicit value when set, otherwise the
+// built-in default (off). Every caller of Applies must resolve the setting
+// through here so an unset value means off everywhere and artifact presence
+// alone never enables the substrate.
+func MachinerySetting(sett map[string]string) string {
+	if v := strings.TrimSpace(sett["design.machinery"]); v != "" {
+		return v
+	}
+	return settings.Default("design.machinery")
+}
+
+// Applies resolves the design.machinery setting ("auto" | "on" | "off")
+// against the project. It returns the config, whether the substrate applies,
+// and a one-line reason for reports. Callers must pass the effective setting
+// (see MachinerySetting): the project default is off, so an unset value
+// resolves to off before it reaches here; artifact presence alone never
+// enables the substrate. An explicit "auto" is a deliberate user choice to
+// apply the substrate exactly when the repo is machinery-managed.
 func Applies(projectRoot, setting string) (Config, bool, string) {
 	cfg, managed := Load(projectRoot)
 	switch strings.TrimSpace(setting) {

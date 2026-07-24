@@ -11,10 +11,12 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/paivot-ai/pvg/internal/design"
 	"github.com/paivot-ai/pvg/internal/gates"
 	"github.com/paivot-ai/pvg/internal/loop"
 	"github.com/paivot-ai/pvg/internal/ndsync"
 	"github.com/paivot-ai/pvg/internal/ndvault"
+	"github.com/paivot-ai/pvg/internal/settings"
 )
 
 // Status represents the outcome of a single check.
@@ -55,6 +57,7 @@ func RunAll(projectRoot string) Report {
 	r.Findings = append(r.Findings, checkNDReachable())
 	r.Findings = append(r.Findings, checkModelith())
 	r.Findings = append(r.Findings, checkMachinery())
+	r.Findings = append(r.Findings, checkDesignOptIn(projectRoot))
 	r.Findings = append(r.Findings, checkSharedConfigConsistency(projectRoot))
 	r.Findings = append(r.Findings, checkVaultDivergence(projectRoot))
 	r.Findings = append(r.Findings, checkNDSyncStatus(projectRoot))
@@ -184,6 +187,28 @@ func checkMachinery() Finding {
 	}
 	ver := strings.TrimSpace(string(out))
 	return Finding{Name: "machinery-reachable", Status: StatusPass, Message: ver}
+}
+
+// checkDesignOptIn is advisory: the design substrate is strictly user-opt-in
+// (design.machinery, default off), so machinery artifacts in a project where
+// the substrate does not apply are surfaced as a WARN, never auto-enabled.
+// Enabling the substrate is a user decision with significant token/time cost.
+func checkDesignOptIn(projectRoot string) Finding {
+	const name = "design-opt-in"
+	sett := settings.LoadFile(filepath.Join(projectRoot, ".vault", "knowledge", ".settings.yaml"))
+	_, applies, reason := design.Applies(projectRoot, design.MachinerySetting(sett))
+	if applies {
+		return Finding{Name: name, Status: StatusPass, Message: fmt.Sprintf("design substrate applies (%s)", reason)}
+	}
+	if _, managed := design.Load(projectRoot); managed {
+		return Finding{
+			Name:   name,
+			Status: StatusWarn,
+			Message: "machinery artifacts detected but design.machinery is off (" + reason + ") -- enabling the design substrate is a user decision " +
+				"with significant token/time cost; enable with: pvg settings design.machinery=on",
+		}
+	}
+	return Finding{Name: name, Status: StatusSkip, Message: "no machinery artifacts and design.machinery does not apply (" + reason + ")"}
 }
 
 func checkSharedConfigConsistency(projectRoot string) Finding {

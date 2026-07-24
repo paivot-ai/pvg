@@ -32,7 +32,7 @@ import (
 // apply return ("", nil) and approve-red behaves exactly as before.
 func designRedGate(projectRoot, storyID, storyText string) (string, error) {
 	sett := settings.LoadFile(filepath.Join(projectRoot, ".vault", "knowledge", ".settings.yaml"))
-	cfg, applies, reason := design.Applies(projectRoot, sett["design.machinery"])
+	cfg, applies, reason := design.Applies(projectRoot, design.MachinerySetting(sett))
 	if !applies {
 		return "", nil
 	}

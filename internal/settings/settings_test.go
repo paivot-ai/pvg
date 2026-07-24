@@ -797,3 +797,35 @@ func TestGateNumericKeysNotModeValidated(t *testing.T) {
 		t.Errorf("expected gates.file_loc.max '250', got %q", loaded["gates.file_loc.max"])
 	}
 }
+
+func TestDesignMachinery_DefaultsOff(t *testing.T) {
+	// The machinery design substrate is strictly user-opt-in: the built-in
+	// default must be off, never auto.
+	if got := Default("design.machinery"); got != "off" {
+		t.Fatalf("design.machinery default = %q, want off", got)
+	}
+}
+
+func TestRunSet_DesignMachineryValidation(t *testing.T) {
+	dir := t.TempDir()
+
+	oldWD, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Chdir(oldWD) }()
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, valid := range []string{"auto", "on", "off"} {
+		if _, runErr := captureStdout(t, func() error { return Run([]string{"design.machinery=" + valid}) }); runErr != nil {
+			t.Fatalf("design.machinery=%s should be accepted, got %v", valid, runErr)
+		}
+	}
+
+	_, runErr := captureStdout(t, func() error { return Run([]string{"design.machinery=yes"}) })
+	if runErr == nil || !strings.Contains(runErr.Error(), "allowed: auto, on, off") {
+		t.Fatalf("expected rejection of design.machinery=yes, got %v", runErr)
+	}
+}

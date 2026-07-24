@@ -874,7 +874,9 @@ func TestCheckHardTDDOracle(t *testing.T) {
 	projectRoot := t.TempDir()
 	writeOracleFixture(t, projectRoot, "ORD-T01", "ORD-T02")
 
-	findings := checkHardTDDOracle(b, scope{}, projectRoot, map[string]string{})
+	// The substrate is user-opt-in: the check only runs with an explicit
+	// design.machinery=on (or auto); the default is off.
+	findings := checkHardTDDOracle(b, scope{}, projectRoot, map[string]string{"design.machinery": "on"})
 
 	if len(findings) != 2 {
 		t.Fatalf("expected 2 findings, got %+v", findings)
@@ -908,12 +910,38 @@ func TestCheckHardTDDOracle_InactiveWithoutSubstrate(t *testing.T) {
 	if findings := checkHardTDDOracle(b, scope{}, projectRoot, map[string]string{"design.machinery": "off"}); len(findings) != 0 {
 		t.Fatalf("expected no findings with design.machinery=off, got %+v", findings)
 	}
+
+	// Default (unset) is off: machinery artifacts alone never enable the
+	// substrate, so the check must not run without an explicit opt-in.
+	if findings := checkHardTDDOracle(b, scope{}, projectRoot, map[string]string{}); len(findings) != 0 {
+		t.Fatalf("expected no findings with default (off) despite artifacts, got %+v", findings)
+	}
+
+	// Explicit auto is a deliberate user choice: artifact detection re-enables.
+	if findings := checkHardTDDOracle(b, scope{}, projectRoot, map[string]string{"design.machinery": "auto"}); len(findings) != 1 {
+		t.Fatalf("expected 1 finding with explicit auto on a managed project, got %+v", findings)
+	}
+
+	// Explicit on enables regardless of detection.
+	if findings := checkHardTDDOracle(b, scope{}, projectRoot, map[string]string{"design.machinery": "on"}); len(findings) != 1 {
+		t.Fatalf("expected 1 finding with explicit on, got %+v", findings)
+	}
 }
 
 func TestCheckBacklog_RegistersHardTDDOracle(t *testing.T) {
 	vault := t.TempDir()
 	projectRoot := t.TempDir()
 	writeOracleFixture(t, projectRoot, "ORD-T01")
+
+	// User opt-in: the substrate never applies from artifact presence alone.
+	settingsDir := filepath.Join(projectRoot, ".vault", "knowledge")
+	if err := os.MkdirAll(settingsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(settingsDir, ".settings.yaml"),
+		[]byte("design.machinery: auto\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 
 	writeIssue(t, vault, "PROJ-s1.md", `---
 id: PROJ-s1
@@ -934,6 +962,34 @@ The endpoint returns data derived from ORD-T01.
 	found := findingsFor(result.Findings, "hard-tdd-oracle")
 	if len(found) != 1 || found[0].IssueID != "PROJ-s1" || found[0].Severity != SeverityError {
 		t.Fatalf("expected 1 hard-tdd-oracle error for PROJ-s1, got %+v", found)
+	}
+}
+
+func TestCheckBacklog_HardTDDOracleOffByDefault(t *testing.T) {
+	vault := t.TempDir()
+	projectRoot := t.TempDir()
+	writeOracleFixture(t, projectRoot, "ORD-T01")
+	// No settings file: design.machinery defaults to off, so the machinery
+	// artifacts above must NOT activate the hard-tdd-oracle check.
+
+	writeIssue(t, vault, "PROJ-s1.md", `---
+id: PROJ-s1
+title: "Oracle story"
+status: open
+type: task
+labels: []
+---
+MANDATORY SKILLS TO REVIEW: nd
+
+The endpoint returns data derived from ORD-T01.
+`)
+
+	result, err := CheckBacklog(BacklogOptions{VaultDir: vault, ProjectRoot: projectRoot})
+	if err != nil {
+		t.Fatalf("CheckBacklog: %v", err)
+	}
+	if found := findingsFor(result.Findings, "hard-tdd-oracle"); len(found) != 0 {
+		t.Fatalf("default off must disable hard-tdd-oracle despite artifacts, got %+v", found)
 	}
 }
 

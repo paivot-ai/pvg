@@ -676,8 +676,8 @@ func TestRunAll_ProducesReport(t *testing.T) {
 	}
 
 	r := RunAll(root)
-	if len(r.Findings) != 11 {
-		t.Fatalf("expected 11 findings, got %d", len(r.Findings))
+	if len(r.Findings) != 12 {
+		t.Fatalf("expected 12 findings, got %d", len(r.Findings))
 	}
 
 	names := make(map[string]bool)
@@ -692,7 +692,7 @@ func TestRunAll_ProducesReport(t *testing.T) {
 		t.Logf("[%s] %s: %s", f.Status, f.Name, f.Message)
 	}
 
-	for _, expected := range []string{"vault-resolution", "nd-reachable", "modelith-reachable", "machinery-reachable", "shared-config-consistency", "nd-sync-status", "nd-doctor", "loop-state", "worktree-hygiene", "code-quality-analyzers"} {
+	for _, expected := range []string{"vault-resolution", "nd-reachable", "modelith-reachable", "machinery-reachable", "design-opt-in", "shared-config-consistency", "nd-sync-status", "nd-doctor", "loop-state", "worktree-hygiene", "code-quality-analyzers"} {
 		if !names[expected] {
 			t.Errorf("missing check %q", expected)
 		}
@@ -746,4 +746,61 @@ func findSubstr(s, sub string) bool {
 		}
 	}
 	return false
+}
+
+// --- design-opt-in ---
+
+func writeDesignArtifacts(t *testing.T, root string) {
+	t.Helper()
+	dir := filepath.Join(root, "design")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "domain.modelith.yaml"), []byte("model: {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func writeDesignSetting(t *testing.T, root, value string) {
+	t.Helper()
+	dir := filepath.Join(root, ".vault", "knowledge")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".settings.yaml"), []byte("design.machinery: "+value+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCheckDesignOptIn_WarnsOnArtifactsWithDefaultOff(t *testing.T) {
+	root := t.TempDir()
+	writeDesignArtifacts(t, root)
+
+	f := checkDesignOptIn(root)
+	if f.Status != StatusWarn {
+		t.Fatalf("artifacts + default off must WARN, got %+v", f)
+	}
+	for _, want := range []string{"machinery artifacts detected", "user decision", "pvg settings design.machinery=on"} {
+		if !strings.Contains(f.Message, want) {
+			t.Errorf("message missing %q: %s", want, f.Message)
+		}
+	}
+}
+
+func TestCheckDesignOptIn_PassesWhenSubstrateApplies(t *testing.T) {
+	root := t.TempDir()
+	writeDesignArtifacts(t, root)
+	writeDesignSetting(t, root, "on")
+
+	f := checkDesignOptIn(root)
+	if f.Status != StatusPass {
+		t.Fatalf("explicit on must PASS, got %+v", f)
+	}
+}
+
+func TestCheckDesignOptIn_SkipsWithoutArtifacts(t *testing.T) {
+	f := checkDesignOptIn(t.TempDir())
+	if f.Status != StatusSkip {
+		t.Fatalf("no artifacts + off must SKIP, got %+v", f)
+	}
 }

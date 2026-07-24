@@ -685,9 +685,10 @@ Subcommands:
                                          Hard-TDD guard: fail if a non-RED, unauthorized commit edited tests
   sync-oracle [--base REF] [--json]      Map the design oracle stable-id diff onto affected nd stories
 
-approve-red on a machinery-managed project first runs the deterministic RED
-exit gate: machinery check green and every story-referenced oracle stable id
-carried by a test. --skip-design REASON waives it, recorded in the contract.`)
+approve-red first runs the deterministic RED exit gate when the design
+substrate applies (user opt-in via design.machinery, default off): machinery
+check green and every story-referenced oracle stable id carried by a test.
+--skip-design REASON waives it, recorded in the contract.`)
 }
 
 func runStorySyncOracle(cwd string, args []string) error {
@@ -1825,8 +1826,9 @@ artifact (file path) claimed by more than one story.
 checks: walking-skeleton, capstone, mandatory-skills, consumes-signature,
 consumes-produces, stale-refs, external-integration, atomicity,
 vertical-slice, duplicate-sections, hard-tdd-oracle (when the machinery
-design substrate applies: stories citing oracle stable ids must carry the
-hard-tdd label), dep-cycles, release-gate, and paths-exist (brownfield only).
+design substrate applies -- user opt-in via design.machinery, default off:
+stories citing oracle stable ids must carry the hard-tdd label), dep-cycles,
+release-gate, and paths-exist (brownfield only).
 Findings are 'error' (must fix; exit 1) or 'review' (judgment flag; exit 0).
 
 Usage:
@@ -2158,10 +2160,11 @@ silent pass. Exit code 0 unless a BLOCK finding fired (then 1).`)
 	}
 
 	// The design gate (machinery) runs beside the metric gates whenever the
-	// design.machinery setting resolves applicable for this project. Missing
+	// design.machinery setting (strictly user-opt-in; default off) resolves
+	// applicable for this project. Missing
 	// binary FAILS (a declared design promise is never silently waived).
 	var designRes *design.CheckResult
-	if cfg, applies, reason := design.Applies(projectRoot, sett["design.machinery"]); applies {
+	if cfg, applies, reason := design.Applies(projectRoot, design.MachinerySetting(sett)); applies {
 		r := design.RunCheck(projectRoot, cfg)
 		r.Reason = reason
 		designRes = &r
@@ -2433,6 +2436,7 @@ Checks:
   nd-reachable              Verify nd binary is on PATH
   modelith-reachable        Check modelith binary (domain-model tooling) on PATH
   machinery-reachable       Check machinery binary (design substrate) on PATH
+  design-opt-in             Advise when machinery artifacts exist but design.machinery is off (user opt-in)
   shared-config-consistency Check shared vault config consistency
   vault-divergence          Detect a legacy local vault diverging from the shared vault
   nd-sync-status            Report backlog position vs the nd/backlog branch and its remote

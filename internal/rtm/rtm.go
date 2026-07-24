@@ -14,6 +14,7 @@ import (
 	"strings"
 
 	"github.com/paivot-ai/pvg/internal/design"
+	"github.com/paivot-ai/pvg/internal/settings"
 )
 
 // Requirement represents a tagged item or section heading from a D&F document.
@@ -60,8 +61,11 @@ func CheckCoverage(projectRoot, vaultDir string) (RTMResult, error) {
 
 	// The design substrate contributes deterministic requirements: every
 	// oracle stable id is a transition the backlog must cover. Coverage for
-	// these is exact whole-token matching, not the keyword heuristic.
-	if cfg, managed := design.Load(projectRoot); managed {
+	// these is exact whole-token matching, not the keyword heuristic. The
+	// substrate is strictly user-opt-in via design.machinery (default off);
+	// machinery artifacts alone never pull oracle ids into the RTM.
+	sett := settings.LoadFile(filepath.Join(projectRoot, ".vault", "knowledge", ".settings.yaml"))
+	if cfg, applies, _ := design.Applies(projectRoot, design.MachinerySetting(sett)); applies {
 		ids, derr := design.StableIDs(projectRoot, cfg)
 		if derr != nil {
 			return result, fmt.Errorf("read design oracles: %w", derr)

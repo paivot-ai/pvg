@@ -96,6 +96,37 @@ func TestApplies(t *testing.T) {
 	}
 }
 
+// MachinerySetting resolves the effective value callers must feed Applies:
+// unset means the default (off), so artifact presence alone never enables
+// the substrate; explicit values pass through untouched.
+func TestMachinerySetting(t *testing.T) {
+	cases := []struct {
+		sett map[string]string
+		want string
+	}{
+		{nil, "off"},
+		{map[string]string{}, "off"},
+		{map[string]string{"design.machinery": ""}, "off"},
+		{map[string]string{"design.machinery": "  "}, "off"},
+		{map[string]string{"design.machinery": "on"}, "on"},
+		{map[string]string{"design.machinery": "auto"}, "auto"},
+		{map[string]string{"design.machinery": "off"}, "off"},
+	}
+	for _, c := range cases {
+		if got := MachinerySetting(c.sett); got != c.want {
+			t.Errorf("MachinerySetting(%v) = %q, want %q", c.sett, got, c.want)
+		}
+	}
+
+	// The resolved default plus Applies: a machinery-managed repo with no
+	// explicit setting must NOT have the substrate apply.
+	managed := t.TempDir()
+	write(t, filepath.Join(managed, "design", "domain.modelith.yaml"), "model: {}\n")
+	if _, applies, reason := Applies(managed, MachinerySetting(nil)); applies {
+		t.Fatalf("default must be off despite artifacts, got applies=true (%s)", reason)
+	}
+}
+
 func TestOracleRowsParsesStableIDColumn(t *testing.T) {
 	rows := OracleRows(oracleFixture)
 	if len(rows) != 2 {
