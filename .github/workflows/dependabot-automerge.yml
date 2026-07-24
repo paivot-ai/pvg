@@ -1,0 +1,50 @@
+name: Dependabot auto-merge
+
+on:
+  pull_request:
+
+permissions:
+  pull-requests: write
+  contents: write
+
+jobs:
+  auto-merge:
+    if: github.actor == 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fetch Dependabot metadata
+        id: metadata
+        uses: dependabot/fetch-metadata@v2
+        with:
+          github-token: "${{ secrets.GITHUB_TOKEN }}"
+
+      - name: Enable auto-merge for eligible updates
+        env:
+          PR_URL: "${{ github.event.pull_request.html_url }}"
+          GH_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
+          UPDATE_TYPE: "${{ steps.metadata.outputs.update-type }}"
+          DEPENDENCY_GROUP: "${{ steps.metadata.outputs.dependency-group-name }}"
+          ECOSYSTEM: "${{ steps.metadata.outputs.package-ecosystem }}"
+        run: |
+          # Patch and minor bumps: safe to auto-merge for any ecosystem.
+          if [[ "$UPDATE_TYPE" == "version-update:semver-patch" || "$UPDATE_TYPE" == "version-update:semver-minor" ]]; then
+            echo "Auto-merging $UPDATE_TYPE update ($ECOSYSTEM)"
+            gh pr merge --auto --squash "$PR_URL"
+            exit 0
+          fi
+
+          # Major bumps: only auto-merge when scoped to github-actions --
+          # workflow-file-only blast radius, not runtime dependency code.
+          # Any other ecosystem's major bump (Go modules, npm, etc.) always
+          # requires human review, even if added to dependabot.yml later.
+          if [[ "$UPDATE_TYPE" == "version-update:semver-major" ]]; then
+            if [[ "$ECOSYSTEM" == "github_actions" || "$DEPENDENCY_GROUP" == "github-actions" ]]; then
+              echo "Auto-merging major github-actions update ($DEPENDENCY_GROUP)"
+              gh pr merge --auto --squash "$PR_URL"
+              exit 0
+            fi
+            echo "Major update for ecosystem '$ECOSYSTEM' (group '$DEPENDENCY_GROUP') requires human review; not auto-merging."
+            exit 0
+          fi
+
+          echo "Update type '$UPDATE_TYPE' not recognized for auto-merge; requires human review."
