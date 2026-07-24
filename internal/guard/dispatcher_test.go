@@ -364,6 +364,133 @@ func TestCheckDispatcher_BashAllowsModelithWrite_WithArchitect(t *testing.T) {
 	}
 }
 
+// Fixture carve-out: D&F basenames under an evals/ or testdata/ path segment
+// are eval or test fixtures, not D&F artifacts, and must not be blocked.
+
+func TestCheckDispatcher_AllowsBUSINESSmd_UnderEvalsFixture(t *testing.T) {
+	dir, _ := setupDispatcher(t)
+	input := HookInput{
+		ToolName:  "Write",
+		ToolInput: ToolInput{FilePath: filepath.Join(dir, "evals", "x", "inputs", "BUSINESS.md")},
+	}
+	result := CheckDispatcher(dir, input)
+	if !result.Allowed {
+		t.Errorf("expected allowed for BUSINESS.md under evals/, got blocked: %s", result.Reason)
+	}
+}
+
+func TestCheckDispatcher_BlocksBUSINESSmd_AtProjectRoot(t *testing.T) {
+	dir, _ := setupDispatcher(t)
+	input := HookInput{
+		ToolName:  "Write",
+		ToolInput: ToolInput{FilePath: filepath.Join(dir, "BUSINESS.md")},
+	}
+	result := CheckDispatcher(dir, input)
+	if result.Allowed {
+		t.Error("expected blocked for BUSINESS.md at project root")
+	}
+}
+
+func TestCheckDispatcher_BlocksDESIGNmd_UnderDocsDir(t *testing.T) {
+	dir, _ := setupDispatcher(t)
+	input := HookInput{
+		ToolName:  "Write",
+		ToolInput: ToolInput{FilePath: filepath.Join(dir, "docs", "DESIGN.md")},
+	}
+	result := CheckDispatcher(dir, input)
+	if result.Allowed {
+		t.Error("expected blocked for docs/DESIGN.md (not a fixture path)")
+	}
+}
+
+func TestCheckDispatcher_AllowsARCHITECTUREmd_UnderTestdataFixture(t *testing.T) {
+	dir, _ := setupDispatcher(t)
+	input := HookInput{
+		ToolName:  "Write",
+		ToolInput: ToolInput{FilePath: filepath.Join(dir, "testdata", "ARCHITECTURE.md")},
+	}
+	result := CheckDispatcher(dir, input)
+	if !result.Allowed {
+		t.Errorf("expected allowed for ARCHITECTURE.md under testdata/, got blocked: %s", result.Reason)
+	}
+}
+
+func TestCheckDispatcher_BashAllowsHeredocToEvalsFixture(t *testing.T) {
+	dir, _ := setupDispatcher(t)
+	input := HookInput{
+		ToolName:  "Bash",
+		ToolInput: ToolInput{Command: "cat > evals/s/inputs/DESIGN.md <<EOF\nfixture content\nEOF"},
+	}
+	result := CheckDispatcher(dir, input)
+	if !result.Allowed {
+		t.Errorf("expected allowed for heredoc to evals/ DESIGN.md fixture, got blocked: %s", result.Reason)
+	}
+}
+
+func TestCheckDispatcher_BashBlocksEchoRedirectToDESIGNmd(t *testing.T) {
+	dir, _ := setupDispatcher(t)
+	input := HookInput{
+		ToolName:  "Bash",
+		ToolInput: ToolInput{Command: `echo x > DESIGN.md`},
+	}
+	result := CheckDispatcher(dir, input)
+	if result.Allowed {
+		t.Error("expected blocked for echo redirect to non-fixture DESIGN.md")
+	}
+}
+
+func TestCheckDispatcher_BashBlocksMixedFixtureAndRealDFTargets(t *testing.T) {
+	dir, _ := setupDispatcher(t)
+	// One occurrence is a fixture, the other is a real D&F file: still block.
+	input := HookInput{
+		ToolName:  "Bash",
+		ToolInput: ToolInput{Command: `cp evals/a/BUSINESS.md ./BUSINESS.md`},
+	}
+	result := CheckDispatcher(dir, input)
+	if result.Allowed {
+		t.Error("expected blocked when command targets both fixture and real BUSINESS.md")
+	}
+}
+
+func TestCheckDispatcher_AllowsModelith_UnderEvalsFixture_WhenEnabled(t *testing.T) {
+	dir, _ := setupDispatcher(t)
+	enableDomainModel(t, dir)
+	input := HookInput{
+		ToolName:  "Write",
+		ToolInput: ToolInput{FilePath: filepath.Join(dir, "evals", "m", "domain.modelith.yaml")},
+	}
+	result := CheckDispatcher(dir, input)
+	if !result.Allowed {
+		t.Errorf("expected allowed for *.modelith.yaml under evals/ when enabled, got blocked: %s", result.Reason)
+	}
+}
+
+func TestCheckDispatcher_BashAllowsModelithRedirectUnderEvals_WhenEnabled(t *testing.T) {
+	dir, _ := setupDispatcher(t)
+	enableDomainModel(t, dir)
+	input := HookInput{
+		ToolName:  "Bash",
+		ToolInput: ToolInput{Command: `cat draft.yaml > evals/m/domain.modelith.yaml`},
+	}
+	result := CheckDispatcher(dir, input)
+	if !result.Allowed {
+		t.Errorf("expected allowed for *.modelith.yaml redirect under evals/ when enabled, got blocked: %s", result.Reason)
+	}
+}
+
+func TestCheckDispatcher_BlocksModelith_NonFixture_WhenEnabled(t *testing.T) {
+	dir, _ := setupDispatcher(t)
+	enableDomainModel(t, dir)
+	input := HookInput{
+		ToolName:  "Write",
+		ToolInput: ToolInput{FilePath: filepath.Join(dir, "design", "domain.modelith.yaml")},
+	}
+	result := CheckDispatcher(dir, input)
+	if result.Allowed {
+		t.Error("expected non-fixture *.modelith.yaml write blocked when enabled and no architect agent")
+	}
+}
+
 func TestCheckDispatcher_BashBlocksMutatingNDCommandFromCoordinator(t *testing.T) {
 	root, _ := setupDispatcher(t)
 	input := HookInput{

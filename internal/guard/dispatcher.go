@@ -76,6 +76,11 @@ func checkDFFilePath(projectRoot, root string, state *dispatcher.State, filePath
 		return Result{Allowed: true}
 	}
 
+	// Fixture copies of D&F basenames are not D&F artifacts.
+	if isFixturePath(filePath) {
+		return Result{Allowed: true}
+	}
+
 	base := filepath.Base(filePath)
 	agentName, isDFFile := dfAgentFor(root, base)
 	if !isDFFile {
@@ -102,6 +107,9 @@ func checkDFBashCommand(projectRoot, root string, state *dispatcher.State, comma
 		if !strings.Contains(command, artifact) {
 			continue
 		}
+		if commandTargetsOnlyFixtures(command, artifact) {
+			continue
+		}
 		if commandHasWriteOp(command, artifact) && !dfWriteAllowed(projectRoot, state, agentName) {
 			return Result{
 				Allowed: false,
@@ -112,7 +120,8 @@ func checkDFBashCommand(projectRoot, root string, state *dispatcher.State, comma
 
 	// Domain model (variable *.modelith.yaml basename), architect-owned, only
 	// when dnf.domain_model is enabled for the project.
-	if strings.Contains(command, modelithSuffix) && domainModelEnabled(root) {
+	if strings.Contains(command, modelithSuffix) && domainModelEnabled(root) &&
+		!commandTargetsOnlyFixtures(command, modelithSuffix) {
 		if commandHasWriteOp(command, modelithSuffix) && !dfWriteAllowed(projectRoot, state, "architect") {
 			return Result{
 				Allowed: false,
@@ -142,6 +151,55 @@ func commandHasWriteOp(command, artifact string) bool {
 		}
 	}
 	return false
+}
+
+// isFixturePath reports whether filePath lives under a fixture directory: any
+// path segment equal to "evals" or "testdata". Fixture copies of D&F artifact
+// basenames (eval harness inputs like evals/x/inputs/BUSINESS.md, Go testdata)
+// are test data, not D&F artifacts, and must not trip the guard.
+func isFixturePath(filePath string) bool {
+	for _, seg := range strings.Split(filepath.ToSlash(filePath), "/") {
+		if seg == "evals" || seg == "testdata" {
+			return true
+		}
+	}
+	return false
+}
+
+// commandTargetsOnlyFixtures reports whether every occurrence of artifact in
+// command sits inside a fixture path (see isFixturePath). Each occurrence is
+// expanded to its surrounding whitespace-delimited token with common wrappers
+// (quotes, parentheses, leading redirects) stripped. A single non-fixture
+// occurrence returns false: a command touching both a fixture and a real D&F
+// file must still block.
+func commandTargetsOnlyFixtures(command, artifact string) bool {
+	found := false
+	for idx := strings.Index(command, artifact); idx >= 0; {
+		found = true
+		start := idx
+		for start > 0 && !isShellSpace(command[start-1]) {
+			start--
+		}
+		end := idx + len(artifact)
+		for end < len(command) && !isShellSpace(command[end]) {
+			end++
+		}
+		token := strings.Trim(command[start:end], "\"'`()")
+		token = strings.TrimLeft(token, "><")
+		if !isFixturePath(token) {
+			return false
+		}
+		rest := strings.Index(command[idx+len(artifact):], artifact)
+		if rest < 0 {
+			break
+		}
+		idx = idx + len(artifact) + rest
+	}
+	return found
+}
+
+func isShellSpace(b byte) bool {
+	return b == ' ' || b == '\t' || b == '\n'
 }
 
 // dfAgentFor resolves the owning BLT agent for a D&F artifact basename.
