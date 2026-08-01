@@ -9,9 +9,25 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/paivot-ai/pvg/internal/ndvault"
 )
+
+// BuildVersion is the running pvg version, assigned from main at startup.
+// Empty (a dev build or library use) reads as "dev" via RunningVersion.
+var BuildVersion = ""
+
+// RunningVersion returns BuildVersion, or "dev" when unset.
+func RunningVersion() string {
+	if BuildVersion == "" {
+		return "dev"
+	}
+	return BuildVersion
+}
+
+// timeNow is a seam for tests to pin the calibration stamp date.
+var timeNow = time.Now
 
 const settingsFile = ".vault/knowledge/.settings.yaml"
 
@@ -82,6 +98,11 @@ var defaults = map[string]string{
 	"gates.file_loc":              "warn",
 	"gates.file_loc.max":          "400",
 	"gates.exclude":               "vendor/,node_modules/,*.generated.*,*.pb.go,migrations/,*.lock,*.min.*,dist/,build/",
+	// Calibration stamp: written automatically by `pvg settings` whenever a
+	// gates.* or model.* key changes; read by `pvg doctor`; not meant to be
+	// set by hand.
+	"calibration.stamped": "",
+	"calibration.pvg":     "",
 }
 
 var execCommand = exec.Command
@@ -167,6 +188,7 @@ func setSettings(projectRoot, path string, args []string) error {
 	}
 
 	workflowChanged := false
+	calibrationChanged := false
 	for _, arg := range args {
 		parts := strings.SplitN(arg, "=", 2)
 		if len(parts) != 2 {
@@ -205,6 +227,23 @@ func setSettings(projectRoot, path string, args []string) error {
 		if strings.HasPrefix(key, "workflow.") {
 			workflowChanged = true
 		}
+		// Any gates.* or model.* write is a calibration change, including
+		// setting one to empty: clearing an override recalibrates against the
+		// built-in default. calibration.* keys themselves never restamp.
+		if strings.HasPrefix(key, "gates.") || strings.HasPrefix(key, "model.") {
+			calibrationChanged = true
+		}
+	}
+
+	// Stamp the calibration date and pvg version so `pvg doctor` can flag
+	// tuned thresholds that outlive the toolchain they were tuned against.
+	if calibrationChanged {
+		stamped := timeNow().Format("2006-01-02")
+		ver := RunningVersion()
+		settings["calibration.stamped"] = stamped
+		settings["calibration.pvg"] = ver
+		fmt.Printf("  stamped calibration.stamped = %s (gates/model change)\n", stamped)
+		fmt.Printf("  stamped calibration.pvg = %s (gates/model change)\n", ver)
 	}
 
 	if err := writeSettings(path, settings); err != nil {

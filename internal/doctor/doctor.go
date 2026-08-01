@@ -68,6 +68,7 @@ func RunAll(projectRoot string) Report {
 	r.Findings = append(r.Findings, checkLoopState(projectRoot))
 	r.Findings = append(r.Findings, checkWorktreeHygiene(projectRoot))
 	r.Findings = append(r.Findings, checkAnalyzers())
+	r.Findings = append(r.Findings, checkCalibrationStaleness(projectRoot))
 
 	r.Passed = true
 	for _, f := range r.Findings {
