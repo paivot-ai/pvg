@@ -676,8 +676,8 @@ func TestRunAll_ProducesReport(t *testing.T) {
 	}
 
 	r := RunAll(root)
-	if len(r.Findings) != 12 {
-		t.Fatalf("expected 12 findings, got %d", len(r.Findings))
+	if len(r.Findings) != 13 {
+		t.Fatalf("expected 13 findings, got %d", len(r.Findings))
 	}
 
 	names := make(map[string]bool)
@@ -692,7 +692,7 @@ func TestRunAll_ProducesReport(t *testing.T) {
 		t.Logf("[%s] %s: %s", f.Status, f.Name, f.Message)
 	}
 
-	for _, expected := range []string{"vault-resolution", "nd-reachable", "modelith-reachable", "machinery-reachable", "design-opt-in", "shared-config-consistency", "nd-sync-status", "nd-doctor", "loop-state", "worktree-hygiene", "code-quality-analyzers"} {
+	for _, expected := range []string{"vault-resolution", "nd-reachable", "modelith-reachable", "machinery-reachable", "design-opt-in", "shared-config-consistency", "nd-sync-status", "nd-doctor", "loop-state", "worktree-hygiene", "code-quality-analyzers", "calibration-staleness"} {
 		if !names[expected] {
 			t.Errorf("missing check %q", expected)
 		}

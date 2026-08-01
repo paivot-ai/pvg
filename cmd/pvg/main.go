@@ -126,6 +126,10 @@ func main() {
 	// shelling out to pvg.
 	converge.SelfVersion = resolvedVersion()
 
+	// Calibration stamping (pvg settings) and the staleness check (pvg
+	// doctor) both record the running version through this single seam.
+	settings.BuildVersion = resolvedVersion()
+
 	var err error
 	switch cmd {
 	case "hook":

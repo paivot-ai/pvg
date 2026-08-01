@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestDefaultSoloDev(t *testing.T) {
@@ -803,6 +804,148 @@ func TestDesignMachinery_DefaultsOff(t *testing.T) {
 	// default must be off, never auto.
 	if got := Default("design.machinery"); got != "off" {
 		t.Fatalf("design.machinery default = %q, want off", got)
+	}
+}
+
+// pinCalibration fixes the timeNow and BuildVersion seams so calibration
+// stamps are deterministic, and restores them on cleanup.
+func pinCalibration(t *testing.T, date time.Time, version string) {
+	t.Helper()
+	oldNow := timeNow
+	oldVer := BuildVersion
+	timeNow = func() time.Time { return date }
+	BuildVersion = version
+	t.Cleanup(func() {
+		timeNow = oldNow
+		BuildVersion = oldVer
+	})
+}
+
+// chdirTemp switches the working directory to a fresh temp dir and restores
+// it on cleanup. Returns the temp dir.
+func chdirTemp(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	oldWD, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(oldWD) })
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+func TestDefaults_CalibrationKeys(t *testing.T) {
+	for _, k := range []string{"calibration.stamped", "calibration.pvg"} {
+		val, ok := defaults[k]
+		if !ok {
+			t.Errorf("%s missing from defaults", k)
+			continue
+		}
+		if val != "" {
+			t.Errorf("expected %s default to be empty, got %q", k, val)
+		}
+	}
+}
+
+func TestRunSetGates_StampsCalibration(t *testing.T) {
+	dir := chdirTemp(t)
+	pinCalibration(t, time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC), "v1.62.0-test")
+
+	out, runErr := captureStdout(t, func() error { return Run([]string{"gates.file_loc.max=250"}) })
+	if runErr != nil {
+		t.Fatalf("Run set gates.file_loc.max: %v", runErr)
+	}
+	if !strings.Contains(out, "stamped calibration.stamped = 2026-08-01 (gates/model change)") {
+		t.Errorf("output missing calibration.stamped line, got %q", out)
+	}
+	if !strings.Contains(out, "stamped calibration.pvg = v1.62.0-test (gates/model change)") {
+		t.Errorf("output missing calibration.pvg line, got %q", out)
+	}
+
+	// The stamp keys must appear in the written YAML.
+	data, err := os.ReadFile(filepath.Join(dir, ".vault", "knowledge", ".settings.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(data)
+	if !strings.Contains(content, "calibration.stamped: 2026-08-01") {
+		t.Errorf("written YAML missing calibration.stamped, got:\n%s", content)
+	}
+	if !strings.Contains(content, "calibration.pvg: v1.62.0-test") {
+		t.Errorf("written YAML missing calibration.pvg, got:\n%s", content)
+	}
+}
+
+func TestRunSetModel_StampsCalibration(t *testing.T) {
+	dir := chdirTemp(t)
+	pinCalibration(t, time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC), "v1.62.0-test")
+
+	if _, runErr := captureStdout(t, func() error { return Run([]string{"model.developer=sonnet"}) }); runErr != nil {
+		t.Fatalf("Run set model.developer=sonnet: %v", runErr)
+	}
+
+	loaded := LoadFile(filepath.Join(dir, ".vault", "knowledge", ".settings.yaml"))
+	if loaded["calibration.stamped"] != "2026-08-01" {
+		t.Errorf("expected calibration.stamped '2026-08-01', got %q", loaded["calibration.stamped"])
+	}
+	if loaded["calibration.pvg"] != "v1.62.0-test" {
+		t.Errorf("expected calibration.pvg 'v1.62.0-test', got %q", loaded["calibration.pvg"])
+	}
+}
+
+func TestRunClearModel_StampsCalibration(t *testing.T) {
+	// Clearing an override (model.developer=) is itself a calibration change.
+	dir := chdirTemp(t)
+	pinCalibration(t, time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC), "v1.62.0-test")
+
+	if _, runErr := captureStdout(t, func() error { return Run([]string{"model.developer="}) }); runErr != nil {
+		t.Fatalf("Run clear model.developer: %v", runErr)
+	}
+
+	loaded := LoadFile(filepath.Join(dir, ".vault", "knowledge", ".settings.yaml"))
+	if loaded["calibration.stamped"] != "2026-08-01" {
+		t.Errorf("expected calibration.stamped '2026-08-01', got %q", loaded["calibration.stamped"])
+	}
+	if loaded["calibration.pvg"] != "v1.62.0-test" {
+		t.Errorf("expected calibration.pvg 'v1.62.0-test', got %q", loaded["calibration.pvg"])
+	}
+}
+
+func TestRunSetNonCalibrationKey_DoesNotStamp(t *testing.T) {
+	dir := chdirTemp(t)
+	pinCalibration(t, time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC), "v1.62.0-test")
+
+	out, runErr := captureStdout(t, func() error { return Run([]string{"staleness_days=15"}) })
+	if runErr != nil {
+		t.Fatalf("Run set staleness_days: %v", runErr)
+	}
+	if strings.Contains(out, "stamped calibration") {
+		t.Errorf("non-calibration key must not stamp, got %q", out)
+	}
+
+	loaded := LoadFile(filepath.Join(dir, ".vault", "knowledge", ".settings.yaml"))
+	if _, ok := loaded["calibration.stamped"]; ok {
+		t.Errorf("calibration.stamped must not persist, got %q", loaded["calibration.stamped"])
+	}
+	if _, ok := loaded["calibration.pvg"]; ok {
+		t.Errorf("calibration.pvg must not persist, got %q", loaded["calibration.pvg"])
+	}
+}
+
+func TestRunningVersion_DevFallback(t *testing.T) {
+	oldVer := BuildVersion
+	defer func() { BuildVersion = oldVer }()
+
+	BuildVersion = ""
+	if got := RunningVersion(); got != "dev" {
+		t.Errorf("RunningVersion with empty BuildVersion = %q, want 'dev'", got)
+	}
+	BuildVersion = "v1.62.0"
+	if got := RunningVersion(); got != "v1.62.0" {
+		t.Errorf("RunningVersion = %q, want 'v1.62.0'", got)
 	}
 }
 
