@@ -505,6 +505,9 @@ func TestCheckDispatcher_BashAllowsReadsThatNameDFArtifacts(t *testing.T) {
 		`cat BUSINESS.md DESIGN.md ARCHITECTURE.md | wc -l`,
 		`ls -la ARCHITECTURE.md 2>/dev/null`,
 		`cp ARCHITECTURE.md /tmp/backup-arch.md`,
+		// A '>' inside a quoted pattern is data, not a redirect operator.
+		`grep -n "^>" design/BUILD.md; grep -n "x" ARCHITECTURE.md`,
+		`awk '$2 > 10' BUSINESS.md`,
 	}
 	for _, command := range reads {
 		t.Run(command, func(t *testing.T) {

@@ -29,14 +29,14 @@ import (
 // (<<<WORD) from being mistaken for a heredoc.
 var heredocRe = regexp.MustCompile(`(?:^|[^<])<<-?[ \t]*(?:'([^']*)'|"([^"]*)"|([A-Za-z_][A-Za-z0-9_]*))`)
 
-// bashWriteTargets returns the paths command appears to write to: redirect
-// targets plus the written operands of common write utilities. Reads
+// bashWriteTargets returns the paths command appears to write to: output
+// redirect targets plus the written operands of common write utilities. Reads
 // (grep/awk/sed -n/cat/head/tail/less) contribute nothing.
 func bashWriteTargets(command string) []string {
-	stripped := stripHeredocBodies(command)
+	parsed := parseShell(stripHeredocBodies(command))
 
-	targets := redirectTargets(stripped)
-	for _, segment := range shellSegments(stripped) {
+	targets := parsed.redirects
+	for _, segment := range parsed.segments {
 		targets = append(targets, segmentWriteTargets(segment)...)
 	}
 	return targets
@@ -78,18 +78,34 @@ func heredocDelimiter(line string) string {
 	return ""
 }
 
-// shellSegments splits command into simple commands (breaking at unquoted
-// ; | & && || newline and subshell parens) and returns each as its tokens,
-// unquoted. Redirect operators and their target tokens are dropped: targets
-// are collected separately by redirectTargets, and leaving them in would make
-// them look like operands of the utility being run.
-func shellSegments(command string) [][]string {
+// parsedCommand is one shell command line, split into the simple commands it
+// runs and the paths its output redirections target.
+type parsedCommand struct {
+	segments  [][]string
+	redirects []string
+}
+
+// redirect kinds for the token that follows a redirection operator.
+const (
+	redirectNone = iota
+	redirectIn   // input redirect: the target is read, not written
+	redirectOut  // output redirect: the target is written
+)
+
+// parseShell splits command into simple commands (breaking at unquoted
+// ; | & && || newline and subshell parens), returning each as its unquoted
+// tokens, and collects the target of every output redirection.
+//
+// Quoting is honored throughout, which is the whole point: a '>' inside a
+// grep pattern (grep -n "^>" design/ARCHITECTURE.md) is data, not a redirect,
+// and must not turn the file being READ into a write target.
+func parseShell(command string) parsedCommand {
 	var (
-		segments [][]string
+		parsed   parsedCommand
 		current  []string
 		token    strings.Builder
 		hasToken bool
-		dropNext bool
+		pending  = redirectNone
 	)
 
 	flush := func() {
@@ -99,8 +115,11 @@ func shellSegments(command string) [][]string {
 		word := token.String()
 		token.Reset()
 		hasToken = false
-		if dropNext {
-			dropNext = false
+		if pending != redirectNone {
+			if pending == redirectOut && word != "" {
+				parsed.redirects = append(parsed.redirects, word)
+			}
+			pending = redirectNone
 			return
 		}
 		current = append(current, word)
@@ -108,10 +127,10 @@ func shellSegments(command string) [][]string {
 	endSegment := func() {
 		flush()
 		if len(current) > 0 {
-			segments = append(segments, current)
+			parsed.segments = append(parsed.segments, current)
 			current = nil
 		}
-		dropNext = false
+		pending = redirectNone
 	}
 
 	for i := 0; i < len(command); i++ {
@@ -135,21 +154,24 @@ func shellSegments(command string) [][]string {
 			endSegment()
 		case ch == '<' || ch == '>':
 			flush()
-			i = skipRedirectOperator(command, i, &dropNext)
+			i, pending = skipRedirectOperator(command, i)
 		default:
 			hasToken = true
 			token.WriteByte(ch)
 		}
 	}
 	endSegment()
-	return segments
+	return parsed
 }
 
-// skipRedirectOperator consumes the redirection operator starting at i and
-// reports (via dropNext) whether the following word is its path target. It
-// returns the index of the operator's last byte. Fd duplication (2>&1, >&2)
-// has no path target.
-func skipRedirectOperator(command string, i int, dropNext *bool) int {
+// skipRedirectOperator consumes the redirection operator starting at i. It
+// returns the index of the operator's last byte and the kind of target that
+// follows. Fd duplication (2>&1, >&2) has no path target.
+func skipRedirectOperator(command string, i int) (int, int) {
+	kind := redirectOut
+	if command[i] == '<' {
+		kind = redirectIn
+	}
 	j := i + 1
 	if j < len(command) && command[j] == command[i] { // >> or <<
 		j++
@@ -163,12 +185,11 @@ func skipRedirectOperator(command string, i int, dropNext *bool) int {
 			k++
 		}
 		if k > j+1 { // >&N: fd duplication, no path follows
-			return k - 1
+			return k - 1, redirectNone
 		}
 		j++ // `>& file`: a path does follow
 	}
-	*dropNext = true
-	return j - 1
+	return j - 1, kind
 }
 
 // inPlaceFlags mark an editor invocation that rewrites its file operands.

@@ -18,6 +18,9 @@ func TestBashWriteTargets(t *testing.T) {
 		{"sed read", `sed -n '1,20p' ARCHITECTURE.md`, nil},
 		{"head tail", `head -5 DESIGN.md | tail -1`, nil},
 		{"stderr redirect", `ls DESIGN.md 2>/dev/null`, []string{"/dev/null"}},
+		// A '>' inside a quoted pattern is data, not a redirect.
+		{"quoted angle bracket", `grep -n "^>" design/BUILD.md; grep -n x ARCHITECTURE.md`, nil},
+		{"single quoted angle bracket", `awk '$1 > 3' BUSINESS.md`, nil},
 		{"fd duplication", `make build ARCHITECTURE.md 2>&1 | tee build.log`, []string{"build.log"}},
 
 		// Redirects.
