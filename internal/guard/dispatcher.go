@@ -6,6 +6,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/paivot-ai/pvg/internal/design"
 	"github.com/paivot-ai/pvg/internal/dispatcher"
 	"github.com/paivot-ai/pvg/internal/settings"
 )
@@ -76,13 +77,7 @@ func checkDFFilePath(projectRoot, root string, state *dispatcher.State, filePath
 		return Result{Allowed: true}
 	}
 
-	// Fixture copies of D&F basenames are not D&F artifacts.
-	if isFixturePath(filePath) {
-		return Result{Allowed: true}
-	}
-
-	base := filepath.Base(filePath)
-	agentName, isDFFile := dfAgentFor(root, base)
+	artifact, agentName, isDFFile := dfArtifactForPath(root, filePath)
 	if !isDFFile {
 		return Result{Allowed: true}
 	}
@@ -93,64 +88,35 @@ func checkDFFilePath(projectRoot, root string, state *dispatcher.State, filePath
 
 	return Result{
 		Allowed: false,
-		Reason:  dfBlockMsg(base, agentName),
+		Reason:  dfBlockMsg(artifact, agentName),
 	}
 }
 
+// checkDFBashCommand guards WRITE INTENT at a resolved path: only the paths
+// the command actually writes to (see bashWriteTargets) are tested against the
+// D&F artifact set. A command that merely NAMES an artifact -- a grep/awk read,
+// or a heredoc whose prose mentions "BUSINESS.md" while writing another file --
+// is not a write and passes.
 func checkDFBashCommand(projectRoot, root string, state *dispatcher.State, command string) Result {
 	if command == "" {
 		return Result{Allowed: true}
 	}
 
-	// Fixed-name D&F artifacts (BUSINESS.md, DESIGN.md, ARCHITECTURE.md).
-	for artifact, agentName := range dfArtifacts {
-		if !strings.Contains(command, artifact) {
+	for _, target := range bashWriteTargets(command) {
+		artifact, agentName, isDFFile := dfArtifactForPath(root, target)
+		if !isDFFile {
 			continue
 		}
-		if commandTargetsOnlyFixtures(command, artifact) {
+		if dfWriteAllowed(projectRoot, state, agentName) {
 			continue
 		}
-		if commandHasWriteOp(command, artifact) && !dfWriteAllowed(projectRoot, state, agentName) {
-			return Result{
-				Allowed: false,
-				Reason:  dfBlockMsg(artifact, agentName),
-			}
-		}
-	}
-
-	// Domain model (variable *.modelith.yaml basename), architect-owned, only
-	// when dnf.domain_model is enabled for the project.
-	if strings.Contains(command, modelithSuffix) && domainModelEnabled(root) &&
-		!commandTargetsOnlyFixtures(command, modelithSuffix) {
-		if commandHasWriteOp(command, modelithSuffix) && !dfWriteAllowed(projectRoot, state, "architect") {
-			return Result{
-				Allowed: false,
-				Reason:  dfBlockMsg("*.modelith.yaml", "architect"),
-			}
+		return Result{
+			Allowed: false,
+			Reason:  dfBlockMsg(artifact, agentName),
 		}
 	}
 
 	return Result{Allowed: true}
-}
-
-// commandHasWriteOp reports whether command appears to write to the given
-// artifact token, via a redirect targeting it or a common write utility.
-// The utility check is intentionally coarse (matches the artifact anywhere in
-// the command); it mirrors the pre-existing heuristic.
-func commandHasWriteOp(command, artifact string) bool {
-	for _, op := range []string{">>", ">"} {
-		if idx := strings.Index(command, op); idx >= 0 {
-			if strings.Contains(command[idx:], artifact) {
-				return true
-			}
-		}
-	}
-	for _, pattern := range []string{"tee ", "cp ", "mv ", "cat >", "sed -i", "perl -pi"} {
-		if strings.Contains(command, pattern) {
-			return true
-		}
-	}
-	return false
 }
 
 // isFixturePath reports whether filePath lives under a fixture directory: any
@@ -166,54 +132,49 @@ func isFixturePath(filePath string) bool {
 	return false
 }
 
-// commandTargetsOnlyFixtures reports whether every occurrence of artifact in
-// command sits inside a fixture path (see isFixturePath). Each occurrence is
-// expanded to its surrounding whitespace-delimited token with common wrappers
-// (quotes, parentheses, leading redirects) stripped. A single non-fixture
-// occurrence returns false: a command touching both a fixture and a real D&F
-// file must still block.
-func commandTargetsOnlyFixtures(command, artifact string) bool {
-	found := false
-	for idx := strings.Index(command, artifact); idx >= 0; {
-		found = true
-		start := idx
-		for start > 0 && !isShellSpace(command[start-1]) {
-			start--
-		}
-		end := idx + len(artifact)
-		for end < len(command) && !isShellSpace(command[end]) {
-			end++
-		}
-		token := strings.Trim(command[start:end], "\"'`()")
-		token = strings.TrimLeft(token, "><")
-		if !isFixturePath(token) {
-			return false
-		}
-		rest := strings.Index(command[idx+len(artifact):], artifact)
-		if rest < 0 {
-			break
-		}
-		idx = idx + len(artifact) + rest
+// isMachineryDesignPath reports whether filePath lives under the machinery
+// design tree (design/ by default, or the "design" key of .machinery.json).
+//
+// The two toolchains use the same basename for different documents: Paivot's
+// architect owns ARCHITECTURE.md at the repo root, while machinery owns
+// design/ARCHITECTURE.md (the C4 model plus Architecture Contract, maintained
+// by the conductor and verified by machinery's G2 gate). Guarding the
+// machinery copy would make it unmaintainable, so the design tree is carved
+// out of the fixed-basename protection. The carve-out is deliberately NOT
+// applied to *.modelith.yaml: under dnf.domain_model the domain model IS the
+// architect's D&F artifact and conventionally lives in design/.
+func isMachineryDesignPath(root, filePath string) bool {
+	cfg, _ := design.Load(root)
+	dir := strings.Trim(filepath.ToSlash(cfg.Dir), "/")
+	if dir == "" {
+		return false
 	}
-	return found
+	p := filepath.ToSlash(filePath)
+	return strings.HasPrefix(p, dir+"/") ||
+		strings.HasPrefix(p, "./"+dir+"/") ||
+		strings.Contains(p, "/"+dir+"/")
 }
 
-func isShellSpace(b byte) bool {
-	return b == ' ' || b == '\t' || b == '\n'
-}
-
-// dfAgentFor resolves the owning BLT agent for a D&F artifact basename.
-// Fixed artifacts come from dfArtifacts. A *.modelith.yaml domain model is
+// dfArtifactForPath resolves a path to the D&F artifact it is (its display
+// name and owning BLT agent). Fixed artifacts come from dfArtifacts, minus the
+// fixture and machinery-design carve-outs. A *.modelith.yaml domain model is
 // architect-owned, but only when dnf.domain_model is enabled for the project
 // (root is the orchestrator root that owns the settings file).
-func dfAgentFor(root, base string) (string, bool) {
+func dfArtifactForPath(root, path string) (string, string, bool) {
+	if path == "" || isFixturePath(path) {
+		return "", "", false
+	}
+	base := filepath.Base(path)
 	if agentName, ok := dfArtifacts[base]; ok {
-		return agentName, true
+		if isMachineryDesignPath(root, path) {
+			return "", "", false
+		}
+		return base, agentName, true
 	}
 	if strings.HasSuffix(base, modelithSuffix) && domainModelEnabled(root) {
-		return "architect", true
+		return base, "architect", true
 	}
-	return "", false
+	return "", "", false
 }
 
 // domainModelEnabled reports whether dnf.domain_model is enabled for the project

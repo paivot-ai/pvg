@@ -491,6 +491,131 @@ func TestCheckDispatcher_BlocksModelith_NonFixture_WhenEnabled(t *testing.T) {
 	}
 }
 
+// Write-intent carve-out: the guard fires on a WRITE to a resolved artifact
+// path, never on the artifact NAME appearing in the command text.
+
+func TestCheckDispatcher_BashAllowsReadsThatNameDFArtifacts(t *testing.T) {
+	dir, _ := setupDispatcher(t)
+	reads := []string{
+		`awk '/pattern/' design/BUILD.md; grep -n "contract" design/ARCHITECTURE.md`,
+		`grep -n "scope" ARCHITECTURE.md`,
+		`sed -n '1,40p' BUSINESS.md`,
+		`head -20 DESIGN.md`,
+		`tail -5 ARCHITECTURE.md`,
+		`cat BUSINESS.md DESIGN.md ARCHITECTURE.md | wc -l`,
+		`ls -la ARCHITECTURE.md 2>/dev/null`,
+		`cp ARCHITECTURE.md /tmp/backup-arch.md`,
+	}
+	for _, command := range reads {
+		t.Run(command, func(t *testing.T) {
+			input := HookInput{ToolName: "Bash", ToolInput: ToolInput{Command: command}}
+			if result := CheckDispatcher(dir, input); !result.Allowed {
+				t.Fatalf("expected read %q allowed, got blocked: %s", command, result.Reason)
+			}
+		})
+	}
+}
+
+func TestCheckDispatcher_BashAllowsHeredocMentioningDFArtifacts(t *testing.T) {
+	dir, _ := setupDispatcher(t)
+	command := "cat > design/DECISIONS.md <<'EOF'\n" +
+		"## D-012\n" +
+		"Supersedes the BUSINESS.md framing and the DESIGN.md persona table.\n" +
+		"EOF"
+	input := HookInput{ToolName: "Bash", ToolInput: ToolInput{Command: command}}
+	if result := CheckDispatcher(dir, input); !result.Allowed {
+		t.Fatalf("expected heredoc writing a non-guarded file allowed, got blocked: %s", result.Reason)
+	}
+}
+
+func TestCheckDispatcher_BashStillBlocksWritesToDFArtifacts(t *testing.T) {
+	dir, _ := setupDispatcher(t)
+	writes := []string{
+		`cat draft.md > ARCHITECTURE.md`,
+		`echo "x" >> BUSINESS.md`,
+		`echo x | tee DESIGN.md`,
+		`sed -i 's/a/b/' ARCHITECTURE.md`,
+		`perl -pi -e 's/a/b/' BUSINESS.md`,
+		`mv draft.md DESIGN.md`,
+		`rm ARCHITECTURE.md`,
+		"cat > ARCHITECTURE.md <<'EOF'\nbody\nEOF",
+	}
+	for _, command := range writes {
+		t.Run(command, func(t *testing.T) {
+			input := HookInput{ToolName: "Bash", ToolInput: ToolInput{Command: command}}
+			if result := CheckDispatcher(dir, input); result.Allowed {
+				t.Fatalf("expected write %q to stay blocked", command)
+			}
+		})
+	}
+}
+
+// Path scoping: the machinery design tree owns design/ARCHITECTURE.md (C4
+// model plus Architecture Contract); Paivot's architect owns the root copy.
+
+func TestCheckDispatcher_AllowsWriteToMachineryDesignArchitecture(t *testing.T) {
+	dir, _ := setupDispatcher(t)
+	for _, rel := range []string{"ARCHITECTURE.md", "BUSINESS.md", "DESIGN.md"} {
+		t.Run(rel, func(t *testing.T) {
+			input := HookInput{
+				ToolName:  "Write",
+				ToolInput: ToolInput{FilePath: filepath.Join(dir, "design", rel)},
+			}
+			if result := CheckDispatcher(dir, input); !result.Allowed {
+				t.Fatalf("expected design/%s write allowed, got blocked: %s", rel, result.Reason)
+			}
+		})
+	}
+}
+
+func TestCheckDispatcher_BashAllowsWriteToMachineryDesignArchitecture(t *testing.T) {
+	dir, _ := setupDispatcher(t)
+	input := HookInput{
+		ToolName:  "Bash",
+		ToolInput: ToolInput{Command: `cat draft.md > design/ARCHITECTURE.md`},
+	}
+	if result := CheckDispatcher(dir, input); !result.Allowed {
+		t.Fatalf("expected design/ARCHITECTURE.md redirect allowed, got blocked: %s", result.Reason)
+	}
+}
+
+func TestCheckDispatcher_BlocksWriteToRootArchitectureBesideDesignTree(t *testing.T) {
+	dir, _ := setupDispatcher(t)
+	input := HookInput{
+		ToolName:  "Write",
+		ToolInput: ToolInput{FilePath: filepath.Join(dir, "ARCHITECTURE.md")},
+	}
+	if result := CheckDispatcher(dir, input); result.Allowed {
+		t.Fatal("expected root ARCHITECTURE.md write to stay blocked")
+	}
+}
+
+func TestCheckDispatcher_AllowsWriteToConfiguredMachineryDesignDir(t *testing.T) {
+	dir, _ := setupDispatcher(t)
+	// .machinery.json relocates the design tree; the carve-out follows it.
+	if err := os.WriteFile(filepath.Join(dir, ".machinery.json"),
+		[]byte(`{"design":"blueprint"}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	input := HookInput{
+		ToolName:  "Write",
+		ToolInput: ToolInput{FilePath: filepath.Join(dir, "blueprint", "ARCHITECTURE.md")},
+	}
+	if result := CheckDispatcher(dir, input); !result.Allowed {
+		t.Fatalf("expected blueprint/ARCHITECTURE.md write allowed, got blocked: %s", result.Reason)
+	}
+
+	// The default design/ name is no longer the design tree: it stays guarded.
+	input = HookInput{
+		ToolName:  "Write",
+		ToolInput: ToolInput{FilePath: filepath.Join(dir, "design", "ARCHITECTURE.md")},
+	}
+	if result := CheckDispatcher(dir, input); result.Allowed {
+		t.Fatal("expected design/ARCHITECTURE.md blocked when the design dir is blueprint/")
+	}
+}
+
 func TestCheckDispatcher_BashBlocksMutatingNDCommandFromCoordinator(t *testing.T) {
 	root, _ := setupDispatcher(t)
 	input := HookInput{
