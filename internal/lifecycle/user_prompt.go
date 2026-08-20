@@ -32,7 +32,9 @@ const dispatcherActivationContext = "DISPATCHER MODE ACTIVE. You are a coordinat
 	"check for a QUESTIONS_FOR_USER block BEFORE checking for a document. " +
 	"The agent's first output in any D&F engagement MUST be questions, not a document. " +
 	"If the agent produced a document on its first turn without any questioning round, " +
-	"this is a protocol violation -- re-spawn the agent with an explicit reminder to ask questions first."
+	"this is a protocol violation -- re-spawn the agent with an explicit reminder to ask questions first. " +
+	"MACHINERY-FIRST PROJECTS: when design.machinery applies and the design tree (design/BUILD.md, the Architecture Contract, the oracles) is complete and green, " +
+	"skip D&F entirely -- spawn no BLT agent, never the Architect -- and spawn the Sr PM directly from design/ and the PRD; the design tree is read-only for delivery agents."
 
 // dispatcherReminderContext is the concise nudge injected on every prompt when
 // dispatcher mode is already active. This survives context compaction by being

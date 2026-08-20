@@ -28,20 +28,43 @@ func runComplexity(files []string, mode string, warnCC, blockCC int) ([]Finding,
 		return nil, ""
 	}
 
-	// Prefer lizard across all files.
-	if _, err := lookPath("lizard"); err == nil {
-		hits, err := lizardHits(files)
-		if err != nil {
-			return nil, fmt.Sprintf("complexity: lizard failed (%v)", err)
+	// Elixir first: lizard cannot measure it, and handing it .ex files would
+	// read as zero functions (a silent pass). credo measures it when the
+	// project has it; otherwise the files are reported as skipped by name.
+	var hits []complexityHit
+	var notes []string
+	elixirFiles, files := splitElixir(files)
+	if len(elixirFiles) > 0 {
+		if credoAvailable() {
+			h, err := credoHits(elixirFiles)
+			if err != nil {
+				notes = append(notes, fmt.Sprintf("complexity: credo failed (%v)", err))
+			} else {
+				hits = append(hits, h...)
+			}
+		} else {
+			notes = append(notes, credoSkipNote(len(elixirFiles)))
 		}
-		return complexityFindings(hits, mode, warnCC, blockCC), ""
+	}
+	if len(files) == 0 {
+		return complexityFindings(hits, mode, warnCC, blockCC), strings.Join(notes, "; ")
+	}
+
+	// Prefer lizard across the remaining files.
+	if _, err := lookPath("lizard"); err == nil {
+		h, err := lizardHits(files)
+		if err != nil {
+			notes = append(notes, fmt.Sprintf("complexity: lizard failed (%v)", err))
+			return complexityFindings(hits, mode, warnCC, blockCC), strings.Join(notes, "; ")
+		}
+		hits = append(hits, h...)
+		return complexityFindings(hits, mode, warnCC, blockCC), strings.Join(notes, "; ")
 	}
 
 	// Fall back per-language.
 	goFiles := filterExt(files, ".go")
 	pyFiles := filterExt(files, ".py")
 
-	var hits []complexityHit
 	ran := false
 
 	if len(goFiles) > 0 {
@@ -81,10 +104,11 @@ func runComplexity(files []string, mode string, warnCC, blockCC int) ([]Finding,
 		if len(fallbacks) > 0 {
 			note += " -- or " + strings.Join(fallbacks, ", ")
 		}
-		return nil, note
+		notes = append(notes, note)
+		return complexityFindings(hits, mode, warnCC, blockCC), strings.Join(notes, "; ")
 	}
 
-	return complexityFindings(hits, mode, warnCC, blockCC), ""
+	return complexityFindings(hits, mode, warnCC, blockCC), strings.Join(notes, "; ")
 }
 
 // complexityFindings applies the warn/block bands to complexity hits. In warn

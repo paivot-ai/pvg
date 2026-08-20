@@ -206,6 +206,13 @@ they fan out best-effort to mirrors. Available adapters in this build:
 pvg issues create "Title" --body "..." --labels x,y --parent EPIC-1 --priority P1
                                                 # --priority accepts P0-P4 or 0-4 (0 = highest); adapters without
                                                 # priority support ignore it with a stderr warning
+pvg issues create "M1 Trust substrate" --type epic --labels milestone
+                                                # --type is epic|task|feature|bug|story (adapter default when
+                                                # omitted). EPICS MUST BE CREATED WITH --type epic: the lint's
+                                                # epic checks, the loop's `--type epic` listing, and the guard's
+                                                # epic exemption all key on the recorded type, so an epic created
+                                                # as a task is invisible to every one of them. An unknown type is
+                                                # rejected rather than passed through
 pvg issues show <id> [--json]
 pvg issues list [--status S] [--label L] [--parent ID] [--limit N] [--json]
 pvg issues update <id> [--title T] [--body B] [--status S] [--add-label x] [--remove-label x]
@@ -332,7 +339,18 @@ pvg story merge PROJ-a1b [--base epic/EPIC-1]
 # Hard-TDD stories (label: hard-tdd):
 pvg story approve-red PROJ-a1b           # Approve the RED tests; return the story to the queue for GREEN
 pvg story verify-tdd --base <epic-branch> # Guard: fail if GREEN modified/deleted a RED test (additions allowed)
+pvg story sync-oracle --base <ref>        # Map a design revision (oracle stable-id diff, machines and formal)
+                                          # onto the stories that cite the changed rows
 ```
+
+On a machinery-first project `approve-red` runs the design gate over the RED
+gate list, which is the staged `.machinery.json` list minus `gt` (or
+`design.red_gates` verbatim). Gt-tests holds every committed stable id against
+the WHOLE suite, so running it per story would block the first story until the
+last one exists. It is not dropped, only moved: `pvg gates --seal` runs the
+whole-design check with `gt` and `g4` forced in at the milestone seal, and
+`approve-red` still checks the per-story half itself (every stable id the story
+cites must appear whole-token in a test file) so no RED approval loses it.
 
 These helpers centralize the common Paivot story transitions, delivery-proof checks, and merge path that used to live in shell scripts.
 
@@ -476,6 +494,9 @@ the directory.
 pvg gates [path...]        # Metric quality gates on delivered code
 pvg gates --format json    # Structured output (default: text)
 pvg gates --changed <ref>  # Scope to files changed vs a git ref
+pvg gates --seal           # Milestone seal: the WHOLE-DESIGN machinery check with
+                           # Gt-tests and G4-import forced in over the configured
+                           # impl dir (requires "impl" in .machinery.json)
 ```
 
 Measures cyclomatic complexity, copy-paste duplication, and file size against
@@ -484,7 +505,10 @@ and a PASS/FAIL summary. Complexity and duplication shell out to external
 analyzers; when an analyzer is absent the gate SKIPs (never blocks falsely).
 Install `lizard` (`pip install lizard`) and `jscpd` (`npm install -g jscpd`) to
 light up the full gate on virtually any stack -- apt alone is not enough, only
-`radon` ships in the Ubuntu repos. See the analyzer matrix and full key
+`radon` ships in the Ubuntu repos. Elixir takes a separate path: lizard cannot
+measure `.ex`/`.exs` and would report zero functions (a silent pass), so those
+files go to `mix credo`'s CyclomaticComplexity check when the project has credo,
+and are otherwise named in an explicit SKIP note. See the analyzer matrix and full key
 reference in paivot-graph `docs/QUALITY_GATES.md`. `pvg doctor` reports which
 analyzers are present; `pvg setup` nudges you to install the missing ones.
 
@@ -492,8 +516,14 @@ analyzers are present; `pvg setup` nudges you to install the missing ones.
 
 ```bash
 pvg lint [--backlog] [--epic ID] [--json]                 # Backlog quality: id/heading collisions + structure
-pvg rtm [check] [--json]                                  # Requirement traceability matrix (D&F coverage)
-pvg verify [path...] [--format text|json] [--check-e2e]   # Scan source for stubs, thin files, TODO markers
+pvg rtm [check] [--milestone M<n>] [--oracle NAME] [--epic ID] [--json]
+                                                          # Requirement traceability matrix (D&F + oracle coverage)
+pvg verify [path...] [--format text|json] [--check-e2e] [--check-mocks]
+                                                          # Scan source for stubs, thin files, TODO markers;
+                                                          # --check-mocks fails on mock vocabulary in integration
+                                                          # and e2e tests (Mox, Mimic, meck, unittest.mock,
+                                                          # jest/vitest, sinon, nock, msw, gomock, testify/mock,
+                                                          # RSpec doubles, Mockito, mockk, WireMock)
 ```
 
 `pvg verify` is the deterministic pre-delivery/PM check for incomplete code
@@ -502,6 +532,19 @@ first, before any LLM review. `pvg lint` and `pvg rtm` validate the backlog
 itself -- id/heading collisions, structural integrity, and D&F requirement
 coverage.
 
+On a machinery-first project (`design.machinery` on) `pvg rtm` also turns every
+committed oracle stable id into a requirement matched whole-token: the machine
+transition rows under `design/machines/` AND the formal decision rows under
+`design/formal/` (Policy, Isolation), which machinery's Gt covers and pvg used
+to ignore. Closed stories count as coverage (delivered work, flagged as such),
+so an incremental run after a milestone closes stays green. Scoping keeps the
+two axes separate: `--milestone M1` and `--oracle NAME` narrow WHICH ids must be
+covered (the M1 block of `design/BUILD.md`, or the named oracles), while
+`--epic ID` narrows WHICH stories may cover them (the epic's whole subtree,
+nested epics included). Milestone scope is deliberately over-inclusive: rows the
+plan defers to a later layer surface for the reviewer to adjudicate rather than
+disappearing from every scope.
+
 ### Dispatcher mode
 
 ```bash
@@ -509,6 +552,21 @@ pvg dispatcher on       # Enable (orchestrator becomes coordinator-only)
 pvg dispatcher off      # Disable
 pvg dispatcher status   # Show state and active BLT agents
 ```
+
+Read-only help (`pvg nd create --help`, `pvg issues create --help`) is allowed
+for the coordinator: asking a subcommand what its flags are mutates nothing. A
+help flag on one segment never exempts a mutation in another, and a `--help`
+mentioned inside a quoted argument is prose, not a flag.
+
+**The machinery design tree is read-only for delivery agents.** When
+`design.machinery` applies, writes under the design dir are blocked for the
+Sr PM, developer, PM, and Anchor, and for the coordinator while an execution
+loop runs. The machinery plugin's own hook already denies hand-edits to
+GENERATED artifacts; this covers the SOURCES too (`BUILD.md`,
+`ARCHITECTURE.md`, `domain.modelith.yaml`, `*.machine.json`, `workspace.dsl`),
+because a developer that "fixes" a failing oracle-derived test by editing the
+design breaks the chain every gate hangs on. Reads are never blocked, the
+Architect path stays open, and with the substrate off the rule does not exist.
 
 ### Vault seeding
 
@@ -532,6 +590,19 @@ Per-role model overrides (`model.developer`, `model.pm`, `model.sr_pm`,
 `model.anchor`, `model.retro`, `model.ba`, `model.designer`, `model.architect`,
 and the `*_challenger` variants) pick the model for each agent without editing
 agent files; an empty value uses the agent's frontmatter default.
+
+Machinery-first delivery settings (all default to off or empty, so a project
+that never sets them behaves exactly as before):
+
+| Setting | Default | What it does |
+|---------|---------|--------------|
+| `design.machinery` | `off` | The substrate switch. USER-ONLY: the guard blocks any agent that tries to set it. `on` promises a design (a missing one then fails loudly); `auto` re-enables artifact detection; artifact presence alone never enables it |
+| `design.red_gates` | empty | The `--gate` list `pvg story approve-red` runs. Empty derives it from `.machinery.json`: the staged list minus `gt`, and without `--impl` when no list is staged |
+| `verify.command` | empty | The project verification workflow the developer runs INLINE before delivery (a command that spawns no subagents, e.g. `/phx:verify`) |
+| `review.command` | empty | The project review workflow the DISPATCHER runs at the epic completion gate (review workflows spawn specialist subagents; the developer and PM cannot, e.g. `/phx:review`) |
+| `hard_tdd.preauthorized` | `false` | Records the user's standing authorization of hard-TDD for every story. `pvg lint --backlog` then requires the `hard-tdd` label on every non-closed story, or `hard-tdd-exempt` plus a `HARD-TDD EXEMPT: <reason>` line (docs, config, discovery only) |
+| `lint.brownfield` | `false` | An EXPLICIT `false` now turns the `paths-exist` check off; only an unset value falls back to the more-than-50-commits heuristic (a greenfield monorepo whose design tree has a long history is not brownfield) |
+| `lint.paths_exist.exclude` | empty | Comma-separated path prefixes `paths-exist` treats as greenfield, e.g. `lib/,test/` |
 
 ### Toolchain convergence
 

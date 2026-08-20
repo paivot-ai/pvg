@@ -18,6 +18,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -157,15 +158,70 @@ func FormatText(r CheckResult) string {
 
 // --- oracle stable ids ---
 
-// OracleFiles lists the committed transition oracles under the design dir.
+// OracleDirs are the design subdirectories that carry generated oracles:
+// machines/ holds the per-machine transition oracles, formal/ holds the
+// relational decision tables (Policy.oracle.md, Isolation.oracle.md). Both
+// carry a "stable id" column and machinery's Gt-tests covers both, so every
+// pvg consumer (rtm, hard-tdd-oracle, approve-red, sync-oracle) keys on
+// both: a formal oracle row is a requirement exactly like a transition row.
+var OracleDirs = []string{"machines", "formal"}
+
+// OracleFiles lists the committed oracles under the design dir (machines/
+// and formal/), sorted by path.
 func OracleFiles(projectRoot string, cfg Config) ([]string, error) {
-	pattern := filepath.Join(projectRoot, filepath.FromSlash(cfg.Dir), "machines", "*.oracle.md")
-	files, err := filepath.Glob(pattern)
-	if err != nil {
-		return nil, err
+	var files []string
+	for _, sub := range OracleDirs {
+		pattern := filepath.Join(projectRoot, filepath.FromSlash(cfg.Dir), sub, "*.oracle.md")
+		matches, err := filepath.Glob(pattern)
+		if err != nil {
+			return nil, err
+		}
+		files = append(files, matches...)
 	}
 	sort.Strings(files)
 	return files, nil
+}
+
+// OracleDirPrefixes returns the design-relative, slash-separated oracle
+// directories ("design/machines", "design/formal") for git path scoping.
+func OracleDirPrefixes(cfg Config) []string {
+	out := make([]string, 0, len(OracleDirs))
+	for _, sub := range OracleDirs {
+		out = append(out, filepath.ToSlash(filepath.Join(cfg.Dir, sub)))
+	}
+	return out
+}
+
+// OracleRel returns the oracle's path relative to the design dir, slash
+// separated ("machines/Deal.oracle.md", "formal/Policy.oracle.md"). A file
+// outside the design dir degrades to its base name.
+func OracleRel(projectRoot string, cfg Config, file string) string {
+	designRoot := filepath.Join(projectRoot, filepath.FromSlash(cfg.Dir))
+	rel, err := filepath.Rel(designRoot, file)
+	if err != nil || strings.HasPrefix(rel, "..") {
+		return filepath.Base(file)
+	}
+	return filepath.ToSlash(rel)
+}
+
+// OracleStem returns the oracle file name without its .oracle.md suffix
+// ("Deal", "Policy").
+func OracleStem(file string) string {
+	return strings.TrimSuffix(filepath.Base(file), ".oracle.md")
+}
+
+// oracleHeadingRe matches the generated H1: "# Generated <kind> oracle: <name>"
+// where <name> may be backticked ("`applicabilityElection`", "policy").
+var oracleHeadingRe = regexp.MustCompile("(?m)^#\\s*Generated\\s+(.+?)\\s+oracle:\\s*`?([A-Za-z0-9_.-]+)`?")
+
+// OracleIdentity returns the oracle's declared kind and name from its
+// generated heading ("transition", "applicabilityElection"; "authorization",
+// "policy"). Absent heading: kind "" and the file stem as the name.
+func OracleIdentity(file, content string) (kind, name string) {
+	if m := oracleHeadingRe.FindStringSubmatch(content); m != nil {
+		return strings.TrimSpace(m[1]), m[2]
+	}
+	return "", OracleStem(file)
 }
 
 // OracleRows parses a generated oracle's Transitions table into stable id ->
@@ -207,25 +263,131 @@ func splitTableRow(row string) []string {
 	return strings.Split(row, "|")
 }
 
-// StableIDs returns every stable id across the project's oracles, sorted,
-// with the oracle file (base name) each came from.
+// StableIDs returns every stable id across the project's oracles (machines
+// and formal), mapped to the design-relative oracle path each came from
+// ("machines/Deal.oracle.md", "formal/Policy.oracle.md").
 func StableIDs(projectRoot string, cfg Config) (map[string]string, error) {
-	files, err := OracleFiles(projectRoot, cfg)
+	oracles, err := LoadOracles(projectRoot, cfg)
 	if err != nil {
 		return nil, err
 	}
 	ids := map[string]string{}
+	for _, o := range oracles {
+		for _, id := range o.IDs {
+			ids[id] = o.Rel
+		}
+	}
+	return ids, nil
+}
+
+// Oracle is one committed oracle file with its parsed identity and ids.
+type Oracle struct {
+	Path string   // absolute path
+	Rel  string   // design-relative, slash separated
+	Kind string   // "transition", "authorization", "tenant-scoping", ... ("" when no heading)
+	Name string   // declared name ("applicabilityElection", "policy") or the file stem
+	IDs  []string // stable ids, sorted
+}
+
+// Formal reports whether the oracle lives under formal/ (a relational
+// decision table) rather than machines/ (a transition oracle).
+func (o Oracle) Formal() bool {
+	return strings.HasPrefix(o.Rel, "formal/")
+}
+
+// LoadOracles parses every committed oracle, sorted by design-relative path.
+func LoadOracles(projectRoot string, cfg Config) ([]Oracle, error) {
+	files, err := OracleFiles(projectRoot, cfg)
+	if err != nil {
+		return nil, err
+	}
+	oracles := make([]Oracle, 0, len(files))
 	for _, f := range files {
 		data, rerr := os.ReadFile(f)
 		if rerr != nil {
 			return nil, fmt.Errorf("read oracle %s: %w", f, rerr)
 		}
-		base := filepath.Base(f)
-		for id := range OracleRows(string(data)) {
-			ids[id] = base
+		content := string(data)
+		kind, name := OracleIdentity(f, content)
+		rows := OracleRows(content)
+		ids := make([]string, 0, len(rows))
+		for id := range rows {
+			ids = append(ids, id)
+		}
+		sort.Strings(ids)
+		oracles = append(oracles, Oracle{
+			Path: f,
+			Rel:  OracleRel(projectRoot, cfg, f),
+			Kind: kind,
+			Name: name,
+			IDs:  ids,
+		})
+	}
+	sort.Slice(oracles, func(i, j int) bool { return oracles[i].Rel < oracles[j].Rel })
+	return oracles, nil
+}
+
+// MatchesSelector reports whether a user-supplied selector names this
+// oracle: its declared name, file stem, base name, or design-relative path,
+// compared case-insensitively ("tenant", "Tenant.oracle.md",
+// "machines/Tenant.oracle.md", "formal/Policy", "policy" all resolve).
+func (o Oracle) MatchesSelector(sel string) bool {
+	s := strings.ToLower(strings.TrimSpace(sel))
+	if s == "" {
+		return false
+	}
+	candidates := []string{o.Name, OracleStem(o.Path), filepath.Base(o.Path), o.Rel, strings.TrimSuffix(o.Rel, ".oracle.md")}
+	for _, c := range candidates {
+		if strings.ToLower(c) == s {
+			return true
 		}
 	}
-	return ids, nil
+	return false
+}
+
+// kindAliases are the conventional short forms of a formal oracle's kind, so
+// the plan's test-id convention ("P-authz-oracle" for the authorization
+// table, per machinery's go-crm reference suite) selects the oracle.
+var kindAliases = map[string][]string{
+	"authorization": {"authz"},
+}
+
+// NamedIn reports whether a prose block (a BUILD.md milestone) names this
+// oracle. Transition oracles match on their machine name or file stem as a
+// whole token, case-insensitively ("the `ErasureRequest` machine",
+// "erasureRequest"). Formal oracles carry generic names ("policy",
+// "isolation") that would collide with ordinary prose, so they match only
+// on an oracle-qualified mention: the file name (Policy.oracle.md), or the
+// name or kind immediately followed by "-oracle", " oracle", or ".oracle"
+// (T-isolation-oracle, "the authorization oracle", "policy.oracle").
+func (o Oracle) NamedIn(block string) bool {
+	lower := strings.ToLower(block)
+	if o.Formal() {
+		if strings.Contains(lower, strings.ToLower(filepath.Base(o.Path))) {
+			return true
+		}
+		aliases := []string{o.Name, o.Kind}
+		aliases = append(aliases, kindAliases[strings.ToLower(o.Kind)]...)
+		for _, alias := range aliases {
+			alias = strings.ToLower(strings.TrimSpace(alias))
+			if alias == "" {
+				continue
+			}
+			for _, suffix := range []string{"-oracle", " oracle", ".oracle"} {
+				if strings.Contains(lower, alias+suffix) {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	for _, alias := range []string{o.Name, OracleStem(o.Path)} {
+		alias = strings.ToLower(strings.TrimSpace(alias))
+		if alias != "" && TokenIn(alias, lower) {
+			return true
+		}
+	}
+	return false
 }
 
 // TokenIn reports whether token appears in text as a whole token (no

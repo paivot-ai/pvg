@@ -287,6 +287,106 @@ func ValidateEpic(projectRoot, epicID string) error {
 	return nil
 }
 
+// ValidateDispatchEpic is ValidateEpic plus the nested-model rule: a
+// container epic (one holding child epics, i.e. a milestone over slice
+// epics) is never a dispatch target. The loop drains slice epics one at a
+// time, each through its own completion gate, and the container seals when
+// the last slice closes (milestone_seal). A children query that fails is
+// read as "not a container" (fail-open to the flat model).
+func ValidateDispatchEpic(projectRoot, epicID string) error {
+	if err := ValidateEpic(projectRoot, epicID); err != nil {
+		return err
+	}
+	if epics := childEpicsOf(projectRoot, epicID); len(epics) > 0 {
+		ids := make([]string, 0, len(epics))
+		for _, e := range epics {
+			ids = append(ids, e.ID)
+		}
+		return fmt.Errorf("%s is a milestone (container) epic holding slice epics %s; target a slice epic instead -- the loop drains slice epics one at a time and seals the milestone when the last one closes", epicID, strings.Join(ids, ", "))
+	}
+	return nil
+}
+
+// childEpicsOf returns the direct children of epicID that are epics. A
+// failed query returns nil (fail-open: the epic is treated as a leaf).
+func childEpicsOf(projectRoot, epicID string) []ndIssue {
+	children, err := runND(projectRoot, "children", epicID, "--json")
+	if err != nil {
+		return nil
+	}
+	var epics []ndIssue
+	for _, c := range children {
+		if strings.EqualFold(c.Type, "epic") {
+			epics = append(epics, c)
+		}
+	}
+	return epics
+}
+
+// IsContainerEpic reports whether the epic holds child epics.
+func IsContainerEpic(projectRoot, epicID string) bool {
+	return len(childEpicsOf(projectRoot, epicID)) > 0
+}
+
+// SealableParent returns the parent container of epicID when every OTHER
+// child of that parent is closed -- the moment the loop finishes epicID's
+// own completion gate, the parent is ready to seal. Empty when epicID has
+// no parent epic, the parent has open siblings, or the queries fail
+// (fail-open: no seal is announced rather than a wrong one).
+func SealableParent(projectRoot, epicID string) (id, title string) {
+	shown, err := runND(projectRoot, "show", epicID, "--json")
+	if err != nil || len(shown) == 0 || shown[0].Parent == "" {
+		return "", ""
+	}
+	parentID := shown[0].Parent
+	parent, err := runND(projectRoot, "show", parentID, "--json")
+	if err != nil || len(parent) == 0 || !strings.EqualFold(parent[0].Type, "epic") || strings.EqualFold(parent[0].Status, "closed") {
+		return "", ""
+	}
+	siblings, err := runND(projectRoot, "children", parentID, "--json")
+	if err != nil {
+		return "", ""
+	}
+	for _, s := range siblings {
+		if s.ID == epicID {
+			continue
+		}
+		if !strings.EqualFold(s.Status, "closed") {
+			return "", ""
+		}
+	}
+	return parentID, parent[0].Title
+}
+
+// FindSealableEpic returns the highest-priority non-closed container epic
+// whose children (slice epics and any direct stories) are ALL closed: a
+// milestone whose seal gate is due. Empty when none qualifies.
+func FindSealableEpic(projectRoot string) (id, title string, err error) {
+	epics, err := runND(projectRoot, "list", "--type", "epic", "--status", "!closed", "--sort", "priority", "--limit", "0", "--json")
+	if err != nil {
+		return "", "", fmt.Errorf("list epics: %w", err)
+	}
+	for _, epic := range epics {
+		children, cerr := runND(projectRoot, "children", epic.ID, "--json")
+		if cerr != nil || len(children) == 0 {
+			continue
+		}
+		container, allClosed := false, true
+		for _, c := range children {
+			if strings.EqualFold(c.Type, "epic") {
+				container = true
+			}
+			if !strings.EqualFold(c.Status, "closed") {
+				allClosed = false
+			}
+		}
+		if container && allClosed {
+			return epic.ID, epic.Title, nil
+		}
+	}
+	return "", "", nil
+}
+
 // runND executes an nd command and parses JSON output.
 // Returns empty slice (not error) when nd outputs nothing.
 func runND(projectRoot string, args ...string) ([]ndIssue, error) {
@@ -427,6 +527,11 @@ func AutoSelectEpic(projectRoot string, exclude ...string) (string, string, erro
 
 	for _, epic := range epics {
 		if excludeSet[epic.ID] {
+			continue
+		}
+		// Container (milestone) epics are never dispatch targets: their work
+		// is reached through their slice epics, which are listed here too.
+		if IsContainerEpic(projectRoot, epic.ID) {
 			continue
 		}
 		queues, err := queryQueues(projectRoot, epic.ID)

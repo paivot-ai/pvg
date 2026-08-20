@@ -38,6 +38,11 @@ type StopConfig struct {
 	Blocked          int
 	Other            int
 	EpicPendingMerge bool // true when the target epic branch exists but hasn't been merged to main
+	// SealPending names a milestone (container) epic whose slice epics are
+	// all closed while the milestone itself is still open: its seal gate
+	// (whole-design check, Anchor seal review, close) has not run. Blocks
+	// exit like a pending epic merge.
+	SealPending string
 	// WorkSignature is the current work-state fingerprint (counts tuple plus
 	// sorted in_progress story ids; see ComputeWorkSignature). PrevSignature
 	// is the fingerprint recorded at the previous blocked stop
@@ -92,6 +97,18 @@ func EvaluateStop(cfg StopConfig) StopDecision {
 			Reason:         "Epic completion gate pending -- merge epic to main before exit",
 			NewIteration:   nextIter,
 			NewConsecWaits: 0, // reset: this is real work, not a wait
+			NewWaitIters:   cfg.WaitIterations,
+		}
+	}
+
+	// All slices of a milestone closed but the milestone itself is open:
+	// the seal gate is pending and the loop may not exit past it.
+	if total == 0 && cfg.SealPending != "" {
+		return StopDecision{
+			Allow:          false,
+			Reason:         "Milestone seal gate pending for " + cfg.SealPending + " -- run pvg gates --seal, the Anchor seal review, and close the milestone epic before exit",
+			NewIteration:   nextIter,
+			NewConsecWaits: 0,
 			NewWaitIters:   cfg.WaitIterations,
 		}
 	}

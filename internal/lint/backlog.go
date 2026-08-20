@@ -85,21 +85,22 @@ type Backlog struct {
 
 // checkRank fixes the grouping order of checks in output.
 var checkRank = map[string]int{
-	"produces-collision":   0,
-	"walking-skeleton":     1,
-	"capstone":             2,
-	"mandatory-skills":     3,
-	"consumes-signature":   4,
-	"consumes-produces":    5,
-	"stale-refs":           6,
-	"external-integration": 7,
-	"atomicity":            8,
-	"vertical-slice":       9,
-	"duplicate-sections":   10,
-	"hard-tdd-oracle":      11,
-	"dep-cycles":           12,
-	"release-gate":         13,
-	"paths-exist":          14,
+	"produces-collision":     0,
+	"walking-skeleton":       1,
+	"capstone":               2,
+	"mandatory-skills":       3,
+	"consumes-signature":     4,
+	"consumes-produces":      5,
+	"stale-refs":             6,
+	"external-integration":   7,
+	"atomicity":              8,
+	"vertical-slice":         9,
+	"duplicate-sections":     10,
+	"hard-tdd-oracle":        11,
+	"hard-tdd-preauthorized": 12,
+	"dep-cycles":             13,
+	"release-gate":           14,
+	"paths-exist":            15,
 }
 
 // scope restricts story-level and epic-level checks when --epic is given.
@@ -151,6 +152,7 @@ func CheckBacklog(opts BacklogOptions) (BacklogResult, error) {
 	findings = append(findings, checkVerticalSlice(b, sc)...)
 	findings = append(findings, checkDuplicateSections(b, sc)...)
 	findings = append(findings, checkHardTDDOracle(b, sc, opts.ProjectRoot, sett)...)
+	findings = append(findings, checkHardTDDPreauthorized(b, sc, sett)...)
 	// Graph-level checks stay global even under --epic: a cycle or a
 	// mis-pointed release gate breaks dispatch regardless of which epic
 	// is being fixed.
@@ -158,7 +160,7 @@ func CheckBacklog(opts BacklogOptions) (BacklogResult, error) {
 	findings = append(findings, checkReleaseGate(b)...)
 
 	if brownfieldEnabled(opts.ProjectRoot, sett) {
-		findings = append(findings, checkPathsExist(b, sc, opts.ProjectRoot)...)
+		findings = append(findings, checkPathsExistExcluding(b, sc, opts.ProjectRoot, pathsExistExcludes(sett))...)
 	}
 
 	sortFindings(findings)
@@ -451,11 +453,17 @@ func buildScope(b *Backlog, epicID string) (scope, error) {
 		return scope{}, fmt.Errorf("%s is not an epic (type: %s)", epicID, epic.Type)
 	}
 
+	// The scope is the epic's whole subtree: a milestone (container) epic
+	// scopes its slice epics and their stories, not just its direct children.
+	epicIDs := map[string]bool{epicID: true}
 	storyIDs := make(map[string]bool)
-	for _, child := range childrenOf(b, epicID) {
-		storyIDs[child.ID] = true
+	for _, desc := range descendantsOf(b, epicID) {
+		storyIDs[desc.ID] = true
+		if isEpic(desc) {
+			epicIDs[desc.ID] = true
+		}
 	}
-	return scope{epicIDs: map[string]bool{epicID: true}, storyIDs: storyIDs}, nil
+	return scope{epicIDs: epicIDs, storyIDs: storyIDs}, nil
 }
 
 // --- shared predicates --------------------------------------------------
@@ -508,6 +516,46 @@ func childrenOf(b *Backlog, epicID string) []*BacklogIssue {
 		}
 	}
 	return children
+}
+
+// descendantsOf returns every issue whose parent chain reaches epicID
+// (children, grandchildren, ...), in deterministic id order per level.
+func descendantsOf(b *Backlog, epicID string) []*BacklogIssue {
+	var out []*BacklogIssue
+	seen := map[string]bool{epicID: true}
+	queue := []string{epicID}
+	for len(queue) > 0 {
+		cur := queue[0]
+		queue = queue[1:]
+		for _, child := range childrenOf(b, cur) {
+			if seen[child.ID] {
+				continue
+			}
+			seen[child.ID] = true
+			out = append(out, child)
+			queue = append(queue, child.ID)
+		}
+	}
+	return out
+}
+
+// childEpicsOf returns the direct children of epicID that are epics.
+func childEpicsOf(b *Backlog, epicID string) []*BacklogIssue {
+	var epics []*BacklogIssue
+	for _, child := range childrenOf(b, epicID) {
+		if isEpic(child) {
+			epics = append(epics, child)
+		}
+	}
+	return epics
+}
+
+// isContainerEpic reports whether the epic holds child epics: a milestone
+// (layer) epic over slice epics in the nested model. A container is never
+// a dispatch target and never closes by story acceptance; it seals when
+// every child slice epic has closed through its own completion gate.
+func isContainerEpic(b *Backlog, epic *BacklogIssue) bool {
+	return len(childEpicsOf(b, epic.ID)) > 0
 }
 
 // --- check: produces-collision -------------------------------------------
@@ -587,19 +635,25 @@ func checkWalkingSkeleton(b *Backlog, sc scope, gates []qualityGate) []Finding {
 			continue
 		}
 
+		// The skeleton may sit anywhere in the milestone's subtree: under a
+		// container (layer) epic it lives in the first slice epic.
 		var skeletons []*BacklogIssue
-		for _, child := range childrenOf(b, epic.ID) {
-			if hasIssueLabel(child, "walking-skeleton") {
-				skeletons = append(skeletons, child)
+		for _, desc := range descendantsOf(b, epic.ID) {
+			if !isEpic(desc) && hasIssueLabel(desc, "walking-skeleton") {
+				skeletons = append(skeletons, desc)
 			}
 		}
 
 		if len(skeletons) == 0 {
+			msg := "milestone epic has no child story labeled 'walking-skeleton'"
+			if isContainerEpic(b, epic) {
+				msg = "milestone epic has no story labeled 'walking-skeleton' in any of its slice epics"
+			}
 			findings = append(findings, Finding{
 				Check:    "walking-skeleton",
 				Severity: SeverityError,
 				IssueID:  epic.ID,
-				Message:  "milestone epic has no child story labeled 'walking-skeleton'",
+				Message:  msg,
 			})
 			continue
 		}
@@ -640,6 +694,17 @@ func checkCapstone(b *Backlog, sc scope) []Finding {
 			continue
 		}
 
+		// Nested model: a container (milestone) epic holds slice epics, and
+		// each slice epic carries its own capstone (the scripted demo). The
+		// container needs no capstone story of its own: it seals when every
+		// slice epic has closed, and its DoD is reviewed at the seal. What it
+		// must NOT do is mix direct stories with slice epics, because those
+		// stories would belong to no slice and no slice gate would run them.
+		if childEpics := childEpicsOf(b, epic.ID); len(childEpics) > 0 {
+			findings = append(findings, checkContainerEpic(epic, children, childEpics)...)
+			continue
+		}
+
 		var capstones []*BacklogIssue
 		for _, child := range children {
 			if hasIssueLabel(child, "capstone") {
@@ -671,6 +736,52 @@ func checkCapstone(b *Backlog, sc scope) []Finding {
 					Message:  fmt.Sprintf("capstone is not blocked_by sibling story %s", sibling.ID),
 				})
 			}
+		}
+	}
+	return findings
+}
+
+// checkContainerEpic validates a milestone epic over slice epics: no direct
+// stories beside the slices (error), and the slices ordered among
+// themselves by blocked_by (review: slices are ordered, each consuming
+// sealed layers and earlier slices of its own layer).
+func checkContainerEpic(epic *BacklogIssue, children, childEpics []*BacklogIssue) []Finding {
+	var findings []Finding
+	var stray []string
+	for _, child := range children {
+		if !isEpic(child) {
+			stray = append(stray, child.ID)
+		}
+	}
+	if len(stray) > 0 {
+		findings = append(findings, Finding{
+			Check:    "capstone",
+			Severity: SeverityError,
+			IssueID:  epic.ID,
+			Message: fmt.Sprintf("milestone epic holds %d slice epic(s) but also %d direct stor(y/ies) (%s); a container epic holds slice epics only -- move each story under a slice epic",
+				len(childEpics), len(stray), strings.Join(stray, ", ")),
+		})
+	}
+	if len(childEpics) > 1 {
+		siblings := map[string]bool{}
+		for _, e := range childEpics {
+			siblings[e.ID] = true
+		}
+		ordered := false
+		for _, e := range childEpics {
+			for blocker := range blockerSet(e) {
+				if siblings[blocker] {
+					ordered = true
+				}
+			}
+		}
+		if !ordered {
+			findings = append(findings, Finding{
+				Check:    "capstone",
+				Severity: SeverityReview,
+				IssueID:  epic.ID,
+				Message:  fmt.Sprintf("milestone epic's %d slice epics carry no blocked_by ordering among themselves; slices are ordered (each consumes earlier slices of its layer)", len(childEpics)),
+			})
 		}
 	}
 	return findings
@@ -1061,6 +1172,52 @@ func checkHardTDDOracle(b *Backlog, sc scope, projectRoot string, sett map[strin
 	return findings
 }
 
+// --- check: hard-tdd-preauthorized ---------------------------------------------------------
+
+// hardTDDExemptRe is the justification line a hard-tdd-exempt story must
+// carry: the Sr PM states why the story writes no product code (docs,
+// config, discovery), so the exemption is a recorded decision, not a gap.
+var hardTDDExemptRe = regexp.MustCompile(`(?m)^\s*HARD-TDD EXEMPT:\s*\S`)
+
+// checkHardTDDPreauthorized enforces the user's standing authorization of
+// hard-TDD (settings hard_tdd.preauthorized=true): every non-closed story or
+// bug carries the hard-tdd label, or the hard-tdd-exempt label with a
+// "HARD-TDD EXEMPT: <reason>" line. It complements hard-tdd-oracle, which
+// covers only oracle-citing stories; visual-regression, metamorphic, and
+// fuzz suites cite no oracle id and would otherwise depend on memory.
+func checkHardTDDPreauthorized(b *Backlog, sc scope, sett map[string]string) []Finding {
+	if sett["hard_tdd.preauthorized"] != "true" {
+		return nil
+	}
+	var findings []Finding
+	for _, issue := range b.ordered {
+		if isClosed(issue) || !isStoryOrBug(issue) || !sc.storyInScope(issue.ID) {
+			continue
+		}
+		if hasIssueLabel(issue, "hard-tdd") {
+			continue
+		}
+		if hasIssueLabel(issue, "hard-tdd-exempt") {
+			if !hardTDDExemptRe.MatchString(issue.Body) {
+				findings = append(findings, Finding{
+					Check:    "hard-tdd-preauthorized",
+					Severity: SeverityError,
+					IssueID:  issue.ID,
+					Message:  "story carries hard-tdd-exempt without a 'HARD-TDD EXEMPT: <reason>' line in its body; an exemption must be a recorded decision",
+				})
+			}
+			continue
+		}
+		findings = append(findings, Finding{
+			Check:    "hard-tdd-preauthorized",
+			Severity: SeverityError,
+			IssueID:  issue.ID,
+			Message:  "hard_tdd.preauthorized=true: every story carries the hard-tdd label, or hard-tdd-exempt plus a 'HARD-TDD EXEMPT: <reason>' line (docs, config, discovery stories only)",
+		})
+	}
+	return findings
+}
+
 // --- check: dep-cycles -------------------------------------------------------------------
 
 // checkDepCycles detects dependency cycles over blocked_by edges using DFS,
@@ -1204,13 +1361,41 @@ const brownfieldCommitThreshold = 50
 // filePathTokenRe matches file-path-shaped tokens with source-ish extensions.
 var filePathTokenRe = regexp.MustCompile(`([a-zA-Z_][a-zA-Z0-9_]*/)+[a-zA-Z_][a-zA-Z0-9_.-]*\.(py|ts|tsx|js|ex|exs|go|rs|rb|java|kt|swift|c|cpp|h|hpp|sql|yml|yaml|json|toml|md)\b`)
 
-// brownfieldEnabled reports whether the paths-exist check applies: the repo
-// has more than 50 commits, or lint.brownfield=true in project settings.
+// brownfieldEnabled reports whether the paths-exist check applies:
+// lint.brownfield=true forces it on, an EXPLICIT lint.brownfield=false
+// forces it off (a greenfield monorepo whose design tree has a long commit
+// history is not brownfield), and an unset value falls back to the
+// more-than-50-commits heuristic.
 func brownfieldEnabled(projectRoot string, sett map[string]string) bool {
-	if sett["lint.brownfield"] == "true" {
+	switch v, ok := sett["lint.brownfield"]; {
+	case ok && v == "true":
 		return true
+	case ok && v == "false":
+		return false
 	}
 	return commitCount(projectRoot) > brownfieldCommitThreshold
+}
+
+// pathsExistExcludes parses lint.paths_exist.exclude: comma-separated path
+// prefixes (slash-normalized) that paths-exist treats as greenfield.
+func pathsExistExcludes(sett map[string]string) []string {
+	var out []string
+	for _, p := range strings.Split(sett["lint.paths_exist.exclude"], ",") {
+		p = strings.TrimSpace(strings.ReplaceAll(p, "\\", "/"))
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+func pathExcluded(token string, excludes []string) bool {
+	for _, prefix := range excludes {
+		if strings.HasPrefix(token, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 func commitCount(projectRoot string) int {
@@ -1229,6 +1414,13 @@ func commitCount(projectRoot string) int {
 }
 
 func checkPathsExist(b *Backlog, sc scope, projectRoot string) []Finding {
+	return checkPathsExistExcluding(b, sc, projectRoot, nil)
+}
+
+// checkPathsExistExcluding is checkPathsExist with greenfield prefixes: a
+// path token under an excluded prefix is never flagged, because the
+// project declared that tree as not-yet-built.
+func checkPathsExistExcluding(b *Backlog, sc scope, projectRoot string, excludes []string) []Finding {
 	// A path is legitimate when something builds it: the union of all
 	// PRODUCES paths across the backlog. Cross-story CONSUMES legitimately
 	// reference paths produced upstream that do not exist on disk yet.
@@ -1255,7 +1447,7 @@ func checkPathsExist(b *Backlog, sc scope, projectRoot string) []Finding {
 				continue
 			}
 			token := issue.Body[loc[0]:loc[1]]
-			if flagged[token] || producedPaths[token] {
+			if flagged[token] || producedPaths[token] || pathExcluded(token, excludes) {
 				continue
 			}
 			if _, err := os.Stat(filepath.Join(projectRoot, token)); err == nil {

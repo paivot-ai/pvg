@@ -455,5 +455,11 @@ D&F ORCHESTRATION: BLT agents produce the three documents sequentially.
   Light D&F (brownfield, or user requests "light"/"quick"):
   Same BLT sequence, but agents draft with fewer questioning rounds. The agents
   STILL produce the files. You do NOT write them yourself.
+  MACHINERY DESIGN EXISTS (design.machinery applies and design/ is complete with
+  machinery check green): skip D&F entirely. Spawn NO BLT agent (BA, Designer,
+  Architect are disabled; ESCALATION_FOR_ARCHITECT is disabled). Spawn the Sr PM
+  directly from design/BUILD.md section 9, the shards, the Architecture Contract,
+  the oracles (machines and formal), and the PRD. The design tree is read-only
+  for every delivery agent and for you while a loop runs.
 `
 }

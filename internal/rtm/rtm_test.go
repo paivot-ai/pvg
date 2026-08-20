@@ -3,6 +3,7 @@ package rtm
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -109,7 +110,11 @@ func TestCheckCoverage_NoDocs(t *testing.T) {
 	}
 }
 
-func TestCheckCoverage_SkipsClosedStories(t *testing.T) {
+// TestCheckCoverage_ClosedStoriesCount: a closed story is delivered work,
+// so it covers its requirement (the RTM stays green after a milestone
+// closes) and the report marks the attribution as closed. A non-closed
+// story covering the same requirement is attributed first.
+func TestCheckCoverage_ClosedStoriesCount(t *testing.T) {
 	root, vault := setupProject(t)
 
 	writeDoc(t, root, "BUSINESS.md", `- [NEW] Webhook delivery with retry`)
@@ -126,8 +131,33 @@ type: task
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if result.Passed {
-		t.Fatal("expected failure -- closed story should not count as coverage")
+	if !result.Passed {
+		t.Fatal("a closed (delivered) story must count as coverage")
+	}
+	if result.StoriesClosed != 1 || result.Stories != 1 {
+		t.Fatalf("story counts: %+v", result)
+	}
+	req := result.Requirements[0]
+	if req.CoveredBy != "PROJ-old" || !req.CoveredByClosed {
+		t.Fatalf("closed attribution must be flagged: %+v", req)
+	}
+
+	writeStory(t, vault, "PROJ-live.md", `---
+id: PROJ-live
+status: open
+type: task
+---
+# Webhook delivery with retry backoff, v2
+`)
+	result, err = CheckCoverage(root, vault)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if req := result.Requirements[0]; req.CoveredBy != "PROJ-live" || req.CoveredByClosed {
+		t.Fatalf("a live story is attributed before a closed one: %+v", req)
+	}
+	if !strings.Contains(FormatText(result), "1 closed") {
+		t.Fatalf("text report must show the closed-story count: %s", FormatText(result))
 	}
 }
 
