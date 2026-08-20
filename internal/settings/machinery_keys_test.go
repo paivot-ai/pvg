@@ -1,6 +1,9 @@
 package settings
 
-import "testing"
+import (
+	"os"
+	"testing"
+)
 
 // TestDefaults_MachineryFirstKeys pins the defaults of the settings a
 // machinery-first delivery adds. Each one must default to OFF/empty: an
@@ -60,5 +63,48 @@ func TestVerifyAndReviewCommandsRoundTrip(t *testing.T) {
 	sett := LoadFile(path)
 	if sett["verify.command"] != "/phx:verify" || sett["review.command"] != "/phx:review" {
 		t.Fatalf("round trip: %v", sett)
+	}
+}
+
+// TestHandWrittenQuotedValuesAreHonored: the settings file is plain YAML and
+// a user editing it by hand writes quoted scalars. A quoted value that
+// compares unequal to every expected literal would silently resolve to the
+// default -- the substrate off, a boolean gate unset -- which is exactly the
+// "silently ignored" failure this work exists to remove.
+func TestHandWrittenQuotedValuesAreHonored(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/.settings.yaml"
+	body := "design.machinery: \"on\"\nlint.brownfield: 'false'\nhard_tdd.preauthorized: \"true\"\nlint.quality_gates: @spec|Ash\\.Policy\n"
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sett := LoadFile(path)
+	want := map[string]string{
+		"design.machinery":       "on",
+		"lint.brownfield":        "false",
+		"hard_tdd.preauthorized": "true",
+		"lint.quality_gates":     `@spec|Ash\.Policy`,
+	}
+	for k, v := range want {
+		if sett[k] != v {
+			t.Errorf("%s = %q, want %q", k, sett[k], v)
+		}
+	}
+}
+
+func TestUnquoteValueLeavesUnmatchedQuotesAlone(t *testing.T) {
+	cases := map[string]string{
+		`"on"`:      "on",
+		`'off'`:     "off",
+		`"on`:       `"on`,
+		`on"`:       `on"`,
+		`"`:         `"`,
+		``:          ``,
+		`"a" | "b"`: `a" | "b`,
+	}
+	for in, want := range cases {
+		if got := unquoteValue(in); got != want {
+			t.Errorf("unquoteValue(%q) = %q, want %q", in, got, want)
+		}
 	}
 }

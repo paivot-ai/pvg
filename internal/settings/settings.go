@@ -308,10 +308,27 @@ func loadSettings(path string) map[string]string {
 		}
 		parts := strings.SplitN(line, ":", 2)
 		if len(parts) == 2 {
-			settings[strings.TrimSpace(parts[0])] = strings.TrimSpace(parts[1])
+			settings[strings.TrimSpace(parts[0])] = unquoteValue(strings.TrimSpace(parts[1]))
 		}
 	}
 	return settings
+}
+
+// unquoteValue strips one matched pair of surrounding YAML quotes.
+//
+// `pvg settings key=value` always writes bare values, but the file is plain
+// YAML and a user editing it by hand naturally writes `design.machinery:
+// "on"`. Without this, that value compares unequal to every expected literal
+// and the setting silently resolves to its default -- the substrate stays
+// off, a boolean gate reads as unset. A setting the user believes they set
+// must never be silently ignored.
+func unquoteValue(v string) string {
+	if len(v) >= 2 {
+		if (v[0] == '"' && v[len(v)-1] == '"') || (v[0] == '\'' && v[len(v)-1] == '\'') {
+			return v[1 : len(v)-1]
+		}
+	}
+	return v
 }
 
 func writeSettings(path string, settings map[string]string) error {
