@@ -65,7 +65,22 @@ type NextResult struct {
 	NextEpicTitle  string         `json:"next_epic_title,omitempty"`
 	Stalled        []StalledStory `json:"stalled,omitempty"`         // populated on "stalled"
 	EscalatedStory string         `json:"escalated_story,omitempty"` // populated on "escalate"
+	// SealEpic names the milestone (container) epic whose seal gate is due:
+	// on "epic_complete" when the completing slice is the last open child of
+	// its milestone (run the slice gate, then the milestone seal, then
+	// rotate), and on "milestone_seal" when every child is already closed
+	// and only the seal remains.
+	SealEpic      string `json:"seal_epic,omitempty"`
+	SealEpicTitle string `json:"seal_epic_title,omitempty"`
 }
+
+// DecisionMilestoneSeal is returned when a milestone (container) epic has
+// every slice epic closed but is itself still open: the dispatcher runs the
+// milestone seal gate (the whole-design check with Gt via `pvg gates
+// --seal`, the Anchor milestone review over the layer DoD, then close plus
+// the accepted label on the milestone epic) before the loop may rotate or
+// exit. A milestone never closes by story acceptance.
+const DecisionMilestoneSeal = "milestone_seal"
 
 // MaxWaveSize caps the number of actions a single `pvg loop next --n N` call
 // may select. Matches the light-stack total concurrency limit.
@@ -256,16 +271,36 @@ func evaluateEpicMode(projectRoot string, result NextResult, n int) (NextResult,
 		if err != nil {
 			return result, err
 		}
-		if nextID != "" {
-			result.Decision = "epic_complete"
-			result.Reason = fmt.Sprintf("All stories in epic %s are closed -- run completion gate, then rotate to %s", result.TargetEpic, nextID)
-			result.NextEpic = nextID
-			result.NextEpicTitle = nextTitle
-			return result, nil
+		result.NextEpic = nextID
+		result.NextEpicTitle = nextTitle
+
+		// Nested model: when this slice is the last open child of a
+		// milestone epic, the milestone seal is due right after the slice
+		// gate. A target that is already closed (its gate ran) with a
+		// sealable parent means only the seal remains.
+		if sealID, sealTitle := SealableParent(projectRoot, result.TargetEpic); sealID != "" {
+			result.SealEpic = sealID
+			result.SealEpicTitle = sealTitle
+			if targetClosed(projectRoot, result.TargetEpic) {
+				result.Decision = DecisionMilestoneSeal
+				result.Reason = fmt.Sprintf("Epic %s is closed and was the last slice of milestone %s -- run the milestone seal gate (pvg gates --seal, Anchor seal review, close %s), then %s",
+					result.TargetEpic, sealID, sealID, rotateOrExit(nextID))
+				return result, nil
+			}
 		}
-		// No next epic: this was the last one.
+
 		result.Decision = "epic_complete"
-		result.Reason = fmt.Sprintf("All stories in epic %s are closed -- run completion gate (last epic)", result.TargetEpic)
+		switch {
+		case result.SealEpic != "" && nextID != "":
+			result.Reason = fmt.Sprintf("All stories in epic %s are closed -- run completion gate, then the milestone seal gate for %s, then rotate to %s", result.TargetEpic, result.SealEpic, nextID)
+		case result.SealEpic != "":
+			result.Reason = fmt.Sprintf("All stories in epic %s are closed -- run completion gate, then the milestone seal gate for %s (last epic)", result.TargetEpic, result.SealEpic)
+		case nextID != "":
+			result.Reason = fmt.Sprintf("All stories in epic %s are closed -- run completion gate, then rotate to %s", result.TargetEpic, nextID)
+		default:
+			// No next epic: this was the last one.
+			result.Reason = fmt.Sprintf("All stories in epic %s are closed -- run completion gate (last epic)", result.TargetEpic)
+		}
 		return result, nil
 	}
 
@@ -330,6 +365,14 @@ func evaluateAllMode(projectRoot string, result NextResult, n int) (NextResult, 
 
 	switch {
 	case total == 0:
+		// A milestone epic whose slices all closed still owes its seal.
+		if sealID, sealTitle, serr := FindSealableEpic(projectRoot); serr == nil && sealID != "" {
+			result.Decision = DecisionMilestoneSeal
+			result.SealEpic = sealID
+			result.SealEpicTitle = sealTitle
+			result.Reason = fmt.Sprintf("Every slice of milestone %s is closed -- run the milestone seal gate (pvg gates --seal, Anchor seal review, close %s)", sealID, sealID)
+			return result, nil
+		}
 		result.Decision = "complete"
 		result.Reason = "All work complete"
 	case result.Counts.InProgress > 0:
@@ -347,6 +390,20 @@ func evaluateAllMode(projectRoot string, result NextResult, n int) (NextResult, 
 	}
 
 	return result, nil
+}
+
+// targetClosed reports whether the target epic is closed in nd (its own
+// completion gate already ran). A failed query reads as not closed.
+func targetClosed(projectRoot, epicID string) bool {
+	shown, err := runND(projectRoot, "show", epicID, "--json")
+	return err == nil && len(shown) > 0 && strings.EqualFold(shown[0].Status, "closed")
+}
+
+func rotateOrExit(nextID string) string {
+	if nextID == "" {
+		return "allow exit (last epic)"
+	}
+	return "rotate to " + nextID
 }
 
 func queryQueues(projectRoot, parent string) (queueSnapshot, error) {

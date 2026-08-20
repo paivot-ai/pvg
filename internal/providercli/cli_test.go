@@ -696,3 +696,85 @@ func TestNormalizeNDVault_RewritesRelativeToSharedVault(t *testing.T) {
 		t.Fatalf("vault = %v, non-nd adapters must be untouched", linear["vault"])
 	}
 }
+
+func TestNormalizeIssueType(t *testing.T) {
+	cases := []struct {
+		in      string
+		want    string
+		wantErr bool
+	}{
+		{"", "", false},
+		{"epic", "epic", false},
+		{"Epic", "epic", false},
+		{" EPIC ", "epic", false},
+		{"task", "task", false},
+		{"feature", "feature", false},
+		{"bug", "bug", false},
+		{"story", "story", false},
+		{"epci", "", true},
+		{"milestone", "", true},
+	}
+	for _, c := range cases {
+		got, err := normalizeIssueType(c.in)
+		if c.wantErr {
+			if err == nil {
+				t.Errorf("normalizeIssueType(%q) expected error, got %q", c.in, got)
+			}
+			continue
+		}
+		if err != nil {
+			t.Errorf("normalizeIssueType(%q) error: %v", c.in, err)
+			continue
+		}
+		if got != c.want {
+			t.Errorf("normalizeIssueType(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+// TestRunIssuesCreate_PassesEpicTypeToND is the G7 contract: an epic created
+// through `pvg issues create` must reach nd as `--type epic`. Without it the
+// issue is a task, and the lint's epic checks, the loop's `--type epic`
+// listing, and the guard's epic exemption all skip it silently.
+func TestRunIssuesCreate_PassesEpicTypeToND(t *testing.T) {
+	logFile := setupFakeND(t)
+
+	_, err := captureStdout(t, func() error {
+		return RunIssues([]string{"create", "M1 Trust substrate", "--type", "epic", "--labels", "milestone"})
+	})
+	if err != nil {
+		t.Fatalf("RunIssues create: %v", err)
+	}
+
+	logged := readArgsLog(t, logFile)
+	if !strings.Contains(logged, "--type epic") {
+		t.Errorf("nd create missing --type epic: %s", logged)
+	}
+}
+
+func TestRunIssuesCreate_OmitsTypeFlagWhenUnset(t *testing.T) {
+	logFile := setupFakeND(t)
+
+	_, err := captureStdout(t, func() error {
+		return RunIssues([]string{"create", "Plain story"})
+	})
+	if err != nil {
+		t.Fatalf("RunIssues create: %v", err)
+	}
+
+	if logged := readArgsLog(t, logFile); strings.Contains(logged, "--type") {
+		t.Errorf("unexpected --type flag without input: %s", logged)
+	}
+}
+
+func TestRunIssuesCreate_InvalidTypeErrors(t *testing.T) {
+	setupFakeND(t)
+
+	err := RunIssues([]string{"create", "Bad type", "--type", "epci"})
+	if err == nil {
+		t.Fatal("a typo'd --type must be rejected, not passed through to nd")
+	}
+	if !strings.Contains(err.Error(), "invalid --type") {
+		t.Errorf("error should name the flag: %v", err)
+	}
+}

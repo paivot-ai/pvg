@@ -107,6 +107,15 @@ func checkLoop(cwd string) error {
 	// the completion gate (e2e + Anchor + merge to main + retro) hasn't run.
 	epicPending := loop.EpicBranchExists(root, state.TargetEpic)
 
+	// Nested model: a milestone epic whose slices all closed still owes its
+	// seal gate. Best-effort (an nd error reads as no seal pending).
+	sealPending := ""
+	if !epicPending {
+		if sealID, _, serr := loop.FindSealableEpic(root); serr == nil {
+			sealPending = sealID
+		}
+	}
+
 	// Work-state signature: lets EvaluateStop distinguish a synchronously
 	// progressing loop (signature changes between stops -> counter resets)
 	// from a genuinely stuck one (identical signature -> counter accumulates
@@ -129,6 +138,7 @@ func checkLoop(cwd string) error {
 		Blocked:          wc.Blocked,
 		Other:            wc.Other,
 		EpicPendingMerge: epicPending,
+		SealPending:      sealPending,
 		WorkSignature:    signature,
 		PrevSignature:    state.LastStopSignature,
 	}
@@ -231,7 +241,8 @@ func BuildContinuationPrompt(state *loop.State, decision *loop.StopDecision, max
 		prompt += "3. Step 2: Spawn Anchor milestone review\n"
 		prompt += "4. Step 3: Merge epic/" + state.TargetEpic + " to main (solo_dev) or create PR (team)\n"
 		prompt += "5. Step 4: Spawn retro agent\n"
-		prompt += "6. After retro: rotate to next epic or allow exit if this was the last epic\n"
+		prompt += "6. If the decision names a seal_epic: run the MILESTONE SEAL GATE for it (pvg gates --seal, Anchor seal review over the milestone DoD, close + accepted on the milestone epic)\n"
+		prompt += "7. After retro (and the seal, when due): rotate to next epic or allow exit if this was the last epic\n"
 		prompt += "\nDo NOT exit without completing the gate. The epic branch must be merged and cleaned up.\n"
 		return prompt
 	}

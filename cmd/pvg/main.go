@@ -234,9 +234,10 @@ Commands:
   settings [key|key=value]  View, read, or set project settings
   story <subcommand>        Shared story workflow helpers
   lint [--backlog] [--json] [--epic ID]  Backlog quality checks (collisions + structure)
-  rtm [check] [--json]      Requirement Traceability Matrix (D&F coverage check)
-  verify [path...] [flags]  Scan source files for stubs, thin files, TODOs
-  gates [path...] [flags]   Metric quality gates (complexity, duplication, file size)
+  rtm [check] [--milestone M<n>] [--oracle NAME] [--epic ID] [--json]
+                            Requirement Traceability Matrix (D&F + oracle coverage, scoped)
+  verify [path...] [flags]  Scan source files for stubs, thin files, TODOs (--check-e2e, --check-mocks)
+  gates [path...] [flags]   Metric quality gates (complexity, duplication, file size; --seal for the whole-design check)
   worktree add <path> <branch>      Create a worktree + stamp Paivot ownership marker [alias: wt]
   worktree remove <path> [--force]  Safely remove a Paivot-owned worktree (CWD-independent) [alias: wt]
   doctor [--json] [--fix]  Run diagnostic checks on vault configuration
@@ -1151,8 +1152,11 @@ func loopSetup(cwd string, args []string) error {
 	}
 
 	// Validate epic if specified (covers both auto-selected and explicit --epic).
+	// A container (milestone) epic is never a dispatch target: the loop drains
+	// its slice epics one at a time and seals the milestone when the last one
+	// closes.
 	if mode == "epic" {
-		if err := loop.ValidateEpic(cwd, epicID); err != nil {
+		if err := loop.ValidateDispatchEpic(cwd, epicID); err != nil {
 			return fmt.Errorf("validate epic: %w", err)
 		}
 	}
@@ -1472,7 +1476,7 @@ func loopRotate(cwd string, args []string) error {
 	}
 	epicID := args[0]
 
-	if err := loop.ValidateEpic(cwd, epicID); err != nil {
+	if err := loop.ValidateDispatchEpic(cwd, epicID); err != nil {
 		return fmt.Errorf("validate epic: %w", err)
 	}
 
@@ -1918,28 +1922,71 @@ Flags:
 
 func runRTM(args []string) error {
 	jsonOutput := false
-	for _, arg := range args {
-		switch arg {
+	var opts rtm.Options
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
 		case "check", "": // "check" is the default subcommand
 			continue
 		case "--json":
 			jsonOutput = true
+		case "--milestone":
+			if i+1 >= len(args) {
+				return fmt.Errorf("--milestone requires a marker id (e.g. M1)")
+			}
+			i++
+			opts.Milestone = args[i]
+		case "--oracle":
+			if i+1 >= len(args) {
+				return fmt.Errorf("--oracle requires an oracle name (e.g. Tenant, formal/Policy)")
+			}
+			i++
+			for _, sel := range strings.Split(args[i], ",") {
+				if sel = strings.TrimSpace(sel); sel != "" {
+					opts.Oracles = append(opts.Oracles, sel)
+				}
+			}
+		case "--epic":
+			if i+1 >= len(args) {
+				return fmt.Errorf("--epic requires an epic id")
+			}
+			i++
+			opts.Epic = args[i]
 		case "--help", "-h":
 			fmt.Fprintln(os.Stderr, `pvg rtm -- Requirement Traceability Matrix
 
 Reads BUSINESS.md, DESIGN.md, and ARCHITECTURE.md for tagged requirements
 ([NEW], [EXPANDED], [CRITICAL], [REQUIRED], [CHANGED]) and checks that each
-has a covering story in the nd backlog.
+has a covering story in the nd backlog. When the design substrate applies
+(user opt-in via design.machinery), every oracle stable id -- the machine
+transition rows under design/machines/ AND the formal decision rows under
+design/formal/ (Policy, Isolation) -- is an [ORACLE] requirement matched
+whole-token. Closed stories count as coverage (delivered work) and are
+flagged as such; uncovered ids are listed per oracle.
 
 Usage:
-  pvg rtm [check] [--json]
+  pvg rtm [check] [--milestone M<n>] [--oracle NAME[,NAME]] [--epic ID] [--json]
+
+Scoping (design substrate only; --milestone/--oracle narrow the ids,
+--epic narrows the stories that may cover them):
+  --milestone M1     Only the ids the M1 block of design/BUILD.md puts in
+                     scope: ids it cites whole-token, plus every row of each
+                     oracle it names (a machine by name; Policy/Isolation by
+                     an oracle-qualified mention such as P-authz-oracle,
+                     T-isolation-oracle, or the file name). Over-inclusive by
+                     design: rows the plan defers to a later layer surface
+                     here for the reviewer to adjudicate.
+  --oracle NAMES     Only the named oracles (comma-separated or repeated):
+                     a machine name, file stem, file name, or formal/Policy.
+  --epic ID          Only stories in the epic's subtree (nested epics
+                     included) may cover. Combine with --milestone to ask
+                     "what does this milestone epic leave uncovered".
 
 Flags:
   --json    Output as JSON
   --help    Show this help`)
 			return nil
 		default:
-			return fmt.Errorf("unknown argument %q", arg)
+			return fmt.Errorf("unknown argument %q", args[i])
 		}
 	}
 
@@ -1953,7 +2000,7 @@ Flags:
 		return fmt.Errorf("resolve nd vault: %w", err)
 	}
 
-	result, err := rtm.CheckCoverage(cwd, vaultDir)
+	result, err := rtm.CheckCoverageWithOptions(cwd, vaultDir, opts)
 	if err != nil {
 		return err
 	}
@@ -1978,6 +2025,7 @@ func runVerify(args []string) error {
 	opts := verify.DefaultOptions()
 	format := "text"
 	checkE2e := false
+	checkMocks := false
 	var paths []string
 
 	for i := 0; i < len(args); i++ {
@@ -1992,6 +2040,11 @@ Flags:
   --min-lines N         Minimum lines of code for substance check (default: 10)
   --include-tests       Include test files in scan (default: skip them)
   --check-e2e           Check that e2e test files exist (exit 1 if none found)
+  --check-mocks         Scan integration and e2e test files for mock vocabulary
+                        (Mox, Mimic, meck, unittest.mock, jest.mock, sinon, nock,
+                        msw, gomock, testify/mock, Mockito, RSpec doubles, ...);
+                        exit 1 on any hit. Integration and e2e tests must
+                        exercise real dependencies.
   --help, -h            Show this help
 
 If no paths given, scans the current directory recursively.
@@ -2001,6 +2054,8 @@ Exit code 0 if clean, 1 if issues found.`)
 			return nil
 		case "--check-e2e":
 			checkE2e = true
+		case "--check-mocks":
+			checkMocks = true
 		case "--format":
 			if i+1 >= len(args) {
 				return fmt.Errorf("--format requires an argument (text or json)")
@@ -2028,6 +2083,29 @@ Exit code 0 if clean, 1 if issues found.`)
 			}
 			paths = append(paths, args[i])
 		}
+	}
+
+	// Mock scan mode: integration and e2e tests must run against real
+	// dependencies; any mock vocabulary there fails the check.
+	if checkMocks {
+		mockResult, err := verify.CheckMocks(paths)
+		if err != nil {
+			return err
+		}
+		switch format {
+		case "json":
+			j, err := json.MarshalIndent(mockResult, "", "  ")
+			if err != nil {
+				return err
+			}
+			fmt.Println(string(j))
+		default:
+			fmt.Print(verify.FormatMocksText(mockResult))
+		}
+		if !mockResult.Passed {
+			os.Exit(1)
+		}
+		return nil
 	}
 
 	// E2e existence check mode
@@ -2081,6 +2159,7 @@ Exit code 0 if clean, 1 if issues found.`)
 func runGates(args []string) error {
 	format := "text"
 	changedRef := ""
+	seal := false
 	var paths []string
 
 	for i := 0; i < len(args); i++ {
@@ -2094,12 +2173,18 @@ Computes code metrics by shelling out to real analyzers, compares them to
 configurable thresholds, and returns PASS/FAIL. Complements pvg verify.
 
 Metrics (configure via pvg settings gates.*):
-  complexity   cyclomatic complexity per function (lizard, gocyclo, radon)
+  complexity   cyclomatic complexity per function (lizard, gocyclo, radon;
+               credo for Elixir when mix + credo are present)
   duplication  copy-paste duplication (jscpd)
   file_loc     non-blank lines per file (built-in)
 
 Flags:
   --changed <ref>       Scope to files changed in git diff <ref>...HEAD
+  --seal                Milestone seal / final gate: run the WHOLE-DESIGN
+                        machinery check with Gt-tests and G4-import forced
+                        in over the configured impl dir (every committed
+                        oracle stable id, machines and formal, carried by
+                        the suite). Requires "impl" in .machinery.json.
   --format text|json    Output format (default: text)
   --help, -h            Show this help
 
@@ -2107,6 +2192,8 @@ If no paths and no --changed are given, scans the current directory.
 When an analyzer tool is absent, its gate is SKIPPED and noted -- never a
 silent pass. Exit code 0 unless a BLOCK finding fired (then 1).`)
 			return nil
+		case "--seal":
+			seal = true
 		case "--format":
 			if i+1 >= len(args) {
 				return fmt.Errorf("--format requires an argument (text or json)")
@@ -2169,9 +2256,19 @@ silent pass. Exit code 0 unless a BLOCK finding fired (then 1).`)
 	// binary FAILS (a declared design promise is never silently waived).
 	var designRes *design.CheckResult
 	if cfg, applies, reason := design.Applies(projectRoot, design.MachinerySetting(sett)); applies {
+		if seal {
+			sealCfg, serr := design.SealConfig(cfg)
+			if serr != nil {
+				return fmt.Errorf("--seal: %w", serr)
+			}
+			cfg = sealCfg
+			reason = "seal: whole-design check with gt and g4 forced; " + reason
+		}
 		r := design.RunCheck(projectRoot, cfg)
 		r.Reason = reason
 		designRes = &r
+	} else if seal {
+		return fmt.Errorf("--seal requires the design substrate (%s)", reason)
 	}
 
 	switch format {

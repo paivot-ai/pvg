@@ -20,12 +20,16 @@ import (
 // designRedGate enforces the RED exit preconditions for approve-red when the
 // design substrate applies:
 //
-//  1. `machinery check` (staged gates, plus --impl when configured) is
-//     green: the oracle-spec the tests derive from is itself trustworthy and
-//     the test scaffolding respects the architecture.
-//  2. Every oracle stable id the story references appears whole-token in a
-//     test file: the story's slice of the spec is actually covered before
-//     the suite locks.
+//  1. `machinery check` over the RED gate list is green: the oracle-spec
+//     the tests derive from is itself trustworthy and the scaffolding
+//     respects the architecture. The list is the staged one minus Gt-tests
+//     (or design.red_gates verbatim; see design.RedGateConfig): Gt is a
+//     whole-design check that belongs to the milestone seal
+//     (`pvg gates --seal`), never to a single story's RED approval.
+//  2. Every oracle stable id the story references (machine rows AND formal
+//     Policy/Isolation rows) appears whole-token in a test file: the
+//     story's slice of the spec is actually covered before the suite locks.
+//     This is the per-story half of Gt, so no RED approval loses it.
 //
 // A story that references no stable ids only needs check green (a note in
 // the returned summary says so). Projects where the substrate does not
@@ -37,11 +41,13 @@ func designRedGate(projectRoot, storyID, storyText string) (string, error) {
 		return "", nil
 	}
 
-	check := design.RunCheck(projectRoot, cfg)
+	redCfg, derivation := design.RedGateConfig(cfg, sett["design.red_gates"])
+	check := design.RunCheck(projectRoot, redCfg)
 	if !check.Passed {
-		return "", fmt.Errorf("approve-red blocked: the design gate is red (%s), so the oracle-spec the RED tests derive from cannot be trusted.\n%s\n%s\nFix the design (or the scaffolding) and retry; --skip-design <reason> records an explicit waiver",
-			reason, check.Command, check.Output)
+		return "", fmt.Errorf("approve-red blocked: the design gate is red (%s; %s), so the oracle-spec the RED tests derive from cannot be trusted.\n%s\n%s\nFix the design (or the scaffolding) and retry; --skip-design <reason> records an explicit waiver",
+			reason, derivation, check.Command, check.Output)
 	}
+	reason = check.Command + "; " + derivation + "; " + reason
 
 	ids, err := design.StableIDs(projectRoot, cfg)
 	if err != nil {

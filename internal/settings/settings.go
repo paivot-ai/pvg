@@ -63,7 +63,30 @@ var defaults = map[string]string{
 	// then fails loudly); auto is a deliberate, explicit choice to re-enable
 	// artifact detection (.machinery.json or design/domain.modelith.yaml).
 	// Artifact presence alone never enables the substrate.
-	"design.machinery":             "off",
+	"design.machinery": "off",
+	// The gate list `pvg story approve-red` runs for the RED exit check.
+	// Empty (default) derives it from .machinery.json: the staged list
+	// without gt (Gt-tests is whole-design and belongs to the seal, the
+	// per-story half of it -- every story-cited id carried by a test -- is
+	// what approve-red checks itself), and without --impl when no list is
+	// staged (machinery's default selection would pull the impl-only gates
+	// in). An explicit list is used verbatim; --impl rides along only when
+	// it names g4 or gt. `pvg gates --seal` runs the whole-design check.
+	"design.red_gates": "",
+	// Project verification and review workflows on a machinery-first or
+	// tooling-mandated project (for example the elixir-phoenix plugin):
+	// verify.command is run INLINE by the developer before delivery (a
+	// skill or command that spawns no subagents, e.g. /phx:verify);
+	// review.command is run by the DISPATCHER at the epic completion gate,
+	// because review workflows spawn specialist subagents and the developer
+	// and PM cannot (e.g. /phx:review). Empty = no project workflow.
+	"verify.command": "",
+	"review.command": "",
+	// hard_tdd.preauthorized=true records the user's standing authorization
+	// of hard-TDD for every story: `pvg lint --backlog` then requires the
+	// hard-tdd label on every non-closed story, or the hard-tdd-exempt label
+	// plus a "HARD-TDD EXEMPT:" justification line (docs, config, discovery).
+	"hard_tdd.preauthorized":       "false",
 	"loop.persist_across_sessions": "true",
 	// Resume hints for semi-persistent story agents: when "true" (default),
 	// `pvg loop agent set` handles make `pvg loop next` emit
@@ -72,7 +95,12 @@ var defaults = map[string]string{
 	"loop.agent_resume":  "true",
 	"lint.quality_gates": "",
 	"lint.brownfield":    "false",
-	"update.nudge":       "true",
+	// Path prefixes the brownfield paths-exist check treats as greenfield:
+	// a story may name a file under them before it exists on disk or in a
+	// PRODUCES block (a monorepo whose design tree has a long history while
+	// the implementation tree is new). Comma-separated, e.g. "lib/,test/".
+	"lint.paths_exist.exclude": "",
+	"update.nudge":             "true",
 	// Per-role model overrides for Paivot agents. Empty = no override
 	// (the agent's frontmatter model wins). See setSettings for validation.
 	"model.developer":            "",
@@ -221,6 +249,10 @@ func setSettings(projectRoot, path string, args []string) error {
 			return fmt.Errorf("invalid value %q for loop.agent_resume (allowed: true, false)", value)
 		}
 
+		if key == "hard_tdd.preauthorized" && value != "true" && value != "false" {
+			return fmt.Errorf("invalid value %q for hard_tdd.preauthorized (allowed: true, false)", value)
+		}
+
 		settings[key] = value
 		fmt.Printf("  set %s = %s\n", key, value)
 
@@ -276,10 +308,27 @@ func loadSettings(path string) map[string]string {
 		}
 		parts := strings.SplitN(line, ":", 2)
 		if len(parts) == 2 {
-			settings[strings.TrimSpace(parts[0])] = strings.TrimSpace(parts[1])
+			settings[strings.TrimSpace(parts[0])] = unquoteValue(strings.TrimSpace(parts[1]))
 		}
 	}
 	return settings
+}
+
+// unquoteValue strips one matched pair of surrounding YAML quotes.
+//
+// `pvg settings key=value` always writes bare values, but the file is plain
+// YAML and a user editing it by hand naturally writes `design.machinery:
+// "on"`. Without this, that value compares unequal to every expected literal
+// and the setting silently resolves to its default -- the substrate stays
+// off, a boolean gate reads as unset. A setting the user believes they set
+// must never be silently ignored.
+func unquoteValue(v string) string {
+	if len(v) >= 2 {
+		if (v[0] == '"' && v[len(v)-1] == '"') || (v[0] == '\'' && v[len(v)-1] == '\'') {
+			return v[1 : len(v)-1]
+		}
+	}
+	return v
 }
 
 func writeSettings(path string, settings map[string]string) error {

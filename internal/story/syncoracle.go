@@ -154,12 +154,14 @@ func SyncOracle(projectRoot, baseRef string) (*SyncReport, error) {
 	return rep, nil
 }
 
-// baseOracleFiles lists the oracle paths present at baseRef (design-relative
-// to the project root, slash-separated).
+// baseOracleFiles lists the oracle paths present at baseRef (project-root
+// relative, slash-separated) under every oracle directory: machines/ and
+// formal/, so a revised Policy or Isolation table diffs like a machine.
 func baseOracleFiles(projectRoot, baseRef string, cfg design.Config) []string {
-	dir := filepath.ToSlash(filepath.Join(cfg.Dir, "machines"))
+	args := []string{"-C", projectRoot, "ls-tree", "-r", "--name-only", baseRef, "--"}
+	args = append(args, design.OracleDirPrefixes(cfg)...)
 	// #nosec G702 -- baseRef validated against syncRefPattern; no shell involved
-	cmd := execCommand("git", "-C", projectRoot, "ls-tree", "-r", "--name-only", baseRef, "--", dir)
+	cmd := execCommand("git", args...)
 	out, err := cmd.Output()
 	if err != nil {
 		return nil

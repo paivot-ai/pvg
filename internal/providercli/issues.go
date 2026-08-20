@@ -73,7 +73,7 @@ func issuesUsage(w io.Writer) {
 	fmt.Fprintln(w, `pvg issues -- normalized issue tracker CLI
 
 Subcommands:
-  create [title] [--body B] [--labels x,y] [--parent ID] [--assignee A] [--blocked-by IDs] [--project P] [--milestone M] [--priority P0-P4|0-4]
+  create [title] [--type epic|task|feature|bug|story] [--body B] [--labels x,y] [--parent ID] [--assignee A] [--blocked-by IDs] [--project P] [--milestone M] [--priority P0-P4|0-4]
   show <id> [--json]
   list [--status S] [--label L] [--parent ID] [--project P] [--milestone M] [--type T] [--sort F] [--limit N] [--json]
   update <id> [--title T] [--body B] [--status S] [--add-label x] [--remove-label x]
@@ -183,8 +183,9 @@ func issuesCreate(ctx context.Context, r *providers.BacklogRouter, args []string
 	project := fs.String("project", "", "project name or ID (Linear/Jira/Asana)")
 	milestone := fs.String("milestone", "", "milestone or sprint name within the project")
 	priority := fs.String("priority", "", "priority P0-P4 or 0-4 (0 = highest)")
+	issueType := fs.String("type", "", "issue type: epic|task|feature|bug|story (adapter default when empty)")
 	jsonOut := fs.Bool("json", false, "emit JSON")
-	known := map[string]bool{"body": true, "labels": true, "parent": true, "assignee": true, "blocked-by": true, "project": true, "milestone": true, "priority": true}
+	known := map[string]bool{"body": true, "labels": true, "parent": true, "assignee": true, "blocked-by": true, "project": true, "milestone": true, "priority": true, "type": true}
 	if err := fs.Parse(reorderArgs(known, args)); err != nil {
 		return err
 	}
@@ -199,6 +200,10 @@ func issuesCreate(ctx context.Context, r *providers.BacklogRouter, args []string
 	if normalizedPriority != "" && !r.Capabilities().Has(providers.CapPriority) {
 		fmt.Fprintf(os.Stderr, "WARN: adapter %q does not support --priority; ignoring\n", r.Name())
 	}
+	normalizedType, err := normalizeIssueType(*issueType)
+	if err != nil {
+		return err
+	}
 	in := providers.CreateIssueInput{
 		Title:     title,
 		Body:      *body,
@@ -209,12 +214,33 @@ func issuesCreate(ctx context.Context, r *providers.BacklogRouter, args []string
 		Project:   *project,
 		Milestone: *milestone,
 		Priority:  normalizedPriority,
+		Type:      normalizedType,
 	}
 	out, err := r.Create(ctx, in)
 	if err != nil {
 		return err
 	}
 	return printIssue(out, *jsonOut)
+}
+
+// issueTypes are the issue types `pvg issues create --type` accepts; they
+// mirror nd's type vocabulary plus the "feature" story type the lint treats
+// as a story.
+var issueTypes = map[string]bool{"epic": true, "task": true, "feature": true, "bug": true, "story": true}
+
+// normalizeIssueType lowercases and validates a --type value. Empty input
+// stays empty (adapter default). An unknown type is rejected rather than
+// passed through: a typo'd "epci" would otherwise create an issue no epic
+// query ever finds.
+func normalizeIssueType(s string) (string, error) {
+	trimmed := strings.ToLower(strings.TrimSpace(s))
+	if trimmed == "" {
+		return "", nil
+	}
+	if !issueTypes[trimmed] {
+		return "", fmt.Errorf("invalid --type %q: expected epic, task, feature, bug, or story", s)
+	}
+	return trimmed, nil
 }
 
 // normalizePriority accepts P-prefixed (P0-P4, case-insensitive) and bare

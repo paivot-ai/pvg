@@ -526,3 +526,43 @@ func idsOf(issues []providers.Issue) []string {
 	}
 	return ids
 }
+
+func TestCreate_PassesTypeFlag(t *testing.T) {
+	var calls [][]string
+	old := execCommandContext
+	execCommandContext = func(_ context.Context, name string, args ...string) *exec.Cmd {
+		calls = append(calls, append([]string{name}, args...))
+		return exec.Command("echo", `{"ID":"VP-1","Title":"Epic","Status":"open","Type":"epic"}`)
+	}
+	defer func() { execCommandContext = old }()
+
+	a, _ := New(map[string]interface{}{"vault": "/tmp/v"})
+	if _, err := a.Create(context.Background(), providers.CreateIssueInput{Title: "Epic", Type: "epic"}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	want := []string{"nd", "--vault", "/tmp/v", "create", "--title", "Epic", "--type", "epic", "--json"}
+	if len(calls) < 1 || strings.Join(calls[0], "\x00") != strings.Join(want, "\x00") {
+		t.Fatalf("unexpected nd create call: got %#v want %#v", calls, want)
+	}
+}
+
+func TestCreate_OmitsTypeFlagWhenEmpty(t *testing.T) {
+	var calls [][]string
+	old := execCommandContext
+	execCommandContext = func(_ context.Context, name string, args ...string) *exec.Cmd {
+		calls = append(calls, append([]string{name}, args...))
+		return exec.Command("echo", `{"ID":"VP-1","Title":"Plain","Status":"open"}`)
+	}
+	defer func() { execCommandContext = old }()
+
+	a, _ := New(map[string]interface{}{"vault": "/tmp/v"})
+	if _, err := a.Create(context.Background(), providers.CreateIssueInput{Title: "Plain"}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	want := []string{"nd", "--vault", "/tmp/v", "create", "--title", "Plain", "--json"}
+	if len(calls) < 1 || strings.Join(calls[0], "\x00") != strings.Join(want, "\x00") {
+		t.Fatalf("unexpected nd create call: got %#v want %#v", calls, want)
+	}
+}

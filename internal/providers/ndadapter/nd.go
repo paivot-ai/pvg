@@ -85,6 +85,11 @@ func (a *Adapter) Create(ctx context.Context, in providers.CreateIssueInput) (pr
 		// nd create accepts 0-4 and P0-P4; the CLI normalizes to bare 0-4.
 		args = append(args, "--priority", in.Priority)
 	}
+	if in.Type != "" {
+		// nd records the type in frontmatter; `--type epic` is what makes an
+		// epic an epic for nd list --type, the lint, and the loop.
+		args = append(args, "--type", in.Type)
+	}
 	args = append(args, "--json")
 
 	out, err := a.run(ctx, args...)

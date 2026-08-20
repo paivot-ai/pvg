@@ -77,6 +77,12 @@ func checkDFFilePath(projectRoot, root string, state *dispatcher.State, filePath
 		return Result{Allowed: true}
 	}
 
+	// The machinery design tree has its own rule (read-only for delivery
+	// agents); when it applies it decides the write outright.
+	if result, applied := checkDesignTreeWrite(projectRoot, root, state, filePath); applied {
+		return result
+	}
+
 	artifact, agentName, isDFFile := dfArtifactForPath(root, filePath)
 	if !isDFFile {
 		return Result{Allowed: true}
@@ -103,6 +109,12 @@ func checkDFBashCommand(projectRoot, root string, state *dispatcher.State, comma
 	}
 
 	for _, target := range bashWriteTargets(command) {
+		if result, applied := checkDesignTreeWrite(projectRoot, root, state, target); applied {
+			if !result.Allowed {
+				return result
+			}
+			continue
+		}
 		artifact, agentName, isDFFile := dfArtifactForPath(root, target)
 		if !isDFFile {
 			continue
@@ -212,7 +224,7 @@ func checkDispatcherNDMutation(projectRoot string, state *dispatcher.State, comm
 	if command == "" {
 		return Result{Allowed: true}
 	}
-	if !ndMutatingCommandRe.MatchString(command) && !pvgIssuesMutatingRe.MatchString(command) {
+	if !hasNDMutation(command) {
 		return Result{Allowed: true}
 	}
 
@@ -237,6 +249,40 @@ func checkDispatcherNDMutation(projectRoot string, state *dispatcher.State, comm
 			"  - developer for delivery/progress updates\n" +
 			"  - pm for accept/reject and close/reopen actions",
 	}
+}
+
+// hasNDMutation reports whether any simple command in the shell line is a
+// mutating nd / pvg issues invocation. A segment that only asks for help
+// (`--help` or `-h` as a standalone WORD, e.g. `pvg nd create --help`)
+// mutates nothing and is read-only for the coordinator.
+//
+// The line is split with the quote-aware parser (parseShell) so a --help
+// that appears inside a quoted argument -- a story body, a comment, a commit
+// message -- is one token of prose and never exempts the mutation beside it.
+// Rejoining the unquoted tokens for the regex is the conservative direction:
+// a mutating command hidden inside quotes still matches and still blocks.
+func hasNDMutation(command string) bool {
+	for _, tokens := range parseShell(command).segments {
+		segment := strings.Join(tokens, " ")
+		if !ndMutatingCommandRe.MatchString(segment) && !pvgIssuesMutatingRe.MatchString(segment) {
+			continue
+		}
+		if !hasHelpToken(tokens) {
+			return true
+		}
+	}
+	return false
+}
+
+// hasHelpToken reports whether a parsed segment carries --help or -h as a
+// standalone word.
+func hasHelpToken(tokens []string) bool {
+	for _, tok := range tokens {
+		if tok == "--help" || tok == "-h" {
+			return true
+		}
+	}
+	return false
 }
 
 // isEpicMutationCommand reports whether every issue targeted by the command

@@ -124,7 +124,14 @@ type CreateIssueInput struct {
 	// (0 = highest). Empty means "adapter default". Only adapters declaring
 	// CapPriority honor it; others ignore it.
 	Priority string
-	Extras   map[string]interface{}
+	// Type is the issue type (epic|task|feature|bug|story). Empty means the
+	// adapter default (nd: task). Epics MUST be created with Type "epic":
+	// the loop's epic listing, the lint's epic checks, and the dispatcher
+	// guard's epic exemption all key on the recorded type, so an epic
+	// created as a task is invisible to every one of them. Adapters without
+	// issue types ignore it.
+	Type   string
+	Extras map[string]interface{}
 }
 
 // UpdateIssueInput is the typed payload for BacklogAdapter.Update. Pointer

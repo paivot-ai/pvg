@@ -152,8 +152,149 @@ func TestStableIDs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(ids) != 2 || ids["DEAL-eb0c40"] != "Deal.oracle.md" {
+	if len(ids) != 2 || ids["DEAL-eb0c40"] != "machines/Deal.oracle.md" {
 		t.Fatalf("got %v", ids)
+	}
+}
+
+const policyFixture = `# Generated authorization oracle: policy
+
+Generated from domain.modelith.yaml + policy.relational.yaml by machinery alloy. DO NOT EDIT BY HAND.
+
+## Decisions
+
+| test id | stable id | verb | role | owner case | target | expectation | invariants |
+|---|---|---|---|---|---|---|---|
+| O-AUTHZ-01 | AUTHZ-a0788c | create | platform_admin | - | - | allow | rbac-view-only-read |
+| O-AUTHZ-02 | AUTHZ-805492 | create | tenant_admin | - | - | allow | rbac-view-only-read |
+`
+
+const isolationFixture = `# Generated tenant-scoping oracle: isolation
+
+## Decisions
+
+| test id | stable id | reference | tenant case | expectation | invariants |
+|---|---|---|---|---|---|
+| O-TENANT-01 | TENANT-3d8e8e | ComplianceTask.person -> Person | same-tenant | allow | task-assignee-same-tenant |
+`
+
+// TestStableIDsIncludeFormalOracles: the formal decision tables under
+// design/formal/ carry a "stable id" column exactly like the transition
+// oracles, and machinery's Gt covers them, so pvg must key on them too.
+func TestStableIDsIncludeFormalOracles(t *testing.T) {
+	root := t.TempDir()
+	write(t, filepath.Join(root, "design", "domain.modelith.yaml"), "model: {}\n")
+	write(t, filepath.Join(root, "design", "machines", "Deal.oracle.md"), oracleFixture)
+	write(t, filepath.Join(root, "design", "formal", "Policy.oracle.md"), policyFixture)
+	write(t, filepath.Join(root, "design", "formal", "Isolation.oracle.md"), isolationFixture)
+	// a non-oracle formal artifact must not be picked up
+	write(t, filepath.Join(root, "design", "formal", "Policy.als"), "sig Policy {}\n")
+	cfg, _ := Load(root)
+
+	files, err := OracleFiles(root, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(files) != 3 {
+		t.Fatalf("expected 3 oracle files (1 machine + 2 formal), got %v", files)
+	}
+
+	ids, err := StableIDs(root, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{
+		"DEAL-eb0c40":   "machines/Deal.oracle.md",
+		"DEAL-38ba11":   "machines/Deal.oracle.md",
+		"AUTHZ-a0788c":  "formal/Policy.oracle.md",
+		"AUTHZ-805492":  "formal/Policy.oracle.md",
+		"TENANT-3d8e8e": "formal/Isolation.oracle.md",
+	}
+	if len(ids) != len(want) {
+		t.Fatalf("got %v", ids)
+	}
+	for id, rel := range want {
+		if ids[id] != rel {
+			t.Errorf("%s: got %q, want %q", id, ids[id], rel)
+		}
+	}
+
+	oracles, err := LoadOracles(root, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	byRel := map[string]Oracle{}
+	for _, o := range oracles {
+		byRel[o.Rel] = o
+	}
+	if o := byRel["formal/Policy.oracle.md"]; !o.Formal() || o.Kind != "authorization" || o.Name != "policy" {
+		t.Fatalf("Policy identity: %+v", o)
+	}
+	if o := byRel["formal/Isolation.oracle.md"]; o.Kind != "tenant-scoping" || o.Name != "isolation" {
+		t.Fatalf("Isolation identity: %+v", o)
+	}
+	if o := byRel["machines/Deal.oracle.md"]; o.Formal() || o.Name != "Deal" || o.Kind != "" {
+		t.Fatalf("Deal (no heading) identity: %+v", o)
+	}
+}
+
+func TestOracleSelectorsAndProseNaming(t *testing.T) {
+	root := t.TempDir()
+	write(t, filepath.Join(root, "design", "domain.modelith.yaml"), "model: {}\n")
+	write(t, filepath.Join(root, "design", "machines", "ErasureRequest.oracle.md"),
+		"# Generated transition oracle: `erasureRequest`\n\n"+oracleFixture)
+	write(t, filepath.Join(root, "design", "formal", "Policy.oracle.md"), policyFixture)
+	write(t, filepath.Join(root, "design", "formal", "Isolation.oracle.md"), isolationFixture)
+	cfg, _ := Load(root)
+	oracles, err := LoadOracles(root, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	find := func(rel string) Oracle {
+		for _, o := range oracles {
+			if o.Rel == rel {
+				return o
+			}
+		}
+		t.Fatalf("missing %s", rel)
+		return Oracle{}
+	}
+	erasure := find("machines/ErasureRequest.oracle.md")
+	policy := find("formal/Policy.oracle.md")
+	isolation := find("formal/Isolation.oracle.md")
+
+	for _, sel := range []string{"erasureRequest", "ErasureRequest", "ErasureRequest.oracle.md", "machines/ErasureRequest.oracle.md", "machines/ErasureRequest"} {
+		if !erasure.MatchesSelector(sel) {
+			t.Errorf("selector %q must match the ErasureRequest oracle", sel)
+		}
+	}
+	if erasure.MatchesSelector("Erasure") || erasure.MatchesSelector("") {
+		t.Error("partial or empty selectors must not match")
+	}
+	if !policy.MatchesSelector("policy") || !policy.MatchesSelector("formal/Policy") {
+		t.Error("formal selectors must resolve by name and path")
+	}
+
+	block := "ErasureRequest as the first lifecycle machine, conformant to its transition oracle; " +
+		"DoD: P-authz-oracle and T-isolation-oracle green over every row of their committed oracle files."
+	if !erasure.NamedIn(block) {
+		t.Error("a transition oracle is named by its machine name as a whole token")
+	}
+	if !policy.NamedIn(block) {
+		t.Error("P-authz-oracle names the Policy oracle through the authz kind alias")
+	}
+	if !policy.NamedIn("rows of Policy.oracle.md") || !policy.NamedIn("the authorization oracle is green") {
+		t.Error("the file name and the kind + oracle phrase both name the Policy oracle")
+	}
+	if !isolation.NamedIn(block) {
+		t.Error("T-isolation-oracle names the Isolation oracle")
+	}
+	prose := "the Ash policy decision core and tenant isolation posture, plus the ErasureRequests table"
+	if policy.NamedIn(prose) || isolation.NamedIn(prose) {
+		t.Error("bare prose words (policy, isolation) must not select formal oracles")
+	}
+	if erasure.NamedIn(prose) {
+		t.Error("ErasureRequests is not the whole token ErasureRequest")
 	}
 }
 

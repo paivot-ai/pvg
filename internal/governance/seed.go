@@ -4,6 +4,7 @@ package governance
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -186,6 +187,7 @@ func writeNote(vaultDir, relPath, content string, force bool, counters *Counters
 			}
 			fmt.Printf("  UPDATED: %s\n", relPath)
 			counters.Updated++
+			acknowledgeIntegrity(vaultDir, relPath)
 		} else {
 			fmt.Printf("  SKIP: %s (already exists)\n", relPath)
 			counters.Skipped++
@@ -205,6 +207,32 @@ func writeNote(vaultDir, relPath, content string, force bool, counters *Counters
 	}
 	fmt.Printf("  CREATED: %s\n", relPath)
 	counters.Created++
+	acknowledgeIntegrity(vaultDir, relPath)
+}
+
+// execCommand and lookPath are indirected so tests can observe the vlt
+// invocation without a real binary.
+var (
+	execCommand = exec.Command
+	lookPath    = exec.LookPath
+)
+
+// acknowledgeIntegrity re-registers a seeded note with vlt's integrity
+// tracker. pvg writes seed notes directly (it already holds the exclusive
+// vault lock and needs no vlt round-trip for a whole-file write), which the
+// tracker would otherwise report forever as "file modified outside vlt" -- a
+// false tamper signal on a note pvg itself owns, on every later `vlt read`.
+// Re-registering restores the signal's meaning: a mismatch then means a
+// genuine outside edit.
+//
+// Best effort by design: no vlt on PATH, or a vault with no integrity
+// baseline, is not a seeding failure and is never reported as one.
+func acknowledgeIntegrity(vaultDir, relPath string) {
+	if _, err := lookPath("vlt"); err != nil {
+		return
+	}
+	title := strings.TrimSuffix(filepath.Base(relPath), ".md")
+	_ = execCommand("vlt", "vault="+vaultDir, "integrity:acknowledge", "file="+title).Run()
 }
 
 // findAgentSource resolves the best source file for a given agent.
@@ -495,7 +523,9 @@ Post-D&F: Three-step backlog creation with structural gates and adversarial revi
      with all context embedded.
   2. Run structural gates (MANDATORY before Anchor submission):
      pvg rtm check    -- Verify all tagged D&F requirements have covering stories
-     pvg lint          -- Check for artifact collisions (duplicate PRODUCES)
+                         (on a machinery project also every oracle stable id, machines
+                         and formal; pvg rtm --milestone M<n> --epic <id> scopes it)
+     pvg lint --backlog -- Artifact collisions (duplicate PRODUCES) plus the structure checks
      Both must pass. If either fails, re-spawn Sr PM with the failure output.
      These are deterministic -- if they fail, the Anchor WILL reject for the
      same reason. Running them first saves a full Anchor round-trip.
@@ -556,6 +586,27 @@ When D&F is not needed (skip entirely):
   - User explicitly says they do not want D&F
   - The task is a simple bug fix, refactor, or well-defined small feature
   - All three D&F documents already exist and the user is asking for execution
+  - MACHINERY DESIGN EXISTS: the design substrate applies (the user set
+    pvg settings design.machinery to on, or auto on a machinery-managed repo)
+    and the design tree is complete (design/BUILD.md with its section 9 build
+    plan, the Architecture Contract in design/ARCHITECTURE.md, the oracles under
+    design/machines/ and design/formal/, machinery check design green).
+    BUSINESS.md, DESIGN.md, and ARCHITECTURE.md are NOT produced and no BLT agent
+    is spawned: the BA, Designer, and Architect paths are disabled, and the
+    Sr PM's ESCALATION_FOR_ARCHITECT route is disabled with them (a contract gap
+    is a design revision request relayed to the user, resolved through the
+    machinery revision protocol and then pvg story sync-oracle --base <ref>).
+    Spawn the Sr PM directly with the design tree and the PRD (docs/PRD.md or
+    equivalent) as its input: one milestone epic per each bold M<n> - title marker of
+    BUILD.md section 9 (created with pvg issues create --type epic, labeled
+    milestone), one child slice epic per plain-text slice of that milestone with
+    its demo sentence as the DoD, stories keyed on oracle stable ids whole-token
+    with the hard-tdd label, CONSUMES citing design/ARCHITECTURE.md sections.
+    Then the structural gates (pvg rtm, pvg rtm --milestone M<n> --epic <id>,
+    pvg lint --backlog) and the Anchor backlog review as usual.
+    The design tree is READ-ONLY for every delivery agent and for you while a
+    loop runs (the guard enforces it): never edit design/ to make a story or a
+    test fit.
 
 ## Related
 
