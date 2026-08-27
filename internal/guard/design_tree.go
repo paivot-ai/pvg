@@ -32,39 +32,64 @@ const designTreeArchitect = "paivot-graph:architect"
 // second return value reports whether the rule applied at all (the target
 // is under the design tree of a project where the substrate applies); when
 // it did not, the caller falls through to the ordinary D&F checks.
-func checkDesignTreeWrite(projectRoot, root string, state *dispatcher.State, target string) (Result, bool) {
+//
+// Milestone acceptance is the one exception, and it is held by path and by
+// content rather than by trusting a role with the whole tree: see
+// design_acceptance.go.
+func checkDesignTreeWrite(projectRoot, root string, state *dispatcher.State, intent designWriteIntent) (Result, bool) {
+	target := intent.abs
 	if target == "" || isFixturePath(target) {
 		return Result{Allowed: true}, false
 	}
 	cfg, _ := design.Load(root)
-	if !underDesignTree(root, projectRoot, cfg.Dir, target) {
+	rel, abs, under := designRelPath(root, projectRoot, cfg.Dir, target)
+	if !under {
 		return Result{Allowed: true}, false
 	}
 	sett := settings.LoadFile(filepath.Join(root, settingsPath))
 	if _, applies, _ := design.Applies(root, design.MachinerySetting(sett)); !applies {
 		return Result{Allowed: true}, false
 	}
+	intent.rel, intent.abs = rel, abs
 
 	if dispatcher.HasActiveAgentTypeAtPath(state, designTreeArchitect, projectRoot) {
 		return Result{Allowed: true}, true
 	}
 	if agentType := trackedAgentAtPath(state, projectRoot); agentType != "" {
-		return Result{Allowed: false, Reason: designTreeBlockMsg(cfg.Dir, "the "+strings.TrimPrefix(agentType, "paivot-graph:")+" agent")}, true
+		who := "the " + strings.TrimPrefix(agentType, "paivot-graph:") + " agent"
+		if agentType == designTreeAnchor {
+			if allowed, specific := acceptanceCarveOut(intent, false); allowed {
+				return Result{Allowed: true}, true
+			} else if specific != "" {
+				return Result{Allowed: false, Reason: acceptanceBlockMsg(cfg.Dir, who, specific)}, true
+			}
+		} else if underAcceptanceDir(intent.rel) {
+			return Result{Allowed: false, Reason: acceptanceBlockMsg(cfg.Dir, who,
+				"acceptance evidence is written by the reviewing Anchor at the milestone seal gate, never by a delivering role: a role that writes its own acceptance evidence has written its own report card.")}, true
+		}
+		return Result{Allowed: false, Reason: designTreeBlockMsg(cfg.Dir, who)}, true
 	}
 	if loop.IsActiveFrom(root) {
-		return Result{Allowed: false, Reason: designTreeBlockMsg(cfg.Dir, "the coordinator while an execution loop is active")}, true
+		who := "the coordinator while an execution loop is active"
+		if allowed, specific := acceptanceCarveOut(intent, true); allowed {
+			return Result{Allowed: true}, true
+		} else if specific != "" {
+			return Result{Allowed: false, Reason: acceptanceBlockMsg(cfg.Dir, who, specific)}, true
+		}
+		return Result{Allowed: false, Reason: designTreeBlockMsg(cfg.Dir, who)}, true
 	}
 	return Result{Allowed: true}, true
 }
 
-// underDesignTree reports whether target resolves inside <dir>/ of either
-// the orchestrator root or the caller's worktree (a checked-out design tree
-// is the design tree wherever the checkout lives). Relative targets resolve
-// against the caller's cwd (projectRoot).
-func underDesignTree(root, projectRoot, dir, target string) bool {
+// designRelPath resolves target against the design tree of either the
+// orchestrator root or the caller's worktree (a checked-out design tree is
+// the design tree wherever the checkout lives), returning the slash path
+// relative to that design directory and the absolute path it resolved to.
+// Relative targets resolve against the caller's cwd (projectRoot).
+func designRelPath(root, projectRoot, dir, target string) (string, string, bool) {
 	dir = strings.Trim(filepath.ToSlash(dir), "/")
 	if dir == "" {
-		return false
+		return "", "", false
 	}
 	abs := target
 	if !filepath.IsAbs(abs) {
@@ -80,11 +105,14 @@ func underDesignTree(root, projectRoot, dir, target string) bool {
 			continue
 		}
 		rel = filepath.ToSlash(rel)
-		if rel == dir || strings.HasPrefix(rel, dir+"/") {
-			return true
+		if rel == dir {
+			return "", abs, true
+		}
+		if inside, ok := strings.CutPrefix(rel, dir+"/"); ok {
+			return inside, abs, true
 		}
 	}
-	return false
+	return "", "", false
 }
 
 // trackedAgentAtPath returns the type of the first non-architect agent

@@ -61,7 +61,7 @@ func CheckDispatcher(projectRoot string, input HookInput) Result {
 
 	switch input.ToolName {
 	case "Edit", "Write":
-		return checkDFFilePath(projectRoot, root, state, input.ToolInput.FilePath)
+		return checkDFFilePath(projectRoot, root, state, input)
 	case "Bash":
 		if result := checkDFBashCommand(projectRoot, root, state, input.ToolInput.Command); !result.Allowed {
 			return result
@@ -72,14 +72,24 @@ func CheckDispatcher(projectRoot string, input HookInput) Result {
 	}
 }
 
-func checkDFFilePath(projectRoot, root string, state *dispatcher.State, filePath string) Result {
+func checkDFFilePath(projectRoot, root string, state *dispatcher.State, input HookInput) Result {
+	filePath := input.ToolInput.FilePath
 	if filePath == "" {
 		return Result{Allowed: true}
 	}
 
 	// The machinery design tree has its own rule (read-only for delivery
-	// agents); when it applies it decides the write outright.
-	if result, applied := checkDesignTreeWrite(projectRoot, root, state, filePath); applied {
+	// agents, with the milestone acceptance carve-out); when it applies it
+	// decides the write outright. The edit's own before/after text travels
+	// with it: the closure act is verified by content, not by role.
+	intent := designWriteIntent{
+		tool:      input.ToolName,
+		abs:       filePath,
+		oldString: input.ToolInput.OldString,
+		newString: input.ToolInput.NewString,
+		content:   input.ToolInput.Content,
+	}
+	if result, applied := checkDesignTreeWrite(projectRoot, root, state, intent); applied {
 		return result
 	}
 
@@ -109,7 +119,8 @@ func checkDFBashCommand(projectRoot, root string, state *dispatcher.State, comma
 	}
 
 	for _, target := range bashWriteTargets(command) {
-		if result, applied := checkDesignTreeWrite(projectRoot, root, state, target); applied {
+		intent := designWriteIntent{tool: "Bash", abs: target}
+		if result, applied := checkDesignTreeWrite(projectRoot, root, state, intent); applied {
 			if !result.Allowed {
 				return result
 			}
