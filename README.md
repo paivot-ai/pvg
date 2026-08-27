@@ -568,6 +568,27 @@ because a developer that "fixes" a failing oracle-derived test by editing the
 design breaks the chain every gate hangs on. Reads are never blocked, the
 Architect path stays open, and with the substrate off the rule does not exist.
 
+**Milestone acceptance is the one exception, and it is two writes wide.**
+machinery's Ga-accept gate holds milestone closure to committed evidence, so
+that discipline has to be executable inside the tree this rule closes. The
+guard allows exactly two writes, held by path and by content rather than by
+trusting a role with the tree:
+
+- the reviewing Anchor may write `<design>/acceptance/M<n>.yaml`: that exact
+  shape and nothing else under `acceptance/` (no `.yml`, no `M3-round2.yaml`,
+  no subdirectory, no README), with the Write or Edit tool;
+- the seal-gate coordinator may additionally edit a milestone's `Status:` line
+  in a plan-bearing document (`<design>/BUILD.md`, or a shard under
+  `<design>/BUILD/`, index files excluded). The write's own before and after
+  text is compared: one other changed line and it is blocked.
+
+Delivery roles never write acceptance evidence (a role that writes its own
+acceptance evidence has written its own report card), the Anchor never lands
+the closure marker, and shell writes to both paths stay blocked, because a
+command carries no reviewable before and after and `rm` over evidence is
+exactly what the rule exists to stop. Committing the files is unaffected: git
+is not a write utility this parser tracks.
+
 ### Vault seeding
 
 ```bash

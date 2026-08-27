@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/paivot-ai/vlt"
 
@@ -89,7 +90,9 @@ func SessionStart() error {
 	if strings.ContainsAny(project, " \t\"") {
 		searchQuery = `"` + strings.ReplaceAll(project, `"`, `\"`) + `"`
 	}
-	results, err := v.Search(vlt.SearchOptions{Query: searchQuery})
+	results, err := boundedSearch(vaultSearchTimeout, func() ([]vlt.SearchResult, error) {
+		return v.Search(vlt.SearchOptions{Query: searchQuery})
+	})
 	searchOutput := formatVaultSearchOutput(results, err)
 
 	fmt.Printf("[VAULT] Project: %s\nRelevant vault notes:\n\n%s\n\n", project, searchOutput)
@@ -105,6 +108,39 @@ func SessionStart() error {
 	fmt.Print(formatOperatingModeOutput(result.Content, err))
 
 	return nil
+}
+
+// vaultSearchTimeout bounds the vault search. The session-start hook must
+// never hang: Claude Code gives it 15 seconds, and a Makefile or a script
+// that calls it directly gives it forever. A vault search walks every note,
+// so an iCloud file that will not materialize blocks the walk in the kernel
+// with no error to report, and the whole session start stops behind it (field
+// finding: `pvg hook session-start` never returning, taking a plugin test
+// target down with it, while `vlt read` on the same vault answered instantly).
+// The channel nudge is bounded for exactly this reason; this closes the other
+// unbounded call on the path.
+const vaultSearchTimeout = 8 * time.Second
+
+// boundedSearch runs a vault search under a deadline and reports a stall as
+// an ordinary search error, which the formatter already degrades gracefully.
+// The goroutine may stay blocked in the stalled call: the send is buffered so
+// it cannot leak into a deadlock, and the hook process exits moments later.
+func boundedSearch(timeout time.Duration, search func() ([]vlt.SearchResult, error)) ([]vlt.SearchResult, error) {
+	type outcome struct {
+		results []vlt.SearchResult
+		err     error
+	}
+	done := make(chan outcome, 1)
+	go func() {
+		results, err := search()
+		done <- outcome{results: results, err: err}
+	}()
+	select {
+	case o := <-done:
+		return o.results, o.err
+	case <-time.After(timeout):
+		return nil, fmt.Errorf("vault search exceeded %s and was abandoned; the vault is stalled (an iCloud file that will not materialize is the usual cause)", timeout)
+	}
 }
 
 func formatVaultSearchOutput(results []vlt.SearchResult, err error) string {

@@ -41,11 +41,18 @@ type HookInput struct {
 	ToolInput ToolInput `json:"tool_input"`
 }
 
-// ToolInput contains the parameters of the tool being called.
+// ToolInput contains the parameters of the tool being called. OldString,
+// NewString, and Content carry the write's own before and after text: the
+// milestone acceptance carve-out (design_acceptance.go) verifies that a
+// closure act changes nothing but a milestone's Status: line, which is a
+// claim about content, not about who is writing.
 type ToolInput struct {
 	FilePath        string `json:"file_path"`
 	Command         string `json:"command"`
 	RunInBackground bool   `json:"run_in_background"`
+	OldString       string `json:"old_string"`
+	NewString       string `json:"new_string"`
+	Content         string `json:"content"`
 }
 
 // ProtectedFolders are vault subdirectories that require proposal workflow.

@@ -63,8 +63,19 @@ func TestDesignTreeIsReadOnlyForDeliveryAgents(t *testing.T) {
 				if result.Allowed {
 					t.Fatalf("%s must not write %s", agent, target)
 				}
-				if !strings.Contains(result.Reason, "read-only") || !strings.Contains(result.Reason, "DESIGN DEFECT") {
-					t.Errorf("block message must explain the rule: %s", result.Reason)
+				if !strings.Contains(result.Reason, "read-only") {
+					t.Errorf("block message must name the rule: %s", result.Reason)
+				}
+				// A target adjacent to the milestone acceptance carve-out
+				// (here: the build plan, whose Status line is the
+				// coordinator's closure act) is refused with the carve-out's
+				// own rule; everything else with the general one.
+				want := "DESIGN DEFECT"
+				if agent == "paivot-graph:anchor" && target == "design/BUILD.md" {
+					want = "acceptance/M<n>.yaml"
+				}
+				if !strings.Contains(result.Reason, want) {
+					t.Errorf("block message must explain the rule (%q): %s", want, result.Reason)
 				}
 			})
 		}
