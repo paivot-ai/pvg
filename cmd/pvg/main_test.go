@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -133,6 +134,84 @@ func captureStdout(t *testing.T, fn func()) string {
 		t.Fatalf("read captured stdout: %v", err)
 	}
 	return string(data)
+}
+
+func writeVerifyFixture(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "main.go")
+	code := `package main
+
+import "fmt"
+
+func main() {
+	fmt.Println("one")
+	fmt.Println("two")
+	fmt.Println("three")
+	fmt.Println("four")
+	fmt.Println("five")
+	fmt.Println("six")
+	fmt.Println("seven")
+	fmt.Println("eight")
+	fmt.Println("nine")
+	fmt.Println("ten")
+}
+`
+	if err := os.WriteFile(path, []byte(code), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func TestRunVerifyFormatFlagForms(t *testing.T) {
+	path := writeVerifyFixture(t)
+
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{name: "default", args: []string{path}},
+		{name: "separated", args: []string{path, "--format", "text"}},
+		{name: "equals", args: []string{path, "--format=text"}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			output := captureStdout(t, func() {
+				if err := runVerify(test.args); err != nil {
+					t.Errorf("runVerify(%v) error = %v", test.args, err)
+				}
+			})
+			if !strings.Contains(output, "VERIFY: PASSED (1 files scanned, 0 issues)") {
+				t.Fatalf("unexpected text output: %q", output)
+			}
+		})
+	}
+}
+
+func TestRunVerifyFormatJSON(t *testing.T) {
+	path := writeVerifyFixture(t)
+
+	output := captureStdout(t, func() {
+		if err := runVerify([]string{path, "--format=json"}); err != nil {
+			t.Errorf("runVerify --format=json error = %v", err)
+		}
+	})
+	var result struct {
+		Passed       bool `json:"passed"`
+		FilesScanned int  `json:"files_scanned"`
+	}
+	if err := json.Unmarshal([]byte(output), &result); err != nil {
+		t.Fatalf("expected valid JSON, got %q: %v", output, err)
+	}
+	if !result.Passed || result.FilesScanned != 1 {
+		t.Fatalf("unexpected JSON result: %+v from %q", result, output)
+	}
+}
+
+func TestRunVerifyRejectsInvalidEqualsFormat(t *testing.T) {
+	err := runVerify([]string{"README.md", "--format=yaml"})
+	if err == nil || !strings.Contains(err.Error(), "--format must be text or json") {
+		t.Fatalf("expected invalid format error, got %v", err)
+	}
 }
 
 // writeActiveLoopState writes an active loop state at root.
