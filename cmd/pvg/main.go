@@ -2029,6 +2029,13 @@ func runVerify(args []string) error {
 	var paths []string
 
 	for i := 0; i < len(args); i++ {
+		if value, ok := strings.CutPrefix(args[i], "--format="); ok {
+			if value != "text" && value != "json" {
+				return fmt.Errorf("--format must be text or json")
+			}
+			format = value
+			continue
+		}
 		switch args[i] {
 		case "--help", "-h":
 			fmt.Fprintln(os.Stderr, `pvg verify -- scan source files for quality issues
