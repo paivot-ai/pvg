@@ -1399,10 +1399,10 @@ func loopNext(cwd string, args []string) error {
 // autoSyncBacklog runs a full `nd sync` against the resolved vault. Returns a
 // one-line stderr breadcrumb, or "" when the vault cannot be resolved --
 // best-effort, never fatal to the loop.
-func autoSyncBacklog(projectRoot string) string {
+func autoSyncBacklog(projectRoot string) (breadcrumb string) {
 	vaultDir, err := ndvault.Resolve(projectRoot)
 	if err != nil {
-		return ""
+		return
 	}
 	out, err := ndsync.GitSync(vaultDir)
 	if err != nil {
@@ -1832,8 +1832,8 @@ artifact (file path) claimed by more than one story.
 
 --backlog runs the artifact-collision check PLUS all backlog structure
 checks: walking-skeleton, capstone, mandatory-skills, consumes-signature,
-consumes-produces, stale-refs, external-integration, atomicity,
-vertical-slice, duplicate-sections, hard-tdd-oracle (when the machinery
+consumes-produces, stale-refs, external-integration, acceptance-criteria,
+atomicity, vertical-slice, duplicate-sections, hard-tdd-oracle (when the machinery
 design substrate applies -- user opt-in via design.machinery, default off:
 stories citing oracle stable ids must carry the hard-tdd label), dep-cycles,
 release-gate, and paths-exist (brownfield only).

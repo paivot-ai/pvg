@@ -23,6 +23,7 @@ func TestTransitionDeliverUsesSharedNDFlow(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(vault, ".nd.yaml"), []byte("vault: ok\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	writeIssue(t, vault, "PROJ-a1b2", "---\ntitle: Test\nstatus: in_progress\n---\n\n## Acceptance Criteria\n- [ ] The command returns proof.\n")
 	if err := os.Setenv("ND_VAULT_DIR", vault); err != nil {
 		t.Fatal(err)
 	}
@@ -319,6 +320,9 @@ status: in_progress
 labels: [delivered]
 ---
 
+## Acceptance Criteria
+- [ ] The command returns proof.
+
 ## Implementation Evidence
 ### CI/Test Results
 Commands run:
@@ -354,6 +358,9 @@ title: Test
 status: in_progress
 labels: [delivered]
 ---
+
+## Acceptance Criteria
+- [ ] The command returns proof.
 
 ## Implementation Evidence
 ### Test Results
@@ -479,6 +486,9 @@ status: in_progress
 labels: [delivered]
 ---
 
+## Acceptance Criteria
+- [ ] The command returns proof.
+
 ## Implementation Evidence
 ### CI/Test Results
 Commands run:
@@ -523,6 +533,7 @@ func TestTransitionAcceptWarnsWhenNextStoryCannotStart(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(vault, ".nd.yaml"), []byte("vault: ok\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	writeIssue(t, vault, "PROJ-a1b2", "---\ntitle: Test\nstatus: in_progress\nlabels: [delivered]\n---\n\n## Acceptance Criteria\n- [ ] The command returns proof.\n")
 	if err := os.Setenv("ND_VAULT_DIR", vault); err != nil {
 		t.Fatal(err)
 	}
@@ -570,6 +581,7 @@ func TestTransitionAcceptFailsBeforeMutationWhenNextStoryMissing(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(vault, ".nd.yaml"), []byte("vault: ok\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	writeIssue(t, vault, "PROJ-a1b2", "---\ntitle: Test\nstatus: in_progress\nlabels: [delivered]\n---\n\n## Acceptance Criteria\n- [ ] The command returns proof.\n")
 	if err := os.Setenv("ND_VAULT_DIR", vault); err != nil {
 		t.Fatal(err)
 	}
@@ -752,6 +764,9 @@ func setupIssueEnv(t *testing.T, vault string) {
 
 func writeIssue(t *testing.T, vault, storyID, content string) {
 	t.Helper()
+	if err := os.MkdirAll(filepath.Join(vault, "issues"), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(filepath.Join(vault, "issues", storyID+".md"), []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}

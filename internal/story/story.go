@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/paivot-ai/pvg/internal/guard"
+	"github.com/paivot-ai/pvg/internal/lint"
 	"github.com/paivot-ai/pvg/internal/loop"
 	"github.com/paivot-ai/pvg/internal/ndvault"
 )
@@ -117,6 +118,9 @@ func Transition(projectRoot, action, storyID string, opts TransitionOptions) (st
 			return "", err
 		}
 	case "deliver":
+		if err := validateFormalAcceptanceCriteria(projectRoot, storyID); err != nil {
+			return "", err
+		}
 		if err := runND(projectRoot, "update", storyID, "--status=in_progress"); err != nil {
 			return "", err
 		}
@@ -132,6 +136,9 @@ func Transition(projectRoot, action, storyID string, opts TransitionOptions) (st
 			return "", err
 		}
 	case "accept":
+		if err := validateFormalAcceptanceCriteria(projectRoot, storyID); err != nil {
+			return "", err
+		}
 		if opts.NextStory != "" {
 			if _, err := outputND(projectRoot, "show", opts.NextStory); err != nil {
 				return "", fmt.Errorf("next story not found: %s", opts.NextStory)
@@ -294,9 +301,20 @@ func VerifyDelivery(projectRoot, storyID string) (*DeliveryReport, error) {
 	if err != nil {
 		return nil, err
 	}
+	formalAC := lint.ValidateFormalAcceptanceCriteria(storyID, content)
+	if formalAC != nil && doc.Status == "closed" && hasLabel(doc.Labels, "accepted") {
+		if typed, ok := formalAC.(*lint.FormalAcceptanceError); ok {
+			typed.Legacy = true
+		}
+	}
 
 	report := &DeliveryReport{StoryID: storyID}
 	report.add("label:delivered", hasLabel(doc.Labels, "delivered"), "missing 'delivered' label")
+	formalACMessage := ""
+	if formalAC != nil {
+		formalACMessage = formalAC.Error()
+	}
+	report.add("formal:acceptance_criteria", formalAC == nil, formalACMessage)
 
 	status, eof := validateAuthoritativeContract(content)
 	report.add("nd_contract:last_block", status == "delivered", "authoritative contract is not delivered")
@@ -310,6 +328,14 @@ func VerifyDelivery(projectRoot, storyID string) (*DeliveryReport, error) {
 	report.add("proof:ac_items", regexp.MustCompile(`(?m)(^\[x\] AC|^### AC Verification$)`).MatchString(content), "missing AC verification (checklist or table)")
 
 	return report, nil
+}
+
+func validateFormalAcceptanceCriteria(projectRoot, storyID string) error {
+	content, err := issueContent(projectRoot, storyID)
+	if err != nil {
+		return err
+	}
+	return lint.ValidateFormalAcceptanceCriteria(storyID, content)
 }
 
 func (r *DeliveryReport) add(name string, ok bool, failMsg string) {
