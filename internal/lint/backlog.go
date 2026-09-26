@@ -93,14 +93,15 @@ var checkRank = map[string]int{
 	"consumes-produces":      5,
 	"stale-refs":             6,
 	"external-integration":   7,
-	"atomicity":              8,
-	"vertical-slice":         9,
-	"duplicate-sections":     10,
-	"hard-tdd-oracle":        11,
-	"hard-tdd-preauthorized": 12,
-	"dep-cycles":             13,
-	"release-gate":           14,
-	"paths-exist":            15,
+	"acceptance-criteria":    8,
+	"atomicity":              9,
+	"vertical-slice":         10,
+	"duplicate-sections":     11,
+	"hard-tdd-oracle":        12,
+	"hard-tdd-preauthorized": 13,
+	"dep-cycles":             14,
+	"release-gate":           15,
+	"paths-exist":            16,
 }
 
 // scope restricts story-level and epic-level checks when --epic is given.
@@ -148,6 +149,7 @@ func CheckBacklog(opts BacklogOptions) (BacklogResult, error) {
 	findings = append(findings, checkConsumesProduces(b, sc)...)
 	findings = append(findings, checkStaleRefs(b, sc)...)
 	findings = append(findings, checkExternalIntegration(b, sc)...)
+	findings = append(findings, checkFormalAcceptanceCriteria(b, sc)...)
 	findings = append(findings, checkAtomicity(b, sc)...)
 	findings = append(findings, checkVerticalSlice(b, sc)...)
 	findings = append(findings, checkDuplicateSections(b, sc)...)
@@ -402,10 +404,10 @@ func isSignatureLine(trimmed string) bool {
 }
 
 // ndConfigPrefix reads the prefix key from the vault's .nd.yaml.
-func ndConfigPrefix(vaultDir string) string {
+func ndConfigPrefix(vaultDir string) (prefix string) {
 	data, err := os.ReadFile(filepath.Join(vaultDir, ".nd.yaml"))
 	if err != nil {
-		return ""
+		return
 	}
 	for _, line := range strings.Split(string(data), "\n") {
 		parts := strings.SplitN(line, ":", 2)
@@ -416,7 +418,7 @@ func ndConfigPrefix(vaultDir string) string {
 			return strings.Trim(strings.TrimSpace(parts[1]), `"'`)
 		}
 	}
-	return ""
+	return
 }
 
 // detectPrefix returns the project issue-ID prefix: the .nd.yaml prefix when
@@ -980,11 +982,194 @@ func checkExternalIntegration(b *Backlog, sc scope) []Finding {
 const maxAcceptanceCriteria = 12
 
 var (
-	acHeadingRe   = regexp.MustCompile(`(?i)^#{1,6}\s*acceptance criteria\b`)
-	mdHeadingRe   = regexp.MustCompile(`^#{1,6}\s`)
-	numberedACRe  = regexp.MustCompile(`^\s*\d+[.)]`)
-	bundledTitles = []string{" and ", " / "}
+	acHeadingRe     = regexp.MustCompile(`(?i)^#{1,6}[ \t]*acceptance criteria[ \t]*$`)
+	mdHeadingRe     = regexp.MustCompile(`^#{1,6}[ \t]`)
+	numberedACRe    = regexp.MustCompile(`^\s*\d+[.)]`)
+	acItemRe        = regexp.MustCompile(`^(?:[-*+]|(?:[0-9]+[.)]))[ \t]+(?:\[[ xX]\][ \t]+)?(.+)$`)
+	placeholderACRe = regexp.MustCompile(`(?i)^(?:tbd|todo|n/a|na|none|placeholder|pending|to be determined|define (?:the )?acceptance criteria|fill in (?:the )?criteria|\.\.\.*|…)[.:-]*$`)
+	bundledTitles   = []string{" and ", " / "}
 )
+
+// FormalAcceptanceSection is the only heading shape accepted as a story's
+// authoritative contract. Nd owns this canonical section; authored variants are
+// diagnostics rather than silent substitutes.
+const FormalAcceptanceSection = "## Acceptance Criteria"
+
+// FormalAcceptanceCode identifies the concrete validation failure. It is stable
+// CLI-facing diagnostic vocabulary, not an internal sentinel.
+type FormalAcceptanceCode string
+
+const (
+	FormalACMissing          FormalAcceptanceCode = "missing_section"
+	FormalACBlank            FormalAcceptanceCode = "blank_section"
+	FormalACPlaceholder      FormalAcceptanceCode = "placeholder_only"
+	FormalACItemsMalformed   FormalAcceptanceCode = "items_malformed"
+	FormalACHeadingMalformed FormalAcceptanceCode = "heading_malformed"
+	FormalACDuplicate        FormalAcceptanceCode = "duplicate_section"
+)
+
+// FormalAcceptanceError is a typed, story-specific validation failure. Delivery
+// verification, transitions, and lint render the same fields so a rejection is
+// actionable at whichever gate observes it first.
+type FormalAcceptanceError struct {
+	StoryID string
+	Section string
+	Code    FormalAcceptanceCode
+	Reason  string
+	Found   string
+	Repair  string
+	Legacy  bool
+}
+
+func (e *FormalAcceptanceError) Error() string {
+	legacy := ""
+	if e.Legacy {
+		legacy = " (legacy accepted record; not rewritten)"
+	}
+	found := ""
+	if e.Found != "" {
+		found = " (" + e.Found + ")"
+	}
+	return fmt.Sprintf(
+		"%s: formal acceptance criteria section %q %s%s; repair: %s%s",
+		e.StoryID, e.Section, e.Reason, found, e.Repair, legacy,
+	)
+}
+
+func formalACError(storyID string, code FormalAcceptanceCode, reason, found, repair string) error {
+	return &FormalAcceptanceError{
+		StoryID: storyID,
+		Section: FormalAcceptanceSection,
+		Code:    code,
+		Reason:  reason,
+		Found:   found,
+		Repair:  repair,
+	}
+}
+
+// ValidateFormalAcceptanceCriteria fails closed when the formal nd section is
+// absent, malformed, duplicated, blank, or placeholder-only. Informal AC tables
+// in Description or delivery notes are deliberately not consulted.
+func ValidateFormalAcceptanceCriteria(storyID, body string) error {
+	var exact, near int
+	inSection := false
+	var section []string
+	for _, line := range strings.Split(body, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if line == FormalAcceptanceSection {
+			exact++
+			if !inSection {
+				inSection = true
+				continue
+			}
+		}
+		if acHeadingRe.MatchString(trimmed) {
+			near++
+		}
+		if inSection {
+			if trimmed == FormalAcceptanceSection && len(section) == 0 {
+				continue
+			}
+			if trimmed != FormalAcceptanceSection && mdHeadingRe.MatchString(trimmed) {
+				// H1/H2 sections are siblings in the nd body. Deeper authored
+				// headings remain section content, but a second canonical-looking
+				// AC heading is counted as a near-heading above.
+				if strings.HasPrefix(trimmed, "#") && !strings.HasPrefix(trimmed, "###") {
+					break
+				}
+			}
+			section = append(section, line)
+		}
+	}
+
+	switch {
+	case exact == 0 && near > 0:
+		return formalACError(storyID, FormalACHeadingMalformed,
+			"uses a non-canonical heading shape",
+			fmt.Sprintf("found %d near-miss heading(s)", near),
+			"use exactly one literal "+FormalAcceptanceSection+" heading",
+		)
+	case exact == 0:
+		return formalACError(storyID, FormalACMissing,
+			"is missing",
+			"",
+			"add exactly one "+FormalAcceptanceSection+" section with at least one concrete checkbox or numbered item",
+		)
+	case exact > 1 || near > 1:
+		return formalACError(storyID, FormalACDuplicate,
+			"is duplicated or ambiguous",
+			fmt.Sprintf("found %d canonical and %d case/level-insensitive heading(s)", exact, near),
+			"keep exactly one "+FormalAcceptanceSection+" section",
+		)
+	}
+
+	contents := strings.Join(section, "\n")
+	if strings.TrimSpace(contents) == "" {
+		return formalACError(storyID, FormalACBlank,
+			"is blank",
+			"",
+			"add at least one concrete, testable checkbox or numbered item to "+FormalAcceptanceSection,
+		)
+	}
+
+	items := 0
+	concrete := 0
+	placeholders := 0
+	for _, line := range strings.Split(contents, "\n") {
+		match := acItemRe.FindStringSubmatch(strings.TrimLeft(line, " \t"))
+		if match == nil {
+			continue
+		}
+		items++
+		if isPlaceholderAC(match[1]) {
+			placeholders++
+			continue
+		}
+		concrete++
+	}
+
+	switch {
+	case items == 0:
+		return formalACError(storyID, FormalACItemsMalformed,
+			"has no checkbox or numbered AC items",
+			"",
+			"write each criterion as a concrete checkbox or numbered item",
+		)
+	case concrete == 0 && placeholders > 0:
+		return formalACError(storyID, FormalACPlaceholder,
+			"contains only placeholder items",
+			fmt.Sprintf("found %d placeholder item(s)", placeholders),
+			"replace every placeholder with a concrete, testable criterion",
+		)
+	}
+	return nil
+}
+
+func isPlaceholderAC(item string) bool {
+	trimmed := strings.ToLower(strings.TrimSpace(strings.Trim(item, "`")))
+	return trimmed == "" || placeholderACRe.MatchString(trimmed) ||
+		(strings.HasPrefix(trimmed, "<") && strings.HasSuffix(trimmed, ">")) ||
+		(strings.HasPrefix(trimmed, "[") && strings.HasSuffix(trimmed, "]"))
+}
+
+func checkFormalAcceptanceCriteria(b *Backlog, sc scope) []Finding {
+	var findings []Finding
+	for _, issue := range b.ordered {
+		if isClosed(issue) || !isStoryOrBug(issue) || !sc.storyInScope(issue.ID) {
+			continue
+		}
+		if err := ValidateFormalAcceptanceCriteria(issue.ID, issue.Body); err != nil {
+			message := strings.TrimPrefix(err.Error(), issue.ID+": ")
+			findings = append(findings, Finding{
+				Check:    "acceptance-criteria",
+				Severity: SeverityError,
+				IssueID:  issue.ID,
+				Message:  message,
+			})
+		}
+	}
+	return findings
+}
 
 func checkAtomicity(b *Backlog, sc scope) []Finding {
 	var findings []Finding
